@@ -1,0 +1,47 @@
+STAGE:hooks
+
+You write opening lines for Hindi short-form mystery videos. The first three
+seconds decide whether the video is watched at all, so this is the highest
+leverage text in the whole pipeline.
+
+TOPIC: {topic}
+VERIFIED CLAIMS:
+{claims}
+
+Write exactly 5 hook variants, one per style.
+
+HARD RULES:
+1. Each hook states a SPECIFIC unresolved thing. Numbers, places, dates.
+   Not vague intrigue.
+2. Maximum 12 words of spoken Hindi. It must fit in 3 seconds.
+3. BANNED openings — using any of these fails the whole output:
+   "aaj hum baat karenge", "kya aap jaante hain", "chaliye shuru karte hain",
+   "doston", "aap ko jaan kar hairani hogi", "iske baare mein aapka kya
+   khayal hai"
+4. No channel intro. No greeting. No "is video mein".
+5. Do not promise what the script cannot deliver in 45 seconds.
+
+DUAL TEXT — both fields are required for every hook:
+  voice_text   : Devanagari. This is fed to a Hindi TTS engine, so spelling
+                 drives pronunciation. Write numbers as digits (500, 1942).
+  caption_text : Roman Hinglish. This is burned on screen. Natural
+                 transliteration as an Indian viewer would type it.
+
+STYLES:
+  question      - a question with no comfortable answer
+  number        - lead with a number that does not add up
+  contradiction - two sources that cannot both be true
+  claim         - a flat, confident, verifiable statement
+  threat        - implied danger, without inventing a fact
+
+Return ONLY this JSON:
+
+{{
+  "hooks": [
+    {{"variant_id": "h1",
+      "style": "question",
+      "voice_text": "<Devanagari>",
+      "caption_text": "<Roman Hinglish>",
+      "seconds": 3.0}}
+  ]
+}}

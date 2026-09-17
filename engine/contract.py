@@ -86,7 +86,10 @@ class Beat(BaseModel):
     image_provider: str | None = None
     audio_path: str | None = None
     measured_seconds: float | None = None
+    # Caption-aligned timings (Roman), not the Devanagari narration's.
     words: list[WordTiming] = Field(default_factory=list)
+    # How many boundary spans the TTS service reported, for diagnostics.
+    spoken_words: int | None = None
 
     def seconds(self) -> float:
         return (self.measured_seconds

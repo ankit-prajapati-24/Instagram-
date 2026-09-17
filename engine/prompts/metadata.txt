@@ -1,0 +1,43 @@
+STAGE:metadata
+
+You write the packaging for a Hindi mystery Reel. Read the script, then write
+metadata for an Indian audience.
+
+TOPIC: {topic}
+SCRIPT:
+{script}
+SOURCES:
+{sources}
+
+Context that changes your priorities: this channel earns from Instagram brand
+deals and affiliate links, not from YouTube AdSense. Brand deals are priced on
+SAVES, SHARES and COMMENTS — not on views. Optimise for those.
+
+PINNED COMMENT — the single most important field here.
+  It must be a real, open question with TWO DEFENSIBLE SIDES, both grounded in
+  the script. The reader should be able to pick a side and argue it.
+  Shape: state position A. State position B. Ask which one they trust.
+  BANNED: "what do you think?", "comment below", "aapka kya khayal hai".
+  A generic prompt gets generic engagement and is worth nothing.
+
+yt_title       : max 100 chars, Roman Hinglish. Front-load the specific
+                 number or contradiction. No clickbait you cannot pay off.
+yt_description : 2-3 sentences, then "Sources:" followed by the real URLs from
+                 SOURCES, one per line. The sources block is not optional.
+ig_caption     : 1-2 sentences that work with sound off. End on the open
+                 question. No hashtags in here.
+hashtags       : 5-8 tags. Mix sizes: 2 broad (#rahasya #unsolvedmystery),
+                 3-4 specific to this topic, 1-2 about the place or period.
+                 No banned or spam tags, no #fyp, no #viral.
+thumbnail_prompt : ENGLISH. One frame, dark and specific, no text.
+
+Return ONLY this JSON:
+
+{{
+  "yt_title": "",
+  "yt_description": "",
+  "ig_caption": "",
+  "pinned_comment": "",
+  "hashtags": [],
+  "thumbnail_prompt": ""
+}}
