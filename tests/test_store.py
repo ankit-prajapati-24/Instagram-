@@ -42,11 +42,34 @@ def test_costs_accumulate_per_plan_and_per_day(store):
     assert store.today_usd() == pytest.approx(0.03)
 
 
-def test_hash_exists_detects_exact_repeat(store):
+def test_hash_exists_only_counts_plans_that_became_videos(store):
     plan = make_plan()
     assert store.hash_exists(plan.topic.dedupe_hash) is False
-    store.save_plan(plan, status="draft")
-    assert store.hash_exists(plan.topic.dedupe_hash) is True
+
+    for status in ("draft", "awaiting_approval", "rejected_moderation",
+                   "rejected_dedup", "qc_failed"):
+        store.save_plan(plan, status=status)
+        assert store.hash_exists(plan.topic.dedupe_hash) is False, status
+
+    for status in ("approved", "produced", "published"):
+        store.save_plan(plan, status=status)
+        assert store.hash_exists(plan.topic.dedupe_hash) is True, status
+
+
+def test_published_slugs_excludes_rejected_plans(store):
+    store.save_plan(make_plan(plan_id="p1", raw="alpha topic"),
+                    status="produced")
+    store.save_plan(make_plan(plan_id="p2", raw="bravo topic"),
+                    status="rejected_moderation")
+    assert store.published_slugs() == ["alpha-topic"]
+
+
+def test_plan_status_roundtrip(store):
+    store.save_plan(make_plan(), status="awaiting_approval")
+    assert store.plan_status("p1") == "awaiting_approval"
+    store.set_status("p1", "approved")
+    assert store.plan_status("p1") == "approved"
+    assert store.plan_status("missing") is None
 
 
 def test_entity_cooldown_is_case_insensitive(store):

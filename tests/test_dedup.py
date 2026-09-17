@@ -54,7 +54,7 @@ def test_fresh_topic_passes_all_layers(store):
 
 def test_exact_repeat_fails_on_layer_one(store):
     plan = make_plan()
-    store.save_plan(plan, status="draft")
+    store.save_plan(plan, status="produced")
     result = check(plan.topic, store)
     assert not result.passed
     assert result.layer == "exact"
@@ -62,10 +62,32 @@ def test_exact_repeat_fails_on_layer_one(store):
 
 def test_reworded_topic_fails_on_trigram(store):
     store.save_plan(make_plan(raw="Roopkund jheel ke kankaal"),
-                    status="draft")
+                    status="produced")
     result = check(Topic.make("kankaal ke Roopkund jheel"), store)
     assert not result.passed
     assert result.layer == "trigram"
+
+
+def test_a_gate_rejected_topic_can_be_retried(store):
+    """Rejections stay for the audit trail; they must not block a retry.
+
+    Counting every row made a topic that failed the moderation gate
+    permanently un-retryable, reported as "slug already produced".
+    """
+    plan = make_plan()
+    store.save_plan(plan, status="rejected_moderation")
+    assert check(plan.topic, store).passed
+
+    store.save_plan(make_plan(plan_id="p2", raw="Bhangarh fort ka raaz"),
+                    status="rejected_dedup")
+    assert check(Topic.make("Bhangarh fort ka raaz"), store).passed
+
+
+def test_a_draft_does_not_block_its_own_topic(store):
+    """A plan still awaiting approval has not produced anything yet."""
+    plan = make_plan()
+    store.save_plan(plan, status="awaiting_approval")
+    assert check(plan.topic, store).passed
 
 
 def test_semantic_layer_catches_different_wording(store):

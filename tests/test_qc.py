@@ -54,17 +54,44 @@ def test_missing_dual_text_is_hard_failure():
     assert "dual_text" in run_qc(plan).to_dict()["hard_failures"]
 
 
-def test_optional_checks_are_skipped_when_not_supplied():
+def test_self_measuring_checks_are_gone():
+    """silence_gap and word_alignment measured their own interpolated input.
+
+    Caption timings are spread across each beat's measured span, so they are
+    contiguous and complete by construction: the gap was always 0.00s and the
+    alignment always 100%. Two hard-fails that could not fail, standing in for
+    the A/V sync check below that actually catches drift.
+    """
     names = {c["name"] for c in run_qc(make_plan()).to_dict()["checks"]}
     assert "silence_gap" not in names
     assert "word_alignment" not in names
 
 
-def test_optional_checks_fire_when_supplied():
-    sc = run_qc(make_plan(), max_silence_gap=1.9, word_alignment=0.5)
-    hard = sc.to_dict()["hard_failures"]
-    assert "silence_gap" in hard
-    assert "word_alignment" in hard
+def test_av_sync_catches_a_truncated_narration():
+    plan = make_plan(beats=10, measured=5.0)   # 50s of voice
+    sc = run_qc(plan, actual_duration=45.5, narration_seconds=50.0)
+    assert not sc.passed
+    assert "av_sync" in sc.to_dict()["hard_failures"]
+    detail = next(c.detail for c in sc.checks if c.name == "av_sync")
+    assert "drift 4.50s" in detail
+
+
+def test_av_sync_passes_when_the_timelines_agree():
+    plan = make_plan(beats=10, measured=4.4)
+    assert run_qc(plan, actual_duration=44.0,
+                  narration_seconds=44.0).passed
+
+
+def test_av_sync_tolerates_sub_frame_rounding():
+    plan = make_plan(beats=10, measured=4.4)
+    assert run_qc(plan, actual_duration=44.03,
+                  narration_seconds=44.0).passed
+
+
+def test_av_sync_is_skipped_without_a_render():
+    names = {c["name"] for c in
+             run_qc(make_plan(), narration_seconds=44.0).to_dict()["checks"]}
+    assert "av_sync" not in names
 
 
 def test_scorecard_serialises_for_the_ui():

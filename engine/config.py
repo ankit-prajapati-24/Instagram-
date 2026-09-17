@@ -23,8 +23,16 @@ def _resolve_ffmpeg() -> str:
         import imageio_ffmpeg
 
         return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        return "ffmpeg"
+    except Exception as exc:  # pragma: no cover - install problem, not logic
+        # Deliberately not falling back to a bare "ffmpeg" on PATH. Caption
+        # rendering needs a build with libass + libharfbuzz, and silently
+        # using whatever is on PATH produces videos with broken or missing
+        # subtitles instead of an error.
+        raise RuntimeError(
+            "no ffmpeg available: imageio-ffmpeg failed to load "
+            f"({exc}). Install it with `pip install imageio-ffmpeg`, or set "
+            "RAHASYA_FFMPEG to a build with libass and libharfbuzz."
+        ) from exc
 
 
 def _env_path(name: str, default: Path) -> Path:

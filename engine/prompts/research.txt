@@ -21,6 +21,11 @@ Produce the factual spine for a 45-second video. Rules:
 5. No invented dates, body counts, or quotes. A wrong number is a policy
    problem, not a style problem.
 
+6. List the named entities this topic is *about* — the specific place,
+   person, structure or organisation. Not generic nouns. These block the same
+   subject being covered again for 45 days, so be precise: "Roopkund",
+   "Uttarakhand", not "lake" or "India".
+
 Return ONLY this JSON:
 
 {{
@@ -30,5 +35,6 @@ Return ONLY this JSON:
       "source_url": "<real URL>",
       "confidence": "high|medium|low"}}
   ],
-  "searched_queries": ["<query you would run to verify this>"]
+  "searched_queries": ["<query you would run to verify this>"],
+  "entities": ["<specific named place/person/structure>"]
 }}

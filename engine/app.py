@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from engine.config import Settings
-from engine.contract import Beat, ReelPlan
+from engine.contract import Beat, Motion, Transition
 from engine.omniroute import OmniRouteClient
 from engine.pipeline import (BudgetError, GateError, PipelineEvent,
                              Stage, plan_stage, produce_stage)
@@ -42,13 +42,22 @@ class PlanRequest(BaseModel):
 
 
 class BeatEdit(BaseModel):
+    """A human's edit to one beat.
+
+    motion and transition are the contract's Literals, not plain strings.
+    They used to be `str`, and pydantic v2's `model_copy(update=...)` does not
+    validate, so posting {"motion": "spin"} stored an unparseable plan: every
+    later read of it raised ValidationError, giving a 500 on that plan forever
+    with no repair path.
+    """
+
     beat_id: str
     voice_text: str
     caption_text: str
     on_screen_text: str | None = None
     visual_prompt: str
-    motion: str
-    transition: str
+    motion: Motion
+    transition: Transition
 
 
 class ApproveRequest(BaseModel):
@@ -185,8 +194,12 @@ def create_app(db_path: str | Path | None = None,
         emit = emitter(job_id)
 
         def work() -> None:
-            client = client_for(request.use_fake)
+            # Bound before the try: `finally: client.close()` raised
+            # UnboundLocalError when client_for itself failed, so no
+            # "complete" event was emitted and the stream hung.
+            client = None
             try:
+                client = client_for(request.use_fake)
                 plan = plan_stage(request.topic, client, store, settings,
                                   emit=emit)
                 emit(PipelineEvent("complete", "done", plan.plan_id,
@@ -198,7 +211,8 @@ def create_app(db_path: str | Path | None = None,
                                    f"{type(exc).__name__}: {exc}",
                                    {"trace": traceback.format_exc()[-800:]}))
             finally:
-                client.close()
+                if client is not None:
+                    client.close()
 
         threading.Thread(target=work, daemon=True).start()
         return {"job_id": job_id}
@@ -214,6 +228,17 @@ def create_app(db_path: str | Path | None = None,
             raise HTTPException(400, f"unknown hook {request.chosen_hook}")
         plan.script.chosen_hook = request.chosen_hook
 
+        # Order matters. The chosen hook seeds beat 1 FIRST, then the
+        # human's edits land on top. The other way round silently overwrote
+        # the one beat a human most wants to tune: the 0-3s hook.
+        chosen = plan.chosen()
+        if chosen and plan.script.beats:
+            plan.script.beats[0] = Beat.model_validate({
+                **plan.script.beats[0].model_dump(),
+                "voice_text": chosen.voice_text,
+                "caption_text": chosen.caption_text,
+                "measured_seconds": None, "words": []})
+
         if request.beats:
             edits = {b.beat_id: b for b in request.beats}
             rebuilt: list[Beat] = []
@@ -222,7 +247,10 @@ def create_app(db_path: str | Path | None = None,
                 if edit is None:
                     rebuilt.append(beat)
                     continue
-                rebuilt.append(beat.model_copy(update={
+                # model_validate, not model_copy: pydantic v2 skips validation
+                # on model_copy, which is how an invalid motion got persisted.
+                rebuilt.append(Beat.model_validate({
+                    **beat.model_dump(),
                     "voice_text": edit.voice_text,
                     "caption_text": edit.caption_text,
                     "on_screen_text": edit.on_screen_text or None,
@@ -235,14 +263,6 @@ def create_app(db_path: str | Path | None = None,
                 }))
             plan.script.beats = rebuilt
 
-        # Beat 1 always carries the chosen hook's words.
-        chosen = plan.chosen()
-        if chosen and plan.script.beats:
-            plan.script.beats[0] = plan.script.beats[0].model_copy(update={
-                "voice_text": chosen.voice_text,
-                "caption_text": chosen.caption_text,
-                "measured_seconds": None, "words": []})
-
         store.save_plan(plan, status="approved")
         store.record_entities(plan.plan_id, plan.topic.entities)
         return {"plan_id": plan.plan_id, "status": "approved",
@@ -253,11 +273,22 @@ def create_app(db_path: str | Path | None = None,
         plan = store.get_plan(plan_id)
         if plan is None:
             raise HTTPException(404, "no such plan")
+
+        # The human gate is a constraint, so it is enforced here rather than
+        # only in the browser. Without this, any script, retry or curl could
+        # render and package a plan nobody had looked at.
+        status = store.plan_status(plan_id)
+        if status not in {"approved", "produced", "qc_failed"}:
+            raise HTTPException(
+                409, f"plan is '{status}', not approved. POST "
+                     f"/api/plan/{plan_id}/approve with a chosen hook first.")
+
         emit = emitter(plan_id)
 
         def work() -> None:
-            client = client_for(request.use_fake)
+            client = None
             try:
+                client = client_for(request.use_fake)
                 result = produce_stage(
                     plan, client, store, settings, emit=emit,
                     captions_source=request.captions_source)
@@ -270,7 +301,8 @@ def create_app(db_path: str | Path | None = None,
                                    f"{type(exc).__name__}: {exc}",
                                    {"trace": traceback.format_exc()[-800:]}))
             finally:
-                client.close()
+                if client is not None:
+                    client.close()
 
         threading.Thread(target=work, daemon=True).start()
         return {"plan_id": plan_id, "streaming": f"/api/events/{plan_id}"}
@@ -312,6 +344,10 @@ def create_app(db_path: str | Path | None = None,
                     continue
                 yield f"data: {json.dumps(payload)}\n\n"
                 if payload.get("stage") == "complete":
+                    # Drop the queue. One was created per plan AND per async
+                    # job id, and nothing ever removed them.
+                    with lock:
+                        channels.pop(plan_id, None)
                     break
 
         return StreamingResponse(stream(), media_type="text/event-stream",

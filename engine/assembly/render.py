@@ -26,9 +26,68 @@ PAN_ZOOM = 1.18
 STATIC_ZOOM = 1.06
 
 
+def segment_lengths(durations: list[float],
+                    transition_duration: float) -> tuple[list[float],
+                                                         list[float],
+                                                         list[float]]:
+    """Work out how long each image must be on screen, and where cuts land.
+
+    The narration is a plain concat, so beat i's audio starts at the running
+    sum of the beats before it. That timeline is the source of truth and the
+    picture has to match it.
+
+    Every xfade consumes time from both of its inputs, so a chain of them
+    compresses the picture by one overlap per join. The fix is to centre each
+    transition on the audio cut and pad each segment by half an overlap on
+    each side that has one. Then the composite picture is exactly as long as
+    the narration, and the blend straddles the cut the way an edit normally
+    does.
+
+    Returns ``(lengths, offsets, overlaps)``: how long each segment runs, and
+    the offset and duration for each xfade join.
+    """
+    count = len(durations)
+    if count == 0:
+        return [], [], []
+    if count == 1:
+        return [durations[0]], [], []
+
+    # Never let a transition eat more than 40% of the shorter neighbour.
+    overlaps = [
+        max(min(transition_duration,
+                durations[i] * 0.4,
+                durations[i + 1] * 0.4), 0.0)
+        for i in range(count - 1)
+    ]
+
+    cuts: list[float] = []
+    running = 0.0
+    for duration in durations[:-1]:
+        running += duration
+        cuts.append(running)
+
+    lengths: list[float] = []
+    for i, duration in enumerate(durations):
+        incoming = overlaps[i - 1] if i > 0 else 0.0
+        outgoing = overlaps[i] if i < count - 1 else 0.0
+        lengths.append(duration + incoming / 2 + outgoing / 2)
+
+    # xfade's offset is measured on the composite built so far, which starts
+    # at absolute zero, so the offset is just the cut minus half the overlap.
+    offsets = [cuts[i] - overlaps[i] / 2 for i in range(count - 1)]
+    return lengths, offsets, overlaps
+
+
 def zoompan_expr(motion: str, duration: float, fps: int = 30,
                  width: int = 1080, height: int = 1920) -> str:
-    """One beat's Ken Burns move as a zoompan filter string."""
+    """One beat's Ken Burns move as a zoompan filter string.
+
+    ``d`` is output frames per *input* frame, so this expects a single-frame
+    input — ``-i image.png`` with no ``-loop``. Feeding it a looped stream
+    multiplies the segment length by the input frame count: a 4-second beat
+    came out as a 400-second clip that only looked right because the output
+    ``-t`` truncated it.
+    """
     frames = max(int(round(duration * fps)), 1)
 
     if motion == "zoom_in":
@@ -75,8 +134,9 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
                        ) -> tuple[str, float, str]:
     """Build the filter_complex string, total duration and video out-label.
 
-    Beats overlap by ``transition_duration`` during an xfade, so total runtime
-    is the sum of beat durations minus one overlap per join.
+    Total runtime is the sum of beat durations — the same timeline the
+    narration concat produces. See ``segment_lengths`` for how the xfade chain
+    is padded to land on it instead of compressing by one overlap per join.
 
     ``audio_offset`` is the input index where the narration streams begin. The
     render command lists every image first and then every audio file, so
@@ -89,39 +149,34 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
         raise ValueError("plan has no beats to render")
 
     parts: list[str] = []
+    durations = [beat.seconds() for beat in beats]
+    # The narration timeline decides everything; see segment_lengths.
+    total = sum(durations)
+    lengths, offsets, overlaps = segment_lengths(durations,
+                                                 transition_duration)
 
     # --- per-beat video segments -----------------------------------------
     for index, beat in enumerate(beats):
-        duration = beat.seconds()
         parts.append(
             f"[{index}:v]scale={width}:{height}:"
             f"force_original_aspect_ratio=increase,"
             f"crop={width}:{height},setsar=1,"
-            f"{zoompan_expr(beat.motion, duration, fps, width, height)},"
+            f"{zoompan_expr(beat.motion, lengths[index], fps, width, height)},"
             f"format=yuv420p[v{index}]")
 
     # --- chain them with xfade -------------------------------------------
     if len(beats) == 1:
         video_label = "v0"
-        total = beats[0].seconds()
     else:
         current = "v0"
-        elapsed = beats[0].seconds()
         for index in range(1, len(beats)):
-            nxt = f"v{index}"
-            out = f"x{index}"
-            overlap = min(transition_duration,
-                          beats[index].seconds() * 0.5,
-                          elapsed * 0.5)
-            offset = max(elapsed - overlap, 0.0)
             parts.append(
-                f"[{current}][{nxt}]xfade="
+                f"[{current}][v{index}]xfade="
                 f"transition={_xfade_name(beats[index].transition)}:"
-                f"duration={overlap:.3f}:offset={offset:.3f}[{out}]")
-            elapsed = offset + beats[index].seconds()
-            current = out
+                f"duration={overlaps[index - 1]:.3f}:"
+                f"offset={offsets[index - 1]:.3f}[x{index}]")
+            current = f"x{index}"
         video_label = current
-        total = elapsed
 
     # --- captions --------------------------------------------------------
     if ass_path:
@@ -154,27 +209,24 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
     return ";".join(parts), total, video_label
 
 
-def render(plan: ReelPlan, settings, out_path: str | Path, *,
-           ass_path: str | None = None, music_path: str | None = None,
-           progress=None) -> str:
-    """Produce the MP4. Returns the output path."""
+def build_command(plan: ReelPlan, settings, out_path: Path, *,
+                  ass_path: str | None = None,
+                  music_path: str | None = None
+                  ) -> tuple[list[str], float, str | None]:
+    """Assemble the ffmpeg argv. Split out so it can be asserted on.
+
+    Returns ``(command, total_seconds, cwd)``. ``cwd`` is the caption
+    directory when captions are burned, because a Windows absolute path cannot
+    be escaped inside a filtergraph.
+    """
     beats = plan.script.beats
-    missing = [b.beat_id for b in beats if not b.image_path]
-    if missing:
-        raise ValueError(f"beats without an image: {missing}")
-    missing_audio = [b.beat_id for b in beats if not b.audio_path]
-    if missing_audio:
-        raise ValueError(f"beats without audio: {missing_audio}")
-
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
     command: list[str] = [settings.ffmpeg, "-hide_banner", "-y"]
-    # cwd moves to the caption directory, so every other path must be
-    # absolute.
+
+    # Each image is supplied as exactly ONE frame. zoompan's `d` counts output
+    # frames per input frame, so a looped input multiplies the segment length
+    # by the frame count. cwd moves below, so paths are absolute.
     for beat in beats:
-        command += ["-loop", "1", "-t", f"{beat.seconds():.3f}",
-                    "-i", str(Path(beat.image_path).resolve())]
+        command += ["-i", str(Path(beat.image_path).resolve())]
     for beat in beats:
         command += ["-i", str(Path(beat.audio_path).resolve())]
 
@@ -184,8 +236,6 @@ def render(plan: ReelPlan, settings, out_path: str | Path, *,
         command += ["-stream_loop", "-1", "-i",
                     str(Path(music_path).resolve())]
 
-    # See build_filter_graph: the subtitles filter gets a bare filename and
-    # ffmpeg is run from that directory.
     ass_name = Path(ass_path).name if ass_path else None
     run_cwd = str(Path(ass_path).parent) if ass_path else None
 
@@ -204,6 +254,26 @@ def render(plan: ReelPlan, settings, out_path: str | Path, *,
         "-t", f"{total:.3f}",
         str(out_path.resolve()),
     ]
+    return command, total, run_cwd
+
+
+def render(plan: ReelPlan, settings, out_path: str | Path, *,
+           ass_path: str | None = None, music_path: str | None = None,
+           progress=None) -> str:
+    """Produce the MP4. Returns the output path."""
+    beats = plan.script.beats
+    missing = [b.beat_id for b in beats if not b.image_path]
+    if missing:
+        raise ValueError(f"beats without an image: {missing}")
+    missing_audio = [b.beat_id for b in beats if not b.audio_path]
+    if missing_audio:
+        raise ValueError(f"beats without audio: {missing_audio}")
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    command, total, run_cwd = build_command(
+        plan, settings, out_path, ass_path=ass_path, music_path=music_path)
 
     process = subprocess.Popen(command, stdout=subprocess.DEVNULL,
                                stderr=subprocess.PIPE, text=True,

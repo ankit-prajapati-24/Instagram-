@@ -72,9 +72,9 @@ def _sentences(text: str) -> list[str]:
 
 def run_qc(plan: ReelPlan, *, similarity: float | None = None,
            duration_min: float = 38.0, duration_max: float = 52.0,
-           max_silence_gap: float | None = None,
-           word_alignment: float | None = None,
-           actual_duration: float | None = None) -> Scorecard:
+           actual_duration: float | None = None,
+           narration_seconds: float | None = None,
+           expect_render: bool = False) -> Scorecard:
     """Score a plan. ``actual_duration`` is the probed length of the MP4.
 
     Pass it whenever a render exists. The sum of beat lengths overstates the
@@ -86,6 +86,15 @@ def run_qc(plan: ReelPlan, *, similarity: float | None = None,
     beats = plan.script.beats
     duration = actual_duration if actual_duration else plan.duration()
     measured = "rendered" if actual_duration else "estimated"
+
+    # A render that exists but could not be probed must not fall back to the
+    # beat sum. The sum and the file disagreed once already, and a silent
+    # fallback would score a 36s video as a passing 41s "estimate".
+    if expect_render and not actual_duration:
+        checks.append(Check(
+            "duration_probe", False, "hard",
+            "a render exists but its duration could not be read from the "
+            "file; refusing to score it against the beat sum"))
 
     # --- hard ------------------------------------------------------------
     checks.append(Check(
@@ -127,15 +136,28 @@ def run_qc(plan: ReelPlan, *, similarity: float | None = None,
         "every beat has voice + caption" if not dual
         else f"missing on: {dual[:3]}"))
 
-    if max_silence_gap is not None:
+    # The check that matters most, and the one this pipeline got wrong once.
+    #
+    # The narration is a plain concat of per-beat audio; the picture is an
+    # xfade chain. If the two timelines disagree, the tail of the narration is
+    # truncated by the output duration and every caption after the first join
+    # drifts. It renders, it has audio, it is the right resolution, and it is
+    # unusable — so it needs its own hard gate rather than trusting the graph.
+    if narration_seconds is not None and actual_duration:
+        drift = abs(actual_duration - narration_seconds)
         checks.append(Check(
-            "silence_gap", max_silence_gap <= 1.2, "hard",
-            f"largest gap {max_silence_gap:.2f}s (limit 1.2s)"))
+            "av_sync", drift <= 0.35, "hard",
+            f"video {actual_duration:.2f}s vs narration "
+            f"{narration_seconds:.2f}s (drift {drift:.2f}s, limit 0.35s)"))
 
-    if word_alignment is not None:
-        checks.append(Check(
-            "word_alignment", word_alignment >= 0.98, "hard",
-            f"{word_alignment * 100:.1f}% aligned (need 98%)"))
+    # Deliberately absent: "silence_gap" and "word_alignment" from spec 7.4.
+    #
+    # Caption timings are interpolated across each beat's measured span, so
+    # they are contiguous and complete by construction — the gap was always
+    # 0.00s and the alignment always 100%. Both were hard-fails that could not
+    # fail, and they were the two checks that should have caught the A/V drift
+    # above. A check that measures its own input is worse than no check,
+    # because it reads as coverage.
 
     # --- warn ------------------------------------------------------------
     if beats:

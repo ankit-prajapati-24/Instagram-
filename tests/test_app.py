@@ -173,3 +173,80 @@ def test_checklist_flags_placeholder_visuals():
 def test_checklist_flags_unsourced_claims():
     items = payloads.publish_checklist(make_plan(sourced=False), "o.mp4")
     assert any("UNSOURCED" in item for item in items)
+
+
+# --- the human gate, which had three separate holes in it -------------------
+
+def test_produce_refuses_a_plan_that_was_never_approved(client):
+    """The gate is a constraint, so the API enforces it, not just the UI."""
+    store: Store = client.app.state.store
+    store.save_plan(make_plan(), status="awaiting_approval")
+    response = client.post("/api/plan/p1/produce", json={})
+    assert response.status_code == 409
+    assert "not approved" in response.json()["detail"]
+
+
+def test_produce_accepts_an_approved_plan(client):
+    store: Store = client.app.state.store
+    store.save_plan(make_plan(), status="approved")
+    assert client.post("/api/plan/p1/produce",
+                       json={"use_fake": True}).status_code == 200
+
+
+def test_approve_rejects_an_invalid_motion_instead_of_storing_it(client):
+    """`model_copy` does not validate, so "spin" used to persist and then
+    made every later read of that plan raise ValidationError - a permanent
+    500 on that plan with no repair path."""
+    store: Store = client.app.state.store
+    store.save_plan(make_plan(), status="awaiting_approval")
+
+    response = client.post("/api/plan/p1/approve", json={
+        "chosen_hook": "h1",
+        "beats": [{"beat_id": "b4", "voice_text": "क", "caption_text": "k",
+                   "visual_prompt": "p", "motion": "spin",
+                   "transition": "fade"}]})
+    assert response.status_code == 422
+
+    # and the stored plan is still readable
+    assert store.get_plan("p1") is not None
+    assert client.get("/api/plan/p1").status_code == 200
+
+
+def test_approve_rejects_an_invalid_transition(client):
+    store: Store = client.app.state.store
+    store.save_plan(make_plan(), status="awaiting_approval")
+    response = client.post("/api/plan/p1/approve", json={
+        "chosen_hook": "h1",
+        "beats": [{"beat_id": "b4", "voice_text": "क", "caption_text": "k",
+                   "visual_prompt": "p", "motion": "zoom_in",
+                   "transition": "warp"}]})
+    assert response.status_code == 422
+
+
+def test_approve_keeps_a_human_edit_to_the_hook_beat(client):
+    """Beat 1 is the retention lever, and it was the one beat the gate
+    silently overwrote: the hook was applied after the edits."""
+    store: Store = client.app.state.store
+    store.save_plan(make_plan(), status="awaiting_approval")
+
+    client.post("/api/plan/p1/approve", json={
+        "chosen_hook": "h3",
+        "beats": [{"beat_id": "b0",
+                   "voice_text": "मेरा लिखा हुआ हुक",
+                   "caption_text": "HUMAN EDIT OF HOOK",
+                   "visual_prompt": "a reworked opening frame",
+                   "motion": "zoom_in", "transition": "fade"}]})
+
+    beat = store.get_plan("p1").script.beats[0]
+    assert beat.caption_text == "HUMAN EDIT OF HOOK"
+    assert beat.visual_prompt == "a reworked opening frame"
+
+
+def test_approve_still_seeds_the_hook_when_beat_one_is_not_edited(client):
+    store: Store = client.app.state.store
+    store.save_plan(make_plan(), status="awaiting_approval")
+    client.post("/api/plan/p1/approve", json={"chosen_hook": "h2"})
+
+    plan = store.get_plan("p1")
+    hook = next(h for h in plan.hooks if h.variant_id == "h2")
+    assert plan.script.beats[0].caption_text == hook.caption_text

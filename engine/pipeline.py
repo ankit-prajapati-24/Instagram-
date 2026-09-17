@@ -27,8 +27,7 @@ from engine.contract import ReelPlan, Script, Topic
 from engine.gates import dedup
 from engine.gates.qc import run_qc
 from engine.media.images import generate_plan_images
-from engine.media.voice import (largest_silence_gap, synth_plan,
-                                word_alignment)
+from engine.media.voice import synth_plan
 
 
 class Stage:
@@ -116,8 +115,15 @@ def plan_stage(topic_raw: str, client, store, settings, *,
                                        model=settings.model_cheap or None)
         store.record_cost(plan.plan_id, Stage.RESEARCH, cost)
         plan.provenance = provenance
-        emit(PipelineEvent(Stage.RESEARCH, "done",
-                           f"{len(provenance.claims)} sourced claims"))
+        # The cooldown layer is only as good as this list; research is the
+        # first stage that actually knows what the topic is about.
+        if provenance.entities:
+            plan.topic.entities = provenance.entities
+            topic = plan.topic
+        emit(PipelineEvent(
+            Stage.RESEARCH, "done",
+            f"{len(provenance.claims)} sourced claims, "
+            f"{len(provenance.entities)} entities"))
 
         emit(PipelineEvent(Stage.HOOKS, "started"))
         hooks, cost = run_hooks(client, topic, provenance,
@@ -236,9 +242,9 @@ def produce_stage(plan: ReelPlan, client, store, settings, *,
     emit(PipelineEvent(Stage.QC, "started"))
     scorecard = run_qc(plan, duration_min=settings.duration_min,
                        duration_max=settings.duration_max,
-                       max_silence_gap=largest_silence_gap(plan),
-                       word_alignment=word_alignment(plan),
-                       actual_duration=info.get("duration"))
+                       actual_duration=info.get("duration"),
+                       narration_seconds=plan.duration(),
+                       expect_render=True)
     plan.cost.usd = store.plan_cost(plan.plan_id)
     store.save_plan(plan, status="produced" if scorecard.passed
                     else "qc_failed")
