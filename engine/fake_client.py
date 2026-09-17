@@ -139,6 +139,7 @@ PAYLOADS: dict[str, dict] = {
         ],
         "searched_queries": ["roopkund skeletons dna study",
                              "roopkund lake carbon dating"],
+        "entities": ["Roopkund", "Uttarakhand", "Nanda Devi"],
     },
     "hooks": {"hooks": _hooks()},
     "script": {"script": _script()},

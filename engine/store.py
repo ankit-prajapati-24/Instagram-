@@ -125,6 +125,12 @@ CREATE INDEX IF NOT EXISTS idx_entities_entity ON entities(entity);
 """
 
 
+# A plan only blocks its own topic once it actually became something. Gate
+# rejections stay in the table for the audit trail without poisoning retries.
+COUNTED_STATUSES = ("approved", "produced", "published")
+COUNTED_PLACEHOLDERS = ",".join("?" * len(COUNTED_STATUSES))
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -195,18 +201,34 @@ class Store:
                 "ORDER BY p.created_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
 
+    def plan_status(self, plan_id: str) -> str | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT status FROM plans WHERE plan_id=?",
+                               (plan_id,)).fetchone()
+        return row["status"] if row else None
+
     def hash_exists(self, dedupe_hash: str) -> bool:
+        """Was this exact topic ever carried through to a video?
+
+        Deliberately restricted to COUNTED_STATUSES. Rejected plans are kept
+        for the audit trail, but counting them made a topic that failed the
+        moderation gate permanently un-retryable, reported as the misleading
+        "slug already produced".
+        """
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT 1 FROM plans WHERE dedupe_hash=? LIMIT 1",
-                (dedupe_hash,)).fetchone()
+                f"SELECT 1 FROM plans WHERE dedupe_hash=? "
+                f"AND status IN ({COUNTED_PLACEHOLDERS}) LIMIT 1",
+                (dedupe_hash, *COUNTED_STATUSES)).fetchone()
         return row is not None
 
     def published_slugs(self, limit: int = 400) -> list[str]:
+        """Slugs that reached production, newest first."""
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT slug FROM plans ORDER BY created_at DESC LIMIT ?",
-                (limit,)).fetchall()
+                f"SELECT slug FROM plans WHERE status IN "
+                f"({COUNTED_PLACEHOLDERS}) ORDER BY created_at DESC LIMIT ?",
+                (*COUNTED_STATUSES, limit)).fetchall()
         return [r["slug"] for r in rows]
 
     # -- costs ------------------------------------------------------------

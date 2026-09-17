@@ -2,7 +2,8 @@ import pytest
 
 from engine.assembly.captions import ass_time, build_ass, escape_ass
 from engine.assembly.compile import to_generate_video_body
-from engine.assembly.render import build_filter_graph, zoompan_expr
+from engine.assembly.render import (build_filter_graph, segment_lengths,
+                                    zoompan_expr)
 from engine.media.voice import caption_timings
 from tests.factories import make_plan
 
@@ -116,8 +117,10 @@ def test_graph_has_one_segment_per_beat_and_chains_them():
     assert graph.count("zoompan=") == 3
     assert graph.count("xfade=") == 2
     assert label == "x2"
-    # 3 beats x 4s, minus two 0.5s overlaps
-    assert total == pytest.approx(11.0)
+    # 3 beats x 4s. The picture must land on the narration timeline, NOT be
+    # compressed by one overlap per join — that drift truncated the last
+    # beat's voice and desynced every caption after the first cut.
+    assert total == pytest.approx(12.0)
 
 
 def test_single_beat_graph_needs_no_xfade():
@@ -192,3 +195,126 @@ def test_compile_maps_unsupported_values_to_legacy_vocabulary():
     plan.script.beats[0].transition = "blur"
     body = to_generate_video_body(plan)
     assert body["images"][0]["transition"] == "blur"
+
+
+# --- the A/V timeline, which this pipeline got wrong once -------------------
+# The narration is a plain concat and the picture is an xfade chain. Every
+# xfade consumes time from both inputs, so an unpadded chain ran 0.5s short
+# per join: on a ten-beat reel the last 4.5s of voice was cut off by the
+# output duration and every caption after the first cut drifted.
+
+def test_segment_lengths_preserve_the_narration_timeline():
+    durations = [4.0] * 10
+    lengths, offsets, overlaps = segment_lengths(durations, 0.5)
+    # composite length = last offset + last segment
+    assert offsets[-1] + lengths[-1] == pytest.approx(sum(durations))
+
+
+def test_segments_are_padded_by_half_an_overlap_per_join():
+    lengths, _, _ = segment_lengths([4.0, 4.0, 4.0], 0.5)
+    assert lengths[0] == pytest.approx(4.25)   # outgoing join only
+    assert lengths[1] == pytest.approx(4.5)    # both sides
+    assert lengths[2] == pytest.approx(4.25)   # incoming join only
+
+
+def test_transitions_are_centred_on_the_audio_cut():
+    _, offsets, overlaps = segment_lengths([3.0, 5.0, 4.0], 0.5)
+    # cuts fall at 3.0 and 8.0; each blend straddles its cut
+    assert offsets[0] + overlaps[0] / 2 == pytest.approx(3.0)
+    assert offsets[1] + overlaps[1] / 2 == pytest.approx(8.0)
+
+
+def test_overlap_never_eats_more_than_40_percent_of_a_short_beat():
+    _, _, overlaps = segment_lengths([0.6, 4.0], 0.5)
+    assert overlaps[0] == pytest.approx(0.24)
+
+
+def test_uneven_beats_still_land_on_the_narration_total():
+    durations = [2.1, 6.4, 3.3, 0.9, 5.0]
+    lengths, offsets, _ = segment_lengths(durations, 0.5)
+    assert offsets[-1] + lengths[-1] == pytest.approx(sum(durations))
+
+
+def test_single_beat_needs_no_padding():
+    lengths, offsets, overlaps = segment_lengths([4.0], 0.5)
+    assert lengths == [4.0]
+    assert offsets == [] and overlaps == []
+
+
+def test_graph_total_always_equals_the_sum_of_beat_durations():
+    for count in (1, 2, 3, 7, 12):
+        plan = _timed_plan(beats=count, measured=4.0)
+        _, total, _ = build_filter_graph(plan, audio_offset=count)
+        assert total == pytest.approx(sum(b.seconds()
+                                          for b in plan.script.beats))
+
+
+def test_caption_offsets_match_the_graph_timeline():
+    """Captions accumulate raw beat lengths, so the graph must too."""
+    plan = _timed_plan(beats=5, measured=4.0)
+    _, total, _ = build_filter_graph(plan, audio_offset=5)
+    ass = build_ass(plan)
+    last = [line for line in ass.splitlines()
+            if line.startswith("Dialogue: 0,")][-1]
+    end = last.split(",")[2]
+    assert ass_time(total) == end
+
+
+def _command_for(beats=3, measured=4.0, music=None):
+    from pathlib import Path
+    from engine.assembly.render import build_command
+    from engine.config import Settings
+    plan = _timed_plan(beats=beats, measured=measured)
+    for i, beat in enumerate(plan.script.beats):
+        beat.image_path = f"C:/tmp/img{i}.png"
+        beat.audio_path = f"C:/tmp/a{i}.mp3"
+    return build_command(plan, Settings(), Path("C:/tmp/out.mp4"),
+                         music_path=music)
+
+
+def test_images_are_fed_as_single_frames_not_looped():
+    """zoompan's `d` is output frames per input frame.
+
+    With `-loop 1 -t X` the image2 demuxer supplies many input frames, and a
+    4-second beat became a 400-second segment that only looked right because
+    the output -t truncated it.
+    """
+    command, _, _ = _command_for()
+    assert "-loop" not in command
+    # -t appears exactly once, as the output duration
+    assert command.count("-t") == 1
+    assert command[command.index("-t") + 1] == "12.000"
+
+
+def test_input_order_is_images_then_audio():
+    """The graph's [N:v] and [N:a] labels depend on this exact order."""
+    from pathlib import Path
+    command, _, _ = _command_for(beats=3)
+    inputs = [command[i + 1] for i, arg in enumerate(command) if arg == "-i"]
+    assert len(inputs) == 6
+    assert [Path(p).name for p in inputs[:3]] == ["img0.png", "img1.png",
+                                                  "img2.png"]
+    assert [Path(p).name for p in inputs[3:]] == ["a0.mp3", "a1.mp3",
+                                                  "a2.mp3"]
+    assert all(Path(p).is_absolute() for p in inputs)
+
+
+def test_music_input_lands_after_every_beat_stream():
+    import tempfile
+    from pathlib import Path
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as handle:
+        handle.write(b"x")
+        music = handle.name
+    command, _, _ = _command_for(beats=3, music=music)
+    inputs = [command[i + 1] for i, arg in enumerate(command) if arg == "-i"]
+    assert Path(inputs[6]).name == Path(music).name
+    graph = command[command.index("-filter_complex") + 1]
+    # 3 images + 3 audio, so music is input 6
+    assert "[6:a]volume=" in graph
+    Path(music).unlink()
+
+
+def test_output_duration_matches_the_narration_total():
+    command, total, _ = _command_for(beats=7, measured=4.4)
+    assert total == pytest.approx(7 * 4.4)
+    assert command[command.index("-t") + 1] == f"{7 * 4.4:.3f}"

@@ -122,6 +122,9 @@ class Claim(BaseModel):
 class Provenance(BaseModel):
     claims: list[Claim] = Field(default_factory=list)
     searched_queries: list[str] = Field(default_factory=list)
+    # Named people, places and organisations. These drive the 45-day cooldown
+    # layer of the dedup gate, which is inert without them.
+    entities: list[str] = Field(default_factory=list)
 
 
 class Safety(BaseModel):

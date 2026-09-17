@@ -9,5 +9,11 @@ assets/audio/
 *.mp4
 *.mp3
 *.wav
+*.png
 engine.db
+engine.db-wal
+engine.db-shm
+*.db
+*.db-wal
+*.db-shm
 .claude/settings.local.json

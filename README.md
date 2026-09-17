@@ -46,7 +46,7 @@ whole pipeline work before spending anything. To get real scripts, follow
 ```bash
 python scripts/verify_e2e.py     # full pipeline, fake brain, real everything else
 python scripts/probe_omniroute.py  # which gateway endpoints actually answer
-python -m pytest tests/ -q       # 115 tests
+python -m pytest tests/ -q       # 140 tests
 ```
 
 `verify_e2e.py` exits non-zero unless it produced a playable 1080x1920 MP4 with
@@ -54,16 +54,17 @@ audio and no QC hard failures.
 
 ## What is verified, and what is not
 
-Measured on this machine, 2026-09-17:
+Measured on this machine, 2026-09-17/18:
 
 | Verified | Detail |
 |---|---|
-| End-to-end render | 45.67s, 1080x1920, 6.38 MB, audio present, QC pass |
+| End-to-end render | 50.16s, 1080x1920, 6.80 MB, audio present, QC pass |
+| A/V sync | 0.000s drift, proven by rendering labelled frames and reading back image + caption at the middle of every beat |
 | Hindi TTS | `hi-IN-MadhurNeural` at `rate=-8% pitch=-6Hz` |
 | Caption burn-in | libass, with karaoke word highlighting |
 | Dedup gate | refused a repeat topic on the exact-hash layer |
-| Web panel | full flow driven end to end, no console errors, no mobile overflow |
-| 115 tests | `pytest tests/ -q` |
+| Web panel | full flow driven end to end, including an edit to the hook beat surviving approval. No console errors, no mobile overflow |
+| 140 tests | `pytest tests/ -q` |
 
 | Not verified | Why |
 |---|---|
@@ -101,8 +102,13 @@ Roman is the convention in Indian Reels and carries no text-shaping risk.
 `--captions=devanagari` switches the burn source, since libass can shape it.
 
 **Beat durations come from measured audio, never from the model's guess.** And
-QC checks the *rendered* length, not the sum of beats — xfade transitions
-overlap, so nine joins remove about 4.5s from a ten-beat Reel.
+the picture is built to land on the narration's timeline, not the other way
+round. An xfade consumes time from both of its inputs, so an unpadded chain ran
+0.5s short per join — on a ten-beat Reel that truncated the last 4.5s of voice
+and desynced every caption after the first cut. `segment_lengths` pads each
+segment by half an overlap per side and centres each transition on its cut, and
+the `av_sync` QC check fails the render if the two timelines ever disagree by
+more than 0.35s.
 
 ## The constraints that are not features
 
