@@ -76,7 +76,9 @@ class Settings:
     caption_font_devanagari: str = field(
         default_factory=lambda: os.getenv("RAHASYA_FONT_DEVA",
                                           "Nirmala UI"))
-    caption_size: int = 96
+    # 96 overflowed 1080px on real Hinglish lines; 72 wraps to
+    # two comfortable lines instead.
+    caption_size: int = 72
 
     # --- Paths -------------------------------------------------------------
     work_dir: Path = field(
