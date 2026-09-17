@@ -1,0 +1,318 @@
+"""SQLite store.
+
+Schema mirrors the Postgres design in the feasibility report, so moving to a
+server database later is a driver swap rather than a rewrite.
+
+Two tables carry more weight than the rest:
+  ``assets`` — provider, licence, source URL and checksum per asset. This table
+               *is* the copyright defence.
+  ``costs``  — fed straight from the X-OmniRoute-* response headers, so
+               per-video true cost needs no separate accounting.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+from engine.contract import ReelPlan
+from engine.omniroute import CostRecord
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS topics (
+  slug TEXT PRIMARY KEY,
+  raw TEXT NOT NULL,
+  dedupe_hash TEXT NOT NULL,
+  discovered_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS plans (
+  plan_id TEXT PRIMARY KEY,
+  slug TEXT NOT NULL,
+  dedupe_hash TEXT NOT NULL,
+  status TEXT NOT NULL,
+  plan_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plans_hash ON plans(dedupe_hash);
+CREATE INDEX IF NOT EXISTS idx_plans_status ON plans(status);
+
+CREATE TABLE IF NOT EXISTS claims (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plan_id TEXT NOT NULL,
+  beat_id TEXT,
+  text TEXT NOT NULL,
+  source_url TEXT,
+  confidence TEXT
+);
+CREATE TABLE IF NOT EXISTS assets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plan_id TEXT NOT NULL,
+  beat_id TEXT,
+  kind TEXT NOT NULL,
+  provider TEXT,
+  path TEXT,
+  source_url TEXT,
+  checksum TEXT,
+  licence TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS renders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plan_id TEXT NOT NULL,
+  idempotency_key TEXT UNIQUE,
+  status TEXT NOT NULL,
+  attempts INTEGER DEFAULT 0,
+  output_path TEXT,
+  duration_s REAL,
+  error_log TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS publications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plan_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  external_id TEXT,
+  published_at TEXT,
+  synthetic_flag_set INTEGER DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS metrics_daily (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plan_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  date TEXT NOT NULL,
+  views INTEGER, saves INTEGER, shares INTEGER, comments INTEGER,
+  avg_view_pct REAL,
+  UNIQUE(plan_id, platform, date)
+);
+CREATE TABLE IF NOT EXISTS costs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plan_id TEXT,
+  stage TEXT NOT NULL,
+  provider TEXT,
+  model TEXT,
+  usd REAL NOT NULL DEFAULT 0,
+  fallback_attempts INTEGER DEFAULT 0,
+  latency_ms INTEGER DEFAULT 0,
+  at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_costs_at ON costs(at);
+CREATE TABLE IF NOT EXISTS jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  idempotency_key TEXT UNIQUE,
+  type TEXT NOT NULL,
+  payload TEXT,
+  status TEXT NOT NULL,
+  attempts INTEGER DEFAULT 0,
+  next_retry_at TEXT,
+  last_error TEXT
+);
+CREATE TABLE IF NOT EXISTS embeddings (
+  plan_id TEXT PRIMARY KEY,
+  vector TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS entities (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plan_id TEXT NOT NULL,
+  entity TEXT NOT NULL,
+  seen_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entities_entity ON entities(entity);
+"""
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class Store:
+    def __init__(self, db_path: str | Path):
+        self.db_path = str(db_path)
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+    def init(self) -> None:
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        with self._conn() as conn:
+            conn.executescript(SCHEMA)
+
+    # -- plans ------------------------------------------------------------
+    def save_plan(self, plan: ReelPlan, status: str = "draft") -> None:
+        now = _now()
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO topics(slug, raw, dedupe_hash, discovered_at) "
+                "VALUES(?,?,?,?) ON CONFLICT(slug) DO NOTHING",
+                (plan.topic.slug, plan.topic.raw, plan.topic.dedupe_hash, now))
+            conn.execute(
+                "INSERT INTO plans(plan_id, slug, dedupe_hash, status, "
+                "plan_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?) "
+                "ON CONFLICT(plan_id) DO UPDATE SET "
+                "status=excluded.status, plan_json=excluded.plan_json, "
+                "updated_at=excluded.updated_at",
+                (plan.plan_id, plan.topic.slug, plan.topic.dedupe_hash,
+                 status, plan.model_dump_json(), now, now))
+            conn.execute("DELETE FROM claims WHERE plan_id=?", (plan.plan_id,))
+            for claim in plan.provenance.claims:
+                conn.execute(
+                    "INSERT INTO claims(plan_id, beat_id, text, source_url, "
+                    "confidence) VALUES(?,?,?,?,?)",
+                    (plan.plan_id, claim.beat_id, claim.text,
+                     claim.source_url, claim.confidence))
+
+    def get_plan(self, plan_id: str) -> ReelPlan | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT plan_json FROM plans WHERE plan_id=?",
+                (plan_id,)).fetchone()
+        return ReelPlan.model_validate_json(row["plan_json"]) if row else None
+
+    def set_status(self, plan_id: str, status: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE plans SET status=?, updated_at=? WHERE plan_id=?",
+                (status, _now(), plan_id))
+
+    def list_plans(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT p.plan_id, p.slug, p.status, p.created_at, "
+                "t.raw AS topic, "
+                "(SELECT COALESCE(SUM(usd),0) FROM costs c "
+                " WHERE c.plan_id=p.plan_id) AS usd, "
+                "(SELECT output_path FROM renders r WHERE r.plan_id=p.plan_id "
+                " ORDER BY r.id DESC LIMIT 1) AS video "
+                "FROM plans p LEFT JOIN topics t ON t.slug=p.slug "
+                "ORDER BY p.created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def hash_exists(self, dedupe_hash: str) -> bool:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM plans WHERE dedupe_hash=? LIMIT 1",
+                (dedupe_hash,)).fetchone()
+        return row is not None
+
+    def published_slugs(self, limit: int = 400) -> list[str]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT slug FROM plans ORDER BY created_at DESC LIMIT ?",
+                (limit,)).fetchall()
+        return [r["slug"] for r in rows]
+
+    # -- costs ------------------------------------------------------------
+    def record_cost(self, plan_id: str | None, stage: str,
+                    cost: CostRecord) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO costs(plan_id, stage, provider, model, usd, "
+                "fallback_attempts, latency_ms, at) VALUES(?,?,?,?,?,?,?,?)",
+                (plan_id, stage, cost.provider, cost.model, cost.usd,
+                 cost.fallback_attempts, cost.latency_ms, _now()))
+
+    def plan_cost(self, plan_id: str) -> float:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(usd),0) AS s FROM costs WHERE plan_id=?",
+                (plan_id,)).fetchone()
+        return float(row["s"])
+
+    def today_usd(self) -> float:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(usd),0) AS s FROM costs "
+                "WHERE date(at)=date('now')").fetchone()
+        return float(row["s"])
+
+    # -- assets -----------------------------------------------------------
+    def save_asset(self, plan_id: str, beat_id: str | None, kind: str,
+                   provider: str, path: str, source_url: str | None = None,
+                   checksum: str | None = None,
+                   licence: str = "ai-generated") -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO assets(plan_id, beat_id, kind, provider, path, "
+                "source_url, checksum, licence, created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (plan_id, beat_id, kind, provider, path, source_url,
+                 checksum, licence, _now()))
+
+    def plan_assets(self, plan_id: str) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM assets WHERE plan_id=? ORDER BY id",
+                (plan_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- renders ----------------------------------------------------------
+    def record_render(self, plan_id: str, idempotency_key: str, status: str,
+                      output_path: str | None = None,
+                      duration_s: float | None = None,
+                      error_log: str | None = None) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO renders(plan_id, idempotency_key, status, "
+                "attempts, output_path, duration_s, error_log, created_at) "
+                "VALUES(?,?,?,1,?,?,?,?) "
+                "ON CONFLICT(idempotency_key) DO UPDATE SET "
+                "status=excluded.status, attempts=renders.attempts+1, "
+                "output_path=excluded.output_path, "
+                "duration_s=excluded.duration_s, "
+                "error_log=excluded.error_log",
+                (plan_id, idempotency_key, status, output_path, duration_s,
+                 error_log, _now()))
+
+    # -- dedup support ----------------------------------------------------
+    def save_embedding(self, plan_id: str, vector: list[float]) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO embeddings(plan_id, vector, created_at) "
+                "VALUES(?,?,?) ON CONFLICT(plan_id) DO UPDATE SET "
+                "vector=excluded.vector",
+                (plan_id, json.dumps(vector), _now()))
+
+    def recent_embeddings(self, limit: int = 400
+                          ) -> list[tuple[str, list[float]]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT plan_id, vector FROM embeddings "
+                "ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [(r["plan_id"], json.loads(r["vector"])) for r in rows]
+
+    def record_entities(self, plan_id: str, entities: Iterable[str]) -> None:
+        now = _now()
+        with self._conn() as conn:
+            for entity in entities:
+                cleaned = (entity or "").strip().lower()
+                if cleaned:
+                    conn.execute(
+                        "INSERT INTO entities(plan_id, entity, seen_at) "
+                        "VALUES(?,?,?)", (plan_id, cleaned, now))
+
+    def entity_last_seen(self, entity: str) -> datetime | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT MAX(seen_at) AS s FROM entities WHERE entity=?",
+                ((entity or "").strip().lower(),)).fetchone()
+        if not row or not row["s"]:
+            return None
+        return datetime.fromisoformat(row["s"])
+
+    def entities_in_cooldown(self, entities: Iterable[str],
+                             days: int) -> list[str]:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        blocked = []
+        for entity in entities:
+            seen = self.entity_last_seen(entity)
+            if seen and seen > cutoff:
+                blocked.append(entity)
+        return blocked
