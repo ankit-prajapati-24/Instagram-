@@ -73,15 +73,25 @@ def _sentences(text: str) -> list[str]:
 def run_qc(plan: ReelPlan, *, similarity: float | None = None,
            duration_min: float = 38.0, duration_max: float = 52.0,
            max_silence_gap: float | None = None,
-           word_alignment: float | None = None) -> Scorecard:
+           word_alignment: float | None = None,
+           actual_duration: float | None = None) -> Scorecard:
+    """Score a plan. ``actual_duration`` is the probed length of the MP4.
+
+    Pass it whenever a render exists. The sum of beat lengths overstates the
+    finished video, because every xfade overlaps its two beats — nine joins at
+    0.5s each cut 4.5s off a ten-beat Reel. Checking the estimate would let a
+    53s plan pass while the file it produced is 48s, or the reverse.
+    """
     checks: list[Check] = []
     beats = plan.script.beats
-    duration = plan.duration()
+    duration = actual_duration if actual_duration else plan.duration()
+    measured = "rendered" if actual_duration else "estimated"
 
     # --- hard ------------------------------------------------------------
     checks.append(Check(
         "duration", duration_min <= duration <= duration_max, "hard",
-        f"{duration:.1f}s (need {duration_min:.0f}-{duration_max:.0f}s)"))
+        f"{duration:.1f}s {measured} "
+        f"(need {duration_min:.0f}-{duration_max:.0f}s)"))
 
     missing = [c.text[:40] for c in plan.provenance.claims
                if not (c.source_url or "").strip()]
@@ -129,7 +139,7 @@ def run_qc(plan: ReelPlan, *, similarity: float | None = None,
 
     # --- warn ------------------------------------------------------------
     if beats:
-        rate = duration / len(beats)
+        rate = duration / len(beats)  # same duration source as above
         checks.append(Check(
             "visual_change_rate", rate <= 4.0, "warn",
             f"one visual every {rate:.1f}s (want <=4.0s)"))

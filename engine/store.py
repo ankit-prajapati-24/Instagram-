@@ -271,6 +271,15 @@ class Store:
                 (plan_id, idempotency_key, status, output_path, duration_s,
                  error_log, _now()))
 
+    def render_duration(self, plan_id: str) -> float | None:
+        """Probed length of the latest successful render, if there is one."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT duration_s FROM renders WHERE plan_id=? "
+                "AND status='done' AND duration_s IS NOT NULL "
+                "ORDER BY id DESC LIMIT 1", (plan_id,)).fetchone()
+        return float(row["duration_s"]) if row else None
+
     # -- dedup support ----------------------------------------------------
     def save_embedding(self, plan_id: str, vector: list[float]) -> None:
         with self._conn() as conn:

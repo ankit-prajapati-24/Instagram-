@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 
@@ -108,3 +110,115 @@ def test_moderate_reports_flagged_and_categories():
     r = _client(handler).moderate("something")
     assert r.flagged is True
     assert "violence" in r.flags
+
+
+# --- the "gateway is up but has no provider" family -------------------------
+# All verified against a real clean OmniRoute install on 2026-09-17, where
+# `omniroute nodes list` reported {"nodes": []}.
+
+def test_no_provider_503_is_not_retried():
+    from engine.omniroute import NoProviderError
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(503, json={
+            "error": {"message": "Maximum combo retry limit reached",
+                      "code": "service_unavailable"},
+            "diagnostics": {"poolSize": 54, "attempted": 29}})
+
+    c = _client(handler)
+    c.backoff_base = 0.0
+    with pytest.raises(NoProviderError):
+        c.chat([])
+    assert calls["n"] == 1, "a missing provider key must not burn retries"
+
+
+def test_missing_openai_credentials_is_not_retried():
+    from engine.omniroute import NoProviderError
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(400, json={"error": {
+            "message": "No credentials for provider: openai"}})
+
+    c = _client(handler)
+    c.backoff_base = 0.0
+    with pytest.raises(NoProviderError):
+        c.moderate("anything")
+    assert calls["n"] == 1
+
+
+def test_empty_200_body_is_reported_as_no_provider():
+    """A provider-less gateway answers small requests 200 with no body."""
+    from engine.omniroute import NoProviderError
+
+    def handler(request):
+        return httpx.Response(200, content=b"")
+
+    with pytest.raises(NoProviderError, match="empty body"):
+        _client(handler).chat([])
+
+
+def test_chat_always_sends_a_model():
+    """OmniRoute rejects a request with no model field: "Missing model"."""
+    seen = {}
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "x"}}]})
+
+    _client(handler).chat([])
+    assert seen["model"] == "auto/best-chat"
+
+
+def test_embed_and_image_also_send_a_model():
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content).get("model"))
+        if "embeddings" in str(request.url):
+            return httpx.Response(200, json={
+                "data": [{"embedding": [0.1], "index": 0}]})
+        return httpx.Response(200, json={
+            "data": [{"b64_json": "aGk="}]})
+
+    c = _client(handler)
+    c.embed(["a"])
+    c.image("a lake")
+    assert all(model for model in seen)
+
+
+def test_health_rejects_a_200_with_an_empty_completion():
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "auto/x"}]})
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "   "}}]})
+
+    state = _client(handler).health()
+    assert state["state"] == "no_provider"
+    assert "empty completion" in state["detail"]
+
+
+def test_health_reports_ready_only_on_real_content():
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "auto/x"}]})
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "OK"}}]},
+            headers={"X-OmniRoute-Provider": "groq"})
+
+    state = _client(handler).health()
+    assert state["state"] == "ready"
+    assert "groq" in state["detail"]
+    assert state["models"] == 1
+
+
+def test_health_reports_down_when_nothing_answers():
+    def handler(request):
+        raise httpx.ConnectError("refused")
+
+    assert _client(handler).health()["state"] == "down"
