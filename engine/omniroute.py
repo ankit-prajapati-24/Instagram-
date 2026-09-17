@@ -226,6 +226,16 @@ class OmniRouteClient:
 
         response = self._post("chat/completions", payload)
         cost = self._record(response.headers)
+
+        # An empty 200 is what a provider-less gateway returns for small
+        # requests. Name it here, or it surfaces later as a confusing
+        # "no JSON found in response: ''" from the agent layer.
+        if not response.text.strip():
+            raise NoProviderError(
+                "gateway returned 200 with an empty body — no upstream "
+                "provider completed the request",
+                status=response.status_code)
+
         body = response.json()
         text = (body.get("choices") or [{}])[0].get(
             "message", {}).get("content") or ""
@@ -302,13 +312,53 @@ class OmniRouteClient:
         except Exception:
             pass
 
+        # A single short-timeout probe, deliberately not routed through
+        # ``chat``. On a gateway with no provider nodes, OmniRoute walks its
+        # whole upstream pool before answering — measured at well over a
+        # minute — and ``chat`` would then retry that five times. A health
+        # endpoint has to answer while someone is looking at it.
         try:
-            self.chat([{"role": "user", "content": "ok"}], max_tokens=4,
-                      temperature=0)
-        except NoProviderError as exc:
+            response = self._client.post(
+                f"{self.base}/chat/completions",
+                json={"model": self.default_chat_model,
+                      "messages": [{"role": "user", "content": "ok"}],
+                      "max_tokens": 4, "temperature": 0},
+                timeout=timeout)
+        except httpx.TimeoutException:
             return {"state": "no_provider", "models": models,
-                    "detail": str(exc)}
-        except OmniRouteError as exc:
+                    "detail": f"no provider answered within {timeout:.0f}s"}
+        except httpx.HTTPError as exc:
+            return {"state": "down", "models": models, "detail": str(exc)[:200]}
+
+        no_provider_hint = ("no upstream provider is configured — add one key "
+                            "to ~/.omniroute/.env and restart the gateway")
+
+        if response.status_code >= 400:
+            body = response.text[:300]
             return {"state": "no_provider", "models": models,
-                    "detail": f"chat failed: {exc}"}
-        return {"state": "ready", "models": models, "detail": "chat ok"}
+                    "detail": no_provider_hint
+                    if self._is_no_provider(body) else body}
+
+        # A 200 is not enough. With no provider configured, OmniRoute answers
+        # some small requests 200 with a completely empty body, so checking
+        # only the status code reports a healthy gateway that cannot actually
+        # complete anything. Require real content back.
+        raw = response.text.strip()
+        if not raw:
+            return {"state": "no_provider", "models": models,
+                    "detail": f"{no_provider_hint} (gateway returned 200 with "
+                              f"an empty body)"}
+        try:
+            content = (response.json().get("choices") or [{}])[0].get(
+                "message", {}).get("content")
+        except (json.JSONDecodeError, AttributeError, IndexError, TypeError):
+            return {"state": "no_provider", "models": models,
+                    "detail": f"{no_provider_hint} (unparseable response: "
+                              f"{raw[:120]})"}
+        if not (content or "").strip():
+            return {"state": "no_provider", "models": models,
+                    "detail": f"{no_provider_hint} (empty completion)"}
+
+        return {"state": "ready", "models": models,
+                "detail": f"completion ok via "
+                          f"{response.headers.get('X-OmniRoute-Provider', '?')}"}

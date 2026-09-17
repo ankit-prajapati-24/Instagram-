@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rahasya Engine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Sans+Devanagari:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink:      #12191c;
+    --card:     #1a2327;
+    --card-hi:  #202c31;
+    --rule:     #2c3a40;
+    --paper:    #d8dee0;
+    --muted:    #7d8f96;
+    --gold:     #f0c040;
+    --stamp:    #c2453a;
+    --moss:     #6f9a72;
+
+    --serif: Spectral, Georgia, "Times New Roman", serif;
+    --sans: "IBM Plex Sans Devanagari", "Nirmala UI", "Segoe UI", system-ui,
+            sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ink);
+    color: var(--paper);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* --- instrument strip -------------------------------------------- */
+  header {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 28px;
+    padding: 14px 22px;
+    border-bottom: 1px solid var(--rule);
+    background: #0e1416;
+    position: sticky; top: 0; z-index: 20;
+  }
+  header h1 {
+    font-family: var(--serif); font-weight: 600; font-size: 19px;
+    margin: 0 8px 0 0; letter-spacing: .01em;
+  }
+  header h1 span { color: var(--gold); }
+  .gauge { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+  .gauge b { color: var(--paper); font-weight: 500; }
+  .gauge.bad b   { color: var(--stamp); }
+  .gauge.good b  { color: var(--moss); }
+  .gauge.warn b  { color: var(--gold); }
+
+  /* --- shell -------------------------------------------------------- */
+  .shell { display: grid; grid-template-columns: 218px 1fr; min-height: 90vh; }
+
+  /* --- left spine: the evidence log -------------------------------- */
+  .spine {
+    border-right: 1px solid var(--rule);
+    padding: 20px 0 40px;
+    background: #101719;
+  }
+  .spine h2 {
+    font-family: var(--serif); font-style: italic; font-weight: 400;
+    font-size: 14px; color: var(--muted);
+    margin: 0 0 14px 22px;
+  }
+  .stage {
+    display: grid; grid-template-columns: 22px 1fr;
+    gap: 0 8px; padding: 6px 16px 6px 12px;
+    border-left: 2px solid transparent;
+  }
+  .stage .n {
+    font-variant-numeric: tabular-nums; font-size: 11.5px;
+    color: #4d6068; text-align: right; padding-top: 3px;
+  }
+  .stage .name { font-size: 13.5px; color: #5f7278; }
+  .stage .fact {
+    grid-column: 2; font-size: 11.5px; color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .stage[data-s="started"] { border-left-color: var(--gold); }
+  .stage[data-s="started"] .name { color: var(--gold); }
+  .stage[data-s="done"] { border-left-color: var(--moss); }
+  .stage[data-s="done"] .name { color: var(--paper); }
+  .stage[data-s="failed"] { border-left-color: var(--stamp); }
+  .stage[data-s="failed"] .name,
+  .stage[data-s="failed"] .fact { color: var(--stamp); }
+  .spine hr { border: 0; border-top: 1px solid var(--rule); margin: 12px 22px; }
+
+  /* --- main column -------------------------------------------------- */
+  main { padding: 26px 30px 90px; max-width: 980px; }
+  .sheet { margin-bottom: 34px; }
+  .sheet > h3 {
+    font-family: var(--serif); font-style: italic; font-weight: 400;
+    font-size: 17px; color: var(--paper);
+    margin: 0 0 4px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .sheet > h3 em {
+    font-style: normal; font-family: var(--sans); font-size: 12.5px;
+    color: var(--muted); float: right; padding-top: 5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .hint { color: var(--muted); font-size: 13px; margin: 10px 0 14px; }
+
+  /* topic entry */
+  .entry { display: flex; gap: 10px; margin: 16px 0 6px; }
+  input[type=text], textarea, select {
+    background: var(--card); color: var(--paper);
+    border: 1px solid var(--rule); border-radius: 2px;
+    font-family: var(--sans); font-size: 15px; padding: 11px 13px;
+    width: 100%;
+  }
+  input[type=text]:focus, textarea:focus, select:focus {
+    outline: 2px solid var(--gold); outline-offset: -1px; border-color: var(--gold);
+  }
+  textarea { resize: vertical; font-size: 14px; line-height: 1.45; }
+
+  button {
+    font-family: var(--sans); font-size: 14px; font-weight: 500;
+    background: var(--card-hi); color: var(--paper);
+    border: 1px solid var(--rule); border-radius: 2px;
+    padding: 11px 18px; cursor: pointer; white-space: nowrap;
+  }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+  button.go { background: var(--gold); color: #171205; border-color: var(--gold); }
+  button.go:hover:not(:disabled) { background: #ffd453; }
+  button:disabled { opacity: .42; cursor: not-allowed; }
+
+  /* hook index cards */
+  .hooks { display: grid; gap: 8px; margin-top: 14px; }
+  .hook {
+    display: grid; grid-template-columns: 20px 92px 1fr; gap: 12px;
+    align-items: start;
+    background: var(--card); border: 1px solid var(--rule);
+    border-left: 3px solid var(--rule);
+    padding: 12px 14px; cursor: pointer;
+  }
+  .hook:has(input:checked) {
+    border-left-color: var(--gold); background: var(--card-hi);
+  }
+  .hook input { accent-color: var(--gold); margin-top: 3px; }
+  .hook .style {
+    font-family: var(--serif); font-style: italic; font-size: 13px;
+    color: var(--muted); padding-top: 1px;
+  }
+  .hook .roman { font-size: 15px; }
+  .hook .deva { font-size: 13.5px; color: var(--muted); margin-top: 3px; }
+
+  /* script ledger */
+  table.ledger { width: 100%; border-collapse: collapse; margin-top: 12px; }
+  table.ledger th {
+    text-align: left; font-size: 11.5px; font-weight: 500; color: var(--muted);
+    border-bottom: 1px solid var(--rule); padding: 0 8px 7px 0;
+  }
+  table.ledger td {
+    vertical-align: top; padding: 9px 8px 9px 0;
+    border-bottom: 1px solid #202a2e;
+  }
+  td.beat {
+    font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted);
+    white-space: nowrap; width: 84px;
+  }
+  td.beat .role {
+    display: block; font-family: var(--serif); font-style: italic;
+    color: #5f7278;
+  }
+  td.secs { width: 54px; font-variant-numeric: tabular-nums;
+            font-size: 12.5px; color: var(--muted); text-align: right; }
+  .twin { display: grid; gap: 5px; }
+  .twin textarea.deva { font-size: 14.5px; }
+  .mini { display: flex; gap: 6px; margin-top: 5px; }
+  .mini select, .mini input {
+    font-size: 12px; padding: 5px 7px; width: auto; flex: 1;
+  }
+
+  /* image strip */
+  .strip { display: flex; gap: 8px; overflow-x: auto; padding: 14px 0 6px; }
+  .strip figure { margin: 0; flex: 0 0 96px; }
+  .strip img {
+    width: 96px; height: 171px; object-fit: cover;
+    border: 1px solid var(--rule); background: var(--card); display: block;
+  }
+  .strip figcaption {
+    font-size: 11px; color: var(--muted); padding-top: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+  .strip figcaption.ph { color: var(--gold); }
+
+  /* light-box */
+  .lightbox { display: flex; gap: 22px; flex-wrap: wrap; margin-top: 14px; }
+  .lightbox video {
+    width: 288px; background: #000; border: 1px solid var(--rule);
+  }
+  .facts { flex: 1; min-width: 260px; }
+  .facts dl {
+    display: grid; grid-template-columns: auto 1fr; gap: 5px 16px; margin: 0;
+  }
+  .facts dt { color: var(--muted); font-size: 13px; }
+  .facts dd {
+    margin: 0; font-variant-numeric: tabular-nums; font-size: 13.5px;
+  }
+
+  /* inspection sheet */
+  .checks { margin-top: 12px; }
+  .check {
+    display: grid; grid-template-columns: 14px 1fr auto; gap: 10px;
+    align-items: baseline;
+    padding: 6px 0; border-bottom: 1px solid #1d2629; font-size: 13.5px;
+  }
+  .check .dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; }
+  .check.ok   .dot { background: var(--moss); }
+  .check.warn .dot { background: var(--gold); }
+  .check.fail .dot { background: var(--stamp); }
+  .check.fail { color: var(--stamp); }
+  .check .detail {
+    color: var(--muted); font-size: 12.5px; text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .verdict {
+    font-family: var(--serif); font-size: 15px; margin: 14px 0 0;
+    padding: 10px 14px; border: 1px solid var(--rule); border-left-width: 3px;
+  }
+  .verdict.pass { border-left-color: var(--moss); }
+  .verdict.fail { border-left-color: var(--stamp); color: var(--stamp); }
+
+  /* copy-out fields */
+  .copy { display: grid; gap: 12px; margin-top: 14px; }
+  .copy > div { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+  .copy label {
+    grid-column: 1 / -1; font-size: 12px; color: var(--muted);
+  }
+
+  .banner {
+    border: 1px solid var(--rule); border-left: 3px solid var(--gold);
+    background: var(--card); padding: 13px 16px; margin-bottom: 22px;
+    font-size: 13.5px;
+  }
+  .banner.bad { border-left-color: var(--stamp); }
+  .banner code {
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-size: 12.5px; color: var(--gold);
+  }
+  .banner a { color: var(--gold); }
+
+  .hidden { display: none !important; }
+  .spin { color: var(--gold); }
+
+  @media (max-width: 860px) {
+    .shell { grid-template-columns: 1fr; }
+    .spine { border-right: 0; border-bottom: 1px solid var(--rule); }
+    main { padding: 20px 16px 70px; }
+    .hook { grid-template-columns: 20px 1fr; }
+    .hook .style { grid-column: 2; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Rahasya <span>Engine</span></h1>
+  <div class="gauge" id="g-gateway">gateway <b>checking</b></div>
+  <div class="gauge" id="g-ffmpeg">ffmpeg <b>checking</b></div>
+  <div class="gauge" id="g-voice">voice <b>—</b></div>
+  <div class="gauge" id="g-spend">spent today <b>—</b></div>
+</header>
+
+<div class="shell">
+  <nav class="spine">
+    <h2>Evidence log</h2>
+    <div id="spine"></div>
+  </nav>
+
+  <main>
+    <div class="banner hidden" id="banner"></div>
+
+    <section class="sheet">
+      <h3>Topic</h3>
+      <p class="hint">One mystery per video. The dedup gate will refuse a
+        topic you have already produced, or one too close to it.</p>
+      <div class="entry">
+        <input type="text" id="topic"
+               placeholder="Roopkund jheel ke 500 kankaal"
+               autocomplete="off">
+        <button class="go" id="btn-plan">Write the script</button>
+      </div>
+      <p class="hint" id="plan-note"></p>
+    </section>
+
+    <section class="sheet hidden" id="s-hooks">
+      <h3>Pick the opening <em id="hooks-count"></em></h3>
+      <p class="hint">The first three seconds decide whether this is watched.
+        Your pick becomes beat 1.</p>
+      <div class="hooks" id="hooks"></div>
+    </section>
+
+    <section class="sheet hidden" id="s-script">
+      <h3>The script <em id="script-count"></em></h3>
+      <p class="hint">Devanagari drives pronunciation. Roman is what gets
+        burned on screen. Edit either; timings are re-measured on render.</p>
+      <table class="ledger">
+        <thead>
+          <tr><th>Beat</th><th>Spoken and burned text</th><th>Scene</th>
+            <th>Secs</th></tr>
+        </thead>
+        <tbody id="beats"></tbody>
+      </table>
+      <div class="entry">
+        <select id="captions" style="max-width:240px">
+          <option value="caption_text">Burn Roman Hinglish</option>
+          <option value="voice_text">Burn Devanagari</option>
+        </select>
+        <button class="go" id="btn-produce">Approve and render</button>
+      </div>
+      <p class="hint">Rendering takes a few minutes. The log on the left
+        shows measured progress.</p>
+    </section>
+
+    <section class="sheet hidden" id="s-images">
+      <h3>Scenes <em id="images-note"></em></h3>
+      <div class="strip" id="strip"></div>
+    </section>
+
+    <section class="sheet hidden" id="s-video">
+      <h3>The cut</h3>
+      <div class="lightbox">
+        <video id="player" controls preload="metadata"></video>
+        <div class="facts">
+          <dl id="video-facts"></dl>
+        </div>
+      </div>
+    </section>
+
+    <section class="sheet hidden" id="s-qc">
+      <h3>Inspection</h3>
+      <div class="checks" id="checks"></div>
+      <p class="verdict" id="verdict"></p>
+    </section>
+
+    <section class="sheet hidden" id="s-publish">
+      <h3>Publishing</h3>
+      <p class="hint">Nothing is uploaded from here. Copy these out and post
+        them yourself with the video in front of you.</p>
+      <div class="copy" id="copy"></div>
+      <div id="checklist" class="checks"></div>
+    </section>
+
+    <section class="sheet" id="s-recent">
+      <h3>Earlier runs</h3>
+      <div class="checks" id="recent"></div>
+    </section>
+  </main>
+</div>
+
+<script>
+const STAGES = [
+  ["research","Research"], ["hooks","Hooks"], ["script","Script"],
+  ["metadata","Metadata"], ["moderation","Moderation"], ["dedup","Dedup"],
+  ["images","Scenes"], ["voice","Voice"], ["captions","Captions"],
+  ["render","Render"], ["qc","Inspection"]
+];
+
+let PLAN = null;
+let USE_FAKE = false;
+
+const $ = (id) => document.getElementById(id);
+const show = (id) => $(id).classList.remove("hidden");
+const hide = (id) => $(id).classList.add("hidden");
+
+function buildSpine() {
+  $("spine").innerHTML = STAGES.map(([key, label], i) => `
+    <div class="stage" id="st-${key}">
+      <div class="n">${i + 1}</div>
+      <div class="name">${label}</div>
+      <div class="fact" id="fact-${key}"></div>
+    </div>
+    ${key === "dedup" ? "<hr>" : ""}`).join("");
+}
+
+function markStage(stage, status, detail) {
+  const row = $("st-" + stage);
+  if (!row) return;
+  row.dataset.s = status;
+  if (detail) $("fact-" + stage).textContent = detail.slice(0, 44);
+}
+
+function resetSpine() {
+  STAGES.forEach(([k]) => {
+    const row = $("st-" + k);
+    if (row) { delete row.dataset.s; $("fact-" + k).textContent = ""; }
+  });
+}
+
+function banner(text, bad) {
+  const el = $("banner");
+  el.innerHTML = text;
+  el.className = "banner" + (bad ? " bad" : "");
+}
+
+async function health() {
+  try {
+    const h = await (await fetch("/api/health")).json();
+    const gw = $("g-gateway");
+    const label = { ready: "ready", no_provider: "no provider", down: "down" };
+    gw.innerHTML = `gateway <b>${label[h.omniroute] || h.omniroute}</b>`;
+    gw.className = "gauge " + (h.omniroute === "ready" ? "good"
+      : h.omniroute === "no_provider" ? "warn" : "bad");
+
+    $("g-ffmpeg").innerHTML = `ffmpeg <b>${h.ffmpeg ? "ready" : "missing"}</b>`;
+    $("g-ffmpeg").className = "gauge " + (h.ffmpeg ? "good" : "bad");
+    $("g-voice").innerHTML = `voice <b>${h.voice}</b>`;
+    $("g-spend").innerHTML =
+      `spent today <b>$${h.today_usd.toFixed(4)}</b> of ` +
+      `$${h.daily_ceiling.toFixed(2)}`;
+
+    if (h.omniroute !== "ready") {
+      USE_FAKE = true;
+      banner(
+        `<b>No provider is reachable, so scripts will come from the built-in ` +
+        `sample instead of a model.</b><br>` +
+        `Everything after the script is real: voice, captions, render, ` +
+        `inspection. To use a real model, add one provider key to ` +
+        `<code>~/.omniroute/.env</code> and restart the gateway — ` +
+        `see <code>docs/omniroute-setup.md</code>.`, false);
+    } else {
+      USE_FAKE = false;
+      $("banner").classList.add("hidden");
+    }
+  } catch (err) {
+    banner("Cannot reach the local server. Is <code>python -m engine.app" +
+           "</code> still running?", true);
+  }
+}
+
+function renderHooks(plan) {
+  $("hooks-count").textContent = `${plan.hooks.length} variants`;
+  $("hooks").innerHTML = plan.hooks.map((h, i) => `
+    <label class="hook">
+      <input type="radio" name="hook" value="${h.variant_id}"
+             ${i === 0 ? "checked" : ""}>
+      <div class="style">${h.style}</div>
+      <div>
+        <div class="roman">${esc(h.caption_text)}</div>
+        <div class="deva">${esc(h.voice_text)}</div>
+      </div>
+    </label>`).join("");
+  show("s-hooks");
+}
+
+const MOTIONS = ["zoom_in", "zoom_out", "move_left", "move_right"];
+const TRANSITIONS = ["fade", "slide_left", "slide_right", "zoom", "blur"];
+const esc = (s) => (s || "").replace(/[&<>"]/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function renderBeats(plan) {
+  const secs = plan.script.beats.reduce(
+    (t, b) => t + (b.measured_seconds ?? b.target_seconds), 0);
+  $("script-count").textContent =
+    `${plan.script.beats.length} beats, ${secs.toFixed(0)}s`;
+
+  $("beats").innerHTML = plan.script.beats.map((b) => `
+    <tr data-beat="${b.beat_id}">
+      <td class="beat">${b.beat_id}<span class="role">${b.role}</span></td>
+      <td>
+        <div class="twin">
+          <textarea class="deva" rows="2" data-f="voice_text">${esc(b.voice_text)}</textarea>
+          <textarea rows="2" data-f="caption_text">${esc(b.caption_text)}</textarea>
+          <input type="text" data-f="on_screen_text" placeholder="punch card, 2-4 words, optional" value="${esc(b.on_screen_text)}">
+        </div>
+      </td>
+      <td>
+        <textarea rows="3" data-f="visual_prompt">${esc(b.visual_prompt)}</textarea>
+        <div class="mini">
+          <select data-f="motion">${MOTIONS.map((m) =>
+            `<option ${m === b.motion ? "selected" : ""}>${m}</option>`).join("")}</select>
+          <select data-f="transition">${TRANSITIONS.map((t) =>
+            `<option ${t === b.transition ? "selected" : ""}>${t}</option>`).join("")}</select>
+        </div>
+      </td>
+      <td class="secs">${(b.measured_seconds ?? b.target_seconds).toFixed(1)}</td>
+    </tr>`).join("");
+  show("s-script");
+}
+
+function collectBeats() {
+  return [...document.querySelectorAll("#beats tr")].map((row) => {
+    const out = { beat_id: row.dataset.beat };
+    row.querySelectorAll("[data-f]").forEach((el) => {
+      out[el.dataset.f] = el.value;
+    });
+    return out;
+  });
+}
+
+function renderStrip(plan) {
+  const beats = plan.script.beats.filter((b) => b.image_path);
+  if (!beats.length) return;
+  const placeholders = beats.filter(
+    (b) => b.image_provider === "placeholder").length;
+  $("images-note").textContent = placeholders
+    ? `${placeholders} of ${beats.length} are placeholders`
+    : `${beats.length} generated`;
+  $("strip").innerHTML = beats.map((b) => `
+    <figure>
+      <img src="/api/frame/${plan.plan_id}/${b.beat_id}" alt="${b.beat_id}"
+           loading="lazy">
+      <figcaption class="${b.image_provider === 'placeholder' ? 'ph' : ''}">
+        ${b.beat_id} ${b.image_provider === "placeholder" ? "placeholder" : ""}
+      </figcaption>
+    </figure>`).join("");
+  show("s-images");
+}
+
+function renderResult(result) {
+  const probe = result.probe || {};
+  $("player").src = "/media/" + result.video.split(/[\\/]/).pop();
+  $("video-facts").innerHTML = `
+    <dt>Duration</dt><dd>${(probe.duration || 0).toFixed(2)}s</dd>
+    <dt>Frame</dt><dd>${probe.width}&times;${probe.height}</dd>
+    <dt>Size</dt><dd>${((probe.bytes || 0) / 1048576).toFixed(2)} MB</dd>
+    <dt>Audio</dt><dd>${probe.has_audio ? "present" : "missing"}</dd>
+    <dt>Cost</dt><dd>$${(result.cost_usd || 0).toFixed(6)}</dd>
+    <dt>Scenes</dt><dd>${Object.entries(result.image_providers || {})
+      .map(([k, v]) => `${v} ${k}`).join(", ")}</dd>`;
+  show("s-video");
+
+  const card = result.scorecard || { checks: [], passed: false };
+  $("checks").innerHTML = card.checks.map((c) => `
+    <div class="check ${c.ok ? "ok" : (c.kind === "hard" ? "fail" : "warn")}">
+      <div class="dot"></div>
+      <div>${c.name.replace(/_/g, " ")}</div>
+      <div class="detail">${esc(c.detail)}</div>
+    </div>`).join("");
+  const v = $("verdict");
+  v.className = "verdict " + (card.passed ? "pass" : "fail");
+  v.textContent = card.passed
+    ? "Cleared for a human to review and publish."
+    : "Held back. Fix the failures above, then render again.";
+  show("s-qc");
+  loadPublish();
+  loadRecent();
+}
+
+async function loadPublish() {
+  if (!PLAN) return;
+  try {
+    const p = await (await fetch(`/api/plan/${PLAN.plan_id}/publish`)).json();
+    if (p.detail) return;
+    const fields = [
+      ["Title", p.youtube.snippet.title],
+      ["Instagram caption", p.instagram.caption],
+      ["Pinned comment", p.youtube._pinned_comment],
+      ["YouTube description", p.youtube.snippet.description],
+    ];
+    $("copy").innerHTML = fields.map(([label, value], i) => `
+      <div>
+        <label>${label}</label>
+        <textarea id="cp-${i}" rows="${value.length > 120 ? 4 : 2}">${esc(value)}</textarea>
+        <button onclick="copyField(${i})">Copy</button>
+      </div>`).join("");
+    $("checklist").innerHTML = p.checklist.map((item) => `
+      <div class="check ${item.startsWith("UNSOURCED") ||
+        item.includes("placeholder visuals") ? "fail" : "warn"}">
+        <div class="dot"></div><div>${esc(item)}</div><div class="detail"></div>
+      </div>`).join("");
+    show("s-publish");
+  } catch (err) { /* metadata not ready yet */ }
+}
+
+function copyField(i) {
+  const el = $("cp-" + i);
+  el.select();
+  navigator.clipboard.writeText(el.value);
+}
+
+async function loadRecent() {
+  try {
+    const rows = await (await fetch("/api/plans?limit=12")).json();
+    $("recent").innerHTML = rows.length ? rows.map((r) => `
+      <div class="check ${r.status === "produced" ? "ok"
+        : r.status.startsWith("rejected") || r.status === "qc_failed"
+        ? "fail" : "warn"}">
+        <div class="dot"></div>
+        <div>${esc(r.topic || r.slug)}
+          ${r.video ? `&nbsp;<a href="/media/${r.video.split(/[\\/]/).pop()}"
+             style="color:var(--gold)">watch</a>` : ""}</div>
+        <div class="detail">${r.status} &nbsp; $${(r.usd || 0).toFixed(4)}</div>
+      </div>`).join("")
+      : `<p class="hint">Nothing produced yet.</p>`;
+  } catch (err) { /* ignore */ }
+}
+
+function listen(channelId, onComplete) {
+  const source = new EventSource(`/api/events/${channelId}`);
+  source.onmessage = (message) => {
+    const ev = JSON.parse(message.data);
+    if (ev.stage === "complete") {
+      source.close();
+      onComplete(ev);
+      return;
+    }
+    markStage(ev.stage, ev.status, ev.detail);
+  };
+  source.onerror = () => source.close();
+  return source;
+}
+
+$("btn-plan").onclick = async () => {
+  const topic = $("topic").value.trim();
+  if (!topic) { $("topic").focus(); return; }
+
+  resetSpine();
+  ["s-hooks", "s-script", "s-images", "s-video", "s-qc", "s-publish"]
+    .forEach(hide);
+  $("btn-plan").disabled = true;
+  $("plan-note").innerHTML = `<span class="spin">Working through research,
+    hooks, script and the gates.</span>`;
+
+  try {
+    const start = await (await fetch("/api/plan/async", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ topic, use_fake: USE_FAKE })
+    })).json();
+
+    listen(start.job_id, async (ev) => {
+      $("btn-plan").disabled = false;
+      if (ev.status === "failed") {
+        $("plan-note").textContent = "";
+        banner("Stopped: " + esc(ev.detail), true);
+        return;
+      }
+      $("plan-note").textContent = "";
+      PLAN = await (await fetch(`/api/plan/${ev.payload.plan_id}`)).json();
+      renderHooks(PLAN);
+      renderBeats(PLAN);
+      $("s-hooks").scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  } catch (err) {
+    $("btn-plan").disabled = false;
+    $("plan-note").textContent = "";
+    banner("Request failed: " + esc(String(err)), true);
+  }
+};
+
+$("btn-produce").onclick = async () => {
+  if (!PLAN) return;
+  const chosen = document.querySelector("input[name=hook]:checked");
+  if (!chosen) return;
+
+  $("btn-produce").disabled = true;
+  ["s-images", "s-video", "s-qc", "s-publish"].forEach(hide);
+
+  try {
+    await fetch(`/api/plan/${PLAN.plan_id}/approve`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chosen_hook: chosen.value, beats: collectBeats() })
+    });
+    await fetch(`/api/plan/${PLAN.plan_id}/produce`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ captions_source: $("captions").value,
+                             use_fake: USE_FAKE })
+    });
+
+    listen(PLAN.plan_id, async (ev) => {
+      $("btn-produce").disabled = false;
+      if (ev.status === "failed") {
+        banner("Render stopped: " + esc(ev.detail), true);
+        return;
+      }
+      PLAN = await (await fetch(`/api/plan/${PLAN.plan_id}`)).json();
+      renderStrip(PLAN);
+      renderResult(ev.payload);
+      $("s-video").scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  } catch (err) {
+    $("btn-produce").disabled = false;
+    banner("Request failed: " + esc(String(err)), true);
+  }
+};
+
+$("topic").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $("btn-plan").click();
+});
+
+buildSpine();
+health();
+loadRecent();
+</script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+# Brain + web panel
+httpx
+pydantic
+fastapi
+uvicorn
+
+# Voice: local hi-IN neural TTS, deliberately not routed through OmniRoute
+edge-tts
+
+# Visuals: placeholder composition and image normalisation
+pillow
+
+# Video: ships the ffmpeg v7.1 binary built with libass + libharfbuzz +
+# fontconfig, which is what makes correct caption shaping possible
+imageio-ffmpeg
+
+# Fallback text shaper, only needed if you replace the libass caption path
+uharfbuzz
+
+# Tests
+pytest

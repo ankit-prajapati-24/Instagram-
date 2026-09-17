@@ -237,7 +237,8 @@ def produce_stage(plan: ReelPlan, client, store, settings, *,
     scorecard = run_qc(plan, duration_min=settings.duration_min,
                        duration_max=settings.duration_max,
                        max_silence_gap=largest_silence_gap(plan),
-                       word_alignment=word_alignment(plan))
+                       word_alignment=word_alignment(plan),
+                       actual_duration=info.get("duration"))
     plan.cost.usd = store.plan_cost(plan.plan_id)
     store.save_plan(plan, status="produced" if scorecard.passed
                     else "qc_failed")
