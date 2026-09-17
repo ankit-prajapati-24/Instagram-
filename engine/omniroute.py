@@ -33,6 +33,24 @@ class OmniRouteError(RuntimeError):
         self.body = body
 
 
+class NoProviderError(OmniRouteError):
+    """The gateway is up but could not route to any upstream provider.
+
+    Verified against a clean install: OmniRoute answers /v1/models with ~99
+    ``auto/*`` aliases while ``nodes list`` reports ``{"nodes": []}``, so every
+    chat call comes back "Maximum combo retry limit reached". That is a setup
+    gap, not a bug, and it must never be retried — it needs a provider key.
+    """
+
+
+# Gateway defaults. OmniRoute rejects a request with no model field at all
+# ("Missing model"), so a model is always sent.
+DEFAULT_CHAT_MODEL = "auto/best-chat"
+DEFAULT_EMBED_MODEL = "auto/best-embedding"
+DEFAULT_IMAGE_MODEL = "auto/best-image"
+DEFAULT_MODERATION_MODEL = "omni-moderation-latest"
+
+
 @dataclass
 class CostRecord:
     usd: float = 0.0
@@ -116,11 +134,17 @@ def extract_json(text: str) -> Any:
 class OmniRouteClient:
     def __init__(self, base: str, key: str, *, timeout: float = 180.0,
                  transport: httpx.BaseTransport | None = None,
-                 max_attempts: int = 5, backoff_base: float = 0.8):
+                 max_attempts: int = 5, backoff_base: float = 0.8,
+                 chat_model: str = DEFAULT_CHAT_MODEL,
+                 embed_model: str = DEFAULT_EMBED_MODEL,
+                 image_model: str = DEFAULT_IMAGE_MODEL):
         self.base = base.rstrip("/")
         self.key = key
         self.max_attempts = max_attempts
         self.backoff_base = backoff_base
+        self.default_chat_model = chat_model
+        self.default_embed_model = embed_model
+        self.default_image_model = image_model
         self.calls: list[CostRecord] = []
         self.total_usd = 0.0
         self._client = httpx.Client(
@@ -146,6 +170,13 @@ class OmniRouteClient:
         self.total_usd += cost.usd
         return cost
 
+    @staticmethod
+    def _is_no_provider(body: str) -> bool:
+        needles = ("maximum combo retry limit", "no credentials for provider",
+                   "no matching combo")
+        low = body.lower()
+        return any(n in low for n in needles)
+
     def _post(self, path: str, payload: dict) -> httpx.Response:
         url = f"{self.base}/{path.lstrip('/')}"
         last: Exception | None = None
@@ -155,16 +186,23 @@ class OmniRouteClient:
             except httpx.HTTPError as exc:
                 last = exc
             else:
+                body = response.text[:600]
+                # Never burn retries on a missing provider key.
+                if response.status_code >= 400 and self._is_no_provider(body):
+                    raise NoProviderError(
+                        "OmniRoute is running but no upstream provider is "
+                        "configured. Add one provider key, then retry "
+                        "(see docs/omniroute-setup.md).",
+                        status=response.status_code, body=body)
+
                 if response.status_code not in RETRY_STATUS:
                     if response.status_code >= 400:
                         raise OmniRouteError(
                             f"{path} failed with {response.status_code}",
-                            status=response.status_code,
-                            body=response.text[:500])
+                            status=response.status_code, body=body)
                     return response
                 last = OmniRouteError(f"{path} got {response.status_code}",
-                                      status=response.status_code,
-                                      body=response.text[:500])
+                                      status=response.status_code, body=body)
 
             if attempt < self.max_attempts - 1 and self.backoff_base:
                 sleep = self.backoff_base * (2 ** attempt)
@@ -178,12 +216,11 @@ class OmniRouteClient:
              want_json: bool = False, temperature: float = 0.85,
              max_tokens: int = 4096) -> ChatResult:
         payload: dict[str, Any] = {
+            "model": model or self.default_chat_model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-        if model:
-            payload["model"] = model
         if want_json:
             payload["response_format"] = {"type": "json_object"}
 
@@ -197,9 +234,9 @@ class OmniRouteClient:
 
     def image(self, prompt: str, *, model: str | None = None,
               size: str = "1024x1792", n: int = 1) -> list[bytes]:
-        payload: dict[str, Any] = {"prompt": prompt, "size": size, "n": n}
-        if model:
-            payload["model"] = model
+        payload: dict[str, Any] = {
+            "model": model or self.default_image_model,
+            "prompt": prompt, "size": size, "n": n}
 
         response = self._post("images/generations", payload)
         self._record(response.headers)
@@ -217,9 +254,9 @@ class OmniRouteClient:
 
     def embed(self, texts: Iterable[str], *,
               model: str | None = None) -> list[list[float]]:
-        payload: dict[str, Any] = {"input": list(texts)}
-        if model:
-            payload["model"] = model
+        payload: dict[str, Any] = {
+            "model": model or self.default_embed_model,
+            "input": list(texts)}
 
         response = self._post("embeddings", payload)
         self._record(response.headers)
@@ -228,7 +265,7 @@ class OmniRouteClient:
         return [r["embedding"] for r in rows]
 
     def moderate(self, text: str, *,
-                 model: str = "omni-moderation-latest") -> ModerationResult:
+                 model: str = DEFAULT_MODERATION_MODEL) -> ModerationResult:
         response = self._post("moderations", {"input": text, "model": model})
         cost = self._record(response.headers)
         result = (response.json().get("results") or [{}])[0]
@@ -240,9 +277,38 @@ class OmniRouteClient:
         )
 
     def ping(self, timeout: float = 2.5) -> bool:
-        """Is the gateway actually up? Used by /api/health, never for routing."""
+        """Is the gateway process answering at all?"""
         try:
             r = self._client.get(f"{self.base}/models", timeout=timeout)
             return r.status_code < 500
         except httpx.HTTPError:
             return False
+
+    def health(self, timeout: float = 25.0) -> dict:
+        """Three distinct states, because they need three different fixes.
+
+        ``down``        -> gateway not running: start it
+        ``no_provider`` -> gateway up, zero provider keys: add one
+        ``ready``       -> a chat completion actually came back
+        """
+        if not self.ping(timeout=min(timeout, 5.0)):
+            return {"state": "down", "models": 0,
+                    "detail": f"no answer from {self.base}"}
+
+        models = 0
+        try:
+            r = self._client.get(f"{self.base}/models", timeout=timeout)
+            models = len(r.json().get("data", []))
+        except Exception:
+            pass
+
+        try:
+            self.chat([{"role": "user", "content": "ok"}], max_tokens=4,
+                      temperature=0)
+        except NoProviderError as exc:
+            return {"state": "no_provider", "models": models,
+                    "detail": str(exc)}
+        except OmniRouteError as exc:
+            return {"state": "no_provider", "models": models,
+                    "detail": f"chat failed: {exc}"}
+        return {"state": "ready", "models": models, "detail": "chat ok"}
