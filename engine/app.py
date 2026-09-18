@@ -153,7 +153,13 @@ def create_app(db_path: str | Path | None = None,
             "base": settings.omniroute_base,
             "ffmpeg": ffmpeg_ok,
             "ffmpeg_path": settings.ffmpeg,
-            "voice": settings.voice,
+            # Report the engine actually in use. This said "hi-IN-Madhur"
+            # while Piper was doing the work, because it read the edge-tts
+            # fallback setting rather than the active one.
+            "voice_engine": settings.voice_engine,
+            "voice": (settings.piper_voice
+                      if settings.voice_engine == "piper"
+                      else settings.voice),
             "today_usd": store.today_usd(),
             "daily_ceiling": settings.daily_usd_ceiling,
             "stages": list(Stage.ORDER),

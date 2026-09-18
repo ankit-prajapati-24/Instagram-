@@ -418,7 +418,9 @@ async function health() {
 
     $("g-ffmpeg").innerHTML = `ffmpeg <b>${h.ffmpeg ? "ready" : "missing"}</b>`;
     $("g-ffmpeg").className = "gauge " + (h.ffmpeg ? "good" : "bad");
-    $("g-voice").innerHTML = `voice <b>${h.voice}</b>`;
+    $("g-voice").innerHTML =
+      `voice <b>${h.voice}</b> <span style="color:var(--muted)">`
+      + `${h.voice_engine || ""}</span>`;
     $("g-spend").innerHTML =
       `spent today <b>$${h.today_usd.toFixed(4)}</b> of ` +
       `$${h.daily_ceiling.toFixed(2)}`;
