@@ -45,7 +45,10 @@ class Settings:
     # --- OmniRoute ---------------------------------------------------------
     omniroute_base: str = field(
         default_factory=lambda: os.getenv(
-            "OMNIROUTE_BASE", "http://localhost:20128/v1"))
+            # 127.0.0.1, not localhost: on Windows localhost resolves to
+            # ::1 first, and a gateway bound only to IPv4 then looks
+            # "down" while curl on 127.0.0.1 answers fine.
+            "OMNIROUTE_BASE", "http://127.0.0.1:20128/v1"))
     omniroute_key: str = field(
         default_factory=lambda: os.getenv("OMNIROUTE_KEY", "omniroute"))
     model_strong: str = field(
