@@ -122,3 +122,66 @@ def test_entity_cooldown_fails_on_layer_four(store):
     assert not result.passed
     assert result.layer == "cooldown"
     assert "Roopkund" in result.detail
+
+
+# --- the cooldown layer must not lock the whole engine ----------------------
+# Regression: FakeOmniRoute returned the same three entities for every topic.
+# They were written against the first approved plan, and from then on every
+# new topic tripped the cooldown layer — the panel was unusable in exactly
+# the fallback mode it ships in.
+
+def test_fake_client_derives_entities_from_the_typed_topic():
+    from engine.fake_client import FakeOmniRoute
+    client = FakeOmniRoute()
+
+    def entities(topic):
+        prompt = f"STAGE:research\nTOPIC: {topic}\n"
+        return client.chat([{"role": "user", "content": prompt}],
+                           want_json=True).data["entities"]
+
+    taj = entities("tajmahal ke andar jana mana kyu hai")
+    kuldhara = entities("Kuldhara gaon ek raat mein khaali kyun hua")
+    assert taj != kuldhara
+    assert "Tajmahal" in taj
+    assert "Kuldhara" in kuldhara
+    # Hinglish particles carry no identity and must not become entities.
+    assert not {"Kyu", "Hai", "Mein", "Ek"} & set(taj + kuldhara)
+
+
+def test_two_different_topics_both_pass_the_cooldown_layer(store):
+    store.save_plan(make_plan(plan_id="p1", raw="Kuldhara gaon"),
+                    status="produced")
+    store.record_entities("p1", ["Kuldhara", "Jaisalmer"])
+    fresh = Topic.make("Tajmahal ke andar", entities=["Tajmahal", "Agra"])
+    assert check(fresh, store).passed
+
+
+def test_cooldown_detail_reports_days_remaining(store):
+    store.save_plan(make_plan(), status="produced")
+    store.record_entities("p1", ["Roopkund"])
+    detail = store.cooldown_detail(["Roopkund"], days=45)
+    assert detail[0][0] == "Roopkund"
+    assert detail[0][1] == 45          # recorded just now
+    result = check(Topic.make("x", entities=["Roopkund"]), store)
+    assert "free in 45d" in result.detail
+
+
+def test_clearing_entities_unblocks_a_topic(store):
+    store.save_plan(make_plan(), status="produced")
+    store.record_entities("p1", ["Roopkund", "Uttarakhand"])
+    blocked = Topic.make("naya topic", entities=["Roopkund"])
+    assert not check(blocked, store).passed
+
+    assert store.clear_entities() == 2
+    assert check(blocked, store).passed
+
+
+def test_clearing_entities_for_one_plan_leaves_the_rest(store):
+    store.save_plan(make_plan(plan_id="p1"), status="produced")
+    store.save_plan(make_plan(plan_id="p2", raw="other topic"),
+                    status="produced")
+    store.record_entities("p1", ["Roopkund"])
+    store.record_entities("p2", ["Bhangarh"])
+    assert store.clear_entities("p1") == 1
+    assert store.entity_last_seen("Roopkund") is None
+    assert store.entity_last_seen("Bhangarh") is not None

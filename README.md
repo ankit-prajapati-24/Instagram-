@@ -27,8 +27,16 @@ Hindi/India audience that is where the money actually is —
 
 ## Run it
 
-```bash
+```bat
 pip install -r requirements.txt
+start.bat
+```
+
+`start.bat` brings up OmniRoute and the panel in their own console windows, so
+they keep running after you close the terminal you launched from, and each has
+a readable log. `stop.bat` shuts both down. To run just the panel:
+
+```bash
 python -m engine.app          # http://127.0.0.1:8765
 ```
 
@@ -44,9 +52,10 @@ whole pipeline work before spending anything. To get real scripts, follow
 ## Verify it
 
 ```bash
-python scripts/verify_e2e.py     # full pipeline, fake brain, real everything else
-python scripts/probe_omniroute.py  # which gateway endpoints actually answer
-python -m pytest tests/ -q       # 140 tests
+python scripts/verify_e2e.py      # full pipeline, fake brain, real everything else
+python scripts/probe_omniroute.py # which gateway endpoints actually answer
+python scripts/reset_cooldown.py  # what the dedup gate is currently blocking
+python -m pytest tests/ -q        # 145 tests
 ```
 
 `verify_e2e.py` exits non-zero unless it produced a playable 1080x1920 MP4 with
@@ -64,7 +73,7 @@ Measured on this machine, 2026-09-17/18:
 | Caption burn-in | libass, with karaoke word highlighting |
 | Dedup gate | refused a repeat topic on the exact-hash layer |
 | Web panel | full flow driven end to end, including an edit to the hook beat surviving approval. No console errors, no mobile overflow |
-| 140 tests | `pytest tests/ -q` |
+| 145 tests | `pytest tests/ -q` |
 
 | Not verified | Why |
 |---|---|
@@ -114,6 +123,8 @@ more than 0.35s.
 
 1. One human gate, between script and render.
 2. Semantic dedup before production — cosine 0.88, 45-day entity cooldown.
+   `scripts/reset_cooldown.py` shows what is blocked and can clear it when
+   the recorded entities are wrong.
 3. No auto-publish. `engine/publish/payloads.py` imports no HTTP library, and a
    test asserts it stays that way.
 4. Synthetic-media disclosure set on every payload. QC hard-fails without it.

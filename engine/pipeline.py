@@ -125,6 +125,21 @@ def plan_stage(topic_raw: str, client, store, settings, *,
             f"{len(provenance.claims)} sourced claims, "
             f"{len(provenance.entities)} entities"))
 
+        # Cooldown is checked here, as soon as the entities exist, rather than
+        # after metadata. Waiting meant a rejection cost three more agent
+        # calls (hooks, script, metadata) for a plan that was never viable.
+        if provenance.entities:
+            cooling = store.cooldown_detail(provenance.entities,
+                                            settings.entity_cooldown_days)
+            if cooling:
+                listed = ", ".join(f"{name} (free in {days}d)"
+                                   for name, days in cooling)
+                emit(PipelineEvent(Stage.DEDUP, "failed",
+                                   f"covered too recently: {listed}",
+                                   {"layer": "cooldown"}))
+                raise GateError("dedup", f"[cooldown] covered too "
+                                         f"recently: {listed}")
+
         emit(PipelineEvent(Stage.HOOKS, "started"))
         hooks, cost = run_hooks(client, topic, provenance,
                                model=settings.model_strong or None)
