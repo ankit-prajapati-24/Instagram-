@@ -149,8 +149,12 @@ def plan_stage(topic_raw: str, client, store, settings, *,
                            {"hooks": [h.model_dump() for h in hooks]}))
 
         emit(PipelineEvent(Stage.SCRIPT, "started"))
+        word_target = int(settings.target_seconds *
+                          settings.words_per_second)
         script, cost = run_script(client, topic, provenance, hooks[0],
-                                  model=settings.model_strong or None)
+                                  model=settings.model_strong or None,
+                                  word_target=word_target,
+                                  beats=12)
         store.record_cost(plan.plan_id, Stage.SCRIPT, cost)
         script.chosen_hook = hooks[0].variant_id
         plan.script = script
@@ -234,10 +238,13 @@ def produce_stage(plan: ReelPlan, client, store, settings, *,
     emit(PipelineEvent(Stage.IMAGES, "done", ", ".join(
         f"{k}:{v}" for k, v in counts.items()), {"providers": counts}))
 
-    emit(PipelineEvent(Stage.VOICE, "started", settings.voice))
+    emit(PipelineEvent(Stage.VOICE, "started",
+                       f"{settings.voice_engine}: "
+                       f"{settings.piper_voice if settings.voice_engine == 'piper' else settings.voice}"))
     synth_plan(plan, settings.work_dir, settings,
-               progress=lambda i, n, beat, secs: emit(PipelineEvent(
-                   Stage.VOICE, "info", f"{i}/{n} {beat} {secs:.1f}s")))
+               progress=lambda i, n, beat, secs, engine: emit(PipelineEvent(
+                   Stage.VOICE, "info",
+                   f"{i}/{n} {beat} {secs:.1f}s via {engine}")))
     emit(PipelineEvent(Stage.VOICE, "done",
                        f"{plan.duration():.1f}s measured"))
 

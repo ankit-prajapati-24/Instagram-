@@ -1,25 +1,26 @@
-"""Hindi voice via local edge-tts.
+"""Hindi voice.
 
-Deliberately not routed through OmniRoute. The gateway's /v1/audio/speech
-documents only ``openai/tts-1``, which speaks Hindi with a foreign accent, and
-on a clean install it answers "No credentials for provider: openai" anyway.
-edge-tts gives genuine ``hi-IN`` neural voices, free and unmetered.
+Two engines live behind one entry point. Piper is the default, chosen by ear
+after a side-by-side of twelve edge-tts voices, three Piper voices and several
+tuning passes; edge-tts is the fallback when Piper cannot run.
 
-Timing is two-tier, and this is a measured decision rather than a preference.
-edge-tts 7.2.8 emits **only** ``SentenceBoundary`` events — verified against
-hi-IN-MadhurNeural, hi-IN-SwaraNeural and en-US-GuyNeural, none of which
-produced a single ``WordBoundary``. So:
+Neither goes through OmniRoute. The gateway's /v1/audio/speech documents only
+``openai/tts-1``, which speaks Hindi with a foreign accent, and on this
+install it answers "No credentials for provider: openai" anyway.
 
-  * sentence start/end come from the service and are exact;
-  * word positions inside a sentence are interpolated by character length.
+Timing, and why captions do not use the engine's own word timings:
 
-For 3-5 second beats of 5-10 words that interpolation is visually
-indistinguishable from true per-word timing, and it stays deterministic.
-``WordBoundary`` is still honoured if a future version starts emitting it.
+  * edge-tts 7.2.8 emits **only** ``SentenceBoundary`` events — verified
+    against hi-IN-MadhurNeural, hi-IN-SwaraNeural and en-US-GuyNeural, none
+    of which produced a single ``WordBoundary``.
+  * Piper reports no timings at all.
 
-Tone note: both hi-IN voices are tagged "Friendly, Positive", which is the
-wrong register for dark mystery. The default rate/pitch offsets in
-engine.config pull them darker. That needs an ear test, not a unit test.
+Either way the narration is Devanagari while the burned caption is Roman
+Hinglish, so their word counts do not line up and the spoken timings could
+not be reused for captions regardless. Each beat is its own audio file, so
+its span is measured exactly and caption words are interpolated inside it by
+character length. For 3-5 second beats that is visually indistinguishable
+from true per-word timing, and it stays deterministic.
 """
 
 from __future__ import annotations
@@ -137,30 +138,68 @@ def probe_duration(path: str | Path, ffmpeg: str) -> float:
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
+def synth_beat_edge(beat_text: str, target: Path, settings) -> int:
+    """edge-tts path. Returns how many boundary spans came back."""
+    spans = asyncio.run(synth_beat(
+        beat_text, target, voice=settings.voice,
+        rate=settings.voice_rate, pitch=settings.voice_pitch))
+    return len(spans)
+
+
+def synth_beat_piper(beat_text: str, target: Path, settings) -> int:
+    """Piper path. Piper reports no timings at all, hence 0."""
+    from engine.media import piper_voice
+
+    piper_voice.synth(beat_text, target, settings)
+    return 0
+
+
 def synth_plan(plan: ReelPlan, work_dir: str | Path, settings,
                progress=None) -> None:
-    """Fill audio_path, measured_seconds and words for every beat."""
+    """Fill audio_path, measured_seconds and words for every beat.
+
+    The engine is chosen by ``settings.voice_engine``. Piper is the default;
+    edge-tts is the fallback, used when Piper is selected but cannot run at
+    all — a missing model, a failed download, a broken install. Falling back
+    once and carrying on is better than losing an approved script to a voice
+    problem, and the engine that was actually used is reported through
+    ``progress``.
+    """
     work_dir = Path(work_dir) / plan.plan_id / "audio"
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    async def run() -> None:
-        for index, beat in enumerate(plan.script.beats):
-            target = work_dir / f"{beat.beat_id}.mp3"
-            spoken = await synth_beat(
-                beat.voice_text, target, voice=settings.voice,
-                rate=settings.voice_rate, pitch=settings.voice_pitch)
-            beat.audio_path = str(target)
-            beat.measured_seconds = probe_duration(target, settings.ffmpeg)
-            # Burned captions are Roman, the voice is Devanagari; align the
-            # on-screen words to this beat's measured span, not to `spoken`.
-            beat.words = caption_timings(beat.caption_text,
-                                         beat.measured_seconds)
-            beat.spoken_words = len(spoken)
-            if progress:
-                progress(index + 1, len(plan.script.beats), beat.beat_id,
-                         beat.measured_seconds)
+    engine = (settings.voice_engine or "piper").strip().lower()
 
-    asyncio.run(run())
+    for index, beat in enumerate(plan.script.beats):
+        target = work_dir / f"{beat.beat_id}.mp3"
+
+        if engine == "piper":
+            from engine.media.piper_voice import PiperUnavailable
+            try:
+                spoken = synth_beat_piper(beat.voice_text, target, settings)
+                used = "piper"
+            except (PiperUnavailable, OSError) as exc:
+                # Fall back for the rest of the plan too: if Piper is broken
+                # for one beat it is broken for all of them, and retrying it
+                # per beat would just be slow.
+                engine = "edge"
+                spoken = synth_beat_edge(beat.voice_text, target, settings)
+                used = f"edge (piper unavailable: {str(exc)[:60]})"
+        else:
+            spoken = synth_beat_edge(beat.voice_text, target, settings)
+            used = "edge"
+
+        beat.audio_path = str(target)
+        beat.measured_seconds = probe_duration(target, settings.ffmpeg)
+        # Burned captions are Roman, the voice is Devanagari; align the
+        # on-screen words to this beat's measured span. Piper reports no
+        # timings, so this is the only source either way.
+        beat.words = caption_timings(beat.caption_text,
+                                     beat.measured_seconds)
+        beat.spoken_words = spoken
+        if progress:
+            progress(index + 1, len(plan.script.beats), beat.beat_id,
+                     beat.measured_seconds, used)
 
 
 def stitch_narration(plan: ReelPlan, out_path: str | Path,
