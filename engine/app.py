@@ -133,8 +133,14 @@ def create_app(db_path: str | Path | None = None,
             gateway = cached
         else:
             try:
-                with client_for(False) as probe:
-                    gateway = probe.health(timeout=6.0)
+                # Probe with the cheap model, not the strong one: a
+                # reasoning model can take 15s+ and would report a healthy
+                # gateway as down.
+                probe = OmniRouteClient(
+                    base=settings.omniroute_base, key=settings.omniroute_key,
+                    chat_model=settings.model_cheap or "auto/best-chat")
+                with probe:
+                    gateway = probe.health(timeout=20.0)
             except Exception as exc:
                 gateway = {"state": "down", "models": 0,
                            "detail": str(exc)[:200]}

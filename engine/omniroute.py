@@ -395,7 +395,10 @@ class OmniRouteClient:
                 f"{self.base}/chat/completions",
                 json={"model": self.default_chat_model,
                       "messages": [{"role": "user", "content": "ok"}],
-                      "max_tokens": 4, "temperature": 0},
+                      "max_tokens": 4, "temperature": 0,
+                      # Same as chat(): without this the gateway may answer
+                      # SSE, and health would call a working gateway dead.
+                      "stream": False},
                 timeout=timeout)
         except httpx.TimeoutException:
             return {"state": "no_provider", "models": models,
@@ -422,7 +425,7 @@ class OmniRouteClient:
                     "detail": f"{no_provider_hint} (gateway returned 200 with "
                               f"an empty body)"}
         try:
-            content = (response.json().get("choices") or [{}])[0].get(
+            content = (_decode_completion(raw).get("choices") or [{}])[0].get(
                 "message", {}).get("content")
         except (json.JSONDecodeError, AttributeError, IndexError, TypeError):
             return {"state": "no_provider", "models": models,
