@@ -4,7 +4,13 @@ pydantic
 fastapi
 uvicorn
 
-# Voice: local hi-IN neural TTS, deliberately not routed through OmniRoute
+# Voice: local hi-IN neural TTS, deliberately not routed through OmniRoute.
+# Piper is the default engine -- offline, MIT-licensed, chosen by ear over
+# twelve edge-tts voices. It downloads its ~61 MB voice model on first use.
+piper-tts
+
+# edge-tts is the fallback engine, used when RAHASYA_VOICE_ENGINE=edge or
+# when Piper cannot synthesise.
 edge-tts
 
 # Visuals: placeholder composition and image normalisation
