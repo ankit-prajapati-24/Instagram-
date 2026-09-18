@@ -79,3 +79,57 @@ def test_plan_survives_json_roundtrip():
     again = ReelPlan.model_validate_json(plan.model_dump_json())
     assert again.script.beats[0].measured_seconds == pytest.approx(4.0)
     assert again.topic.dedupe_hash == plan.topic.dedupe_hash
+
+
+# --- absorbing the type near-misses models actually make --------------------
+# Reported from the panel: research returned beat_id as the integer 1 and the
+# whole run died with "Input should be a valid string". Losing four agent
+# calls over 1 vs "1" is not a defensible trade.
+
+def test_claim_accepts_an_integer_beat_id():
+    from engine.contract import Claim
+    claim = Claim(beat_id=1, text="x", source_url="https://e.org")
+    assert claim.beat_id == "1"
+
+
+def test_hook_and_beat_accept_integer_ids():
+    from engine.contract import Hook
+    hook = Hook(variant_id=2, voice_text="v", caption_text="c",
+                style="question")
+    assert hook.variant_id == "2"
+
+    beat = Beat(beat_id=3, role="hook", voice_text="v", caption_text="c",
+                target_seconds=4.0, visual_prompt="p", motion="zoom_in",
+                transition="fade")
+    assert beat.beat_id == "3"
+
+
+def test_durations_accept_a_string_number():
+    beat = Beat(beat_id="b1", role="hook", voice_text="v", caption_text="c",
+                target_seconds="4.5", visual_prompt="p", motion="zoom_in",
+                transition="fade")
+    assert beat.target_seconds == pytest.approx(4.5)
+
+
+def test_durations_accept_a_seconds_suffix():
+    beat = Beat(beat_id="b1", role="hook", voice_text="v", caption_text="c",
+                target_seconds="3.2s", visual_prompt="p", motion="zoom_in",
+                transition="fade")
+    assert beat.target_seconds == pytest.approx(3.2)
+
+
+def test_coercion_does_not_loosen_the_shape():
+    """Only convertible scalars are absorbed; wrong shapes still fail."""
+    with pytest.raises(ValidationError):
+        Beat(beat_id="b1", role="not-a-role", voice_text="v",
+             caption_text="c", target_seconds=4.0, visual_prompt="p",
+             motion="zoom_in", transition="fade")
+    with pytest.raises(ValidationError):
+        Beat(beat_id="b1", role="hook", voice_text="v", caption_text="c",
+             target_seconds="not a number", visual_prompt="p",
+             motion="zoom_in", transition="fade")
+
+
+def test_none_stays_none():
+    from engine.contract import Claim
+    assert Claim(text="x", source_url=None).beat_id is None
