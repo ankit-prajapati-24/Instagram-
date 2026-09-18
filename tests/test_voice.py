@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from engine.media.voice import (caption_timings, distribute_words,
@@ -85,3 +87,115 @@ def test_interpolated_timings_report_no_silence_gap():
     for beat in plan.script.beats:
         beat.words = caption_timings(beat.caption_text, 4.0)
     assert largest_silence_gap(plan) == pytest.approx(0.0)
+
+
+# --- engine dispatch --------------------------------------------------------
+# Piper is the default engine; edge-tts is the fallback. A voice problem must
+# never cost an approved script, so a Piper failure switches engines and
+# carries on rather than raising.
+
+class FakeSettings:
+    def __init__(self, engine="piper", tmp=None):
+        from engine.config import Settings
+        base = Settings()
+        self.voice_engine = engine
+        self.ffmpeg = base.ffmpeg
+        self.voice = base.voice
+        self.voice_rate = base.voice_rate
+        self.voice_pitch = base.voice_pitch
+        self.piper_voice = "pratham"
+        self.piper_models_dir = tmp
+        self.piper_length_scale = 1.12
+        self.piper_noise_scale = 0.667
+        self.piper_noise_w = 0.9
+        self.piper_sentence_silence = 0.25
+        self.voice_process = True
+
+
+def test_piper_is_the_default_engine():
+    from engine.config import Settings
+    assert Settings().voice_engine == "piper"
+    assert Settings().piper_voice == "pratham"
+
+
+def test_piper_length_scale_defaults_above_one():
+    """Piper reads ~40% faster than edge; at 1.0 a 12-beat script lands
+    near 33s and fails the 38-52s duration check."""
+    from engine.config import Settings
+    assert Settings().piper_length_scale > 1.0
+
+
+def test_piper_failure_falls_back_to_edge_for_the_whole_plan(monkeypatch,
+                                                             tmp_path):
+    from engine.media import voice as mod
+    from engine.media.piper_voice import PiperUnavailable
+    from tests.factories import make_plan
+
+    calls = {"piper": 0, "edge": 0}
+
+    def bad_piper(text, target, settings):
+        calls["piper"] += 1
+        raise PiperUnavailable("no model")
+
+    def fake_edge(text, target, settings):
+        calls["edge"] += 1
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_bytes(b"x")
+        return 3
+
+    monkeypatch.setattr(mod, "synth_beat_piper", bad_piper)
+    monkeypatch.setattr(mod, "synth_beat_edge", fake_edge)
+    monkeypatch.setattr(mod, "probe_duration", lambda *a, **k: 4.0)
+
+    plan = make_plan(beats=5, measured=None)
+    seen = []
+    mod.synth_plan(plan, tmp_path, FakeSettings(tmp=tmp_path),
+                   progress=lambda *a: seen.append(a[-1]))
+
+    # Piper is tried once, then abandoned for the rest of the plan.
+    assert calls["piper"] == 1
+    assert calls["edge"] == 5
+    assert all(b.measured_seconds == 4.0 for b in plan.script.beats)
+    assert "piper unavailable" in seen[0]
+    assert seen[-1] == "edge"
+
+
+def test_engine_edge_never_calls_piper(monkeypatch, tmp_path):
+    from engine.media import voice as mod
+    from tests.factories import make_plan
+
+    def boom(*a, **k):
+        raise AssertionError("piper must not be called when engine=edge")
+
+    monkeypatch.setattr(mod, "synth_beat_piper", boom)
+    monkeypatch.setattr(mod, "synth_beat_edge",
+                        lambda t, target, s: (Path(target).parent.mkdir(
+                            parents=True, exist_ok=True),
+                            Path(target).write_bytes(b"x"), 2)[-1])
+    monkeypatch.setattr(mod, "probe_duration", lambda *a, **k: 3.0)
+
+    plan = make_plan(beats=3, measured=None)
+    mod.synth_plan(plan, tmp_path, FakeSettings(engine="edge", tmp=tmp_path))
+    assert all(b.spoken_words == 2 for b in plan.script.beats)
+
+
+def test_caption_timings_are_filled_even_though_piper_reports_none(
+        monkeypatch, tmp_path):
+    """Piper returns no spans, so captions must still come from the
+    measured beat span or the burned text would have no timing at all."""
+    from engine.media import voice as mod
+    from tests.factories import make_plan
+
+    monkeypatch.setattr(mod, "synth_beat_piper",
+                        lambda t, target, s: (Path(target).parent.mkdir(
+                            parents=True, exist_ok=True),
+                            Path(target).write_bytes(b"x"), 0)[-1])
+    monkeypatch.setattr(mod, "probe_duration", lambda *a, **k: 4.4)
+
+    plan = make_plan(beats=3, measured=None)
+    mod.synth_plan(plan, tmp_path, FakeSettings(tmp=tmp_path))
+
+    for beat in plan.script.beats:
+        assert beat.spoken_words == 0
+        assert beat.words, "captions must still be timed"
+        assert beat.words[-1].end == pytest.approx(4.4)

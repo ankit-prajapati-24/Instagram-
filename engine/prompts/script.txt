@@ -8,7 +8,13 @@ CHOSEN HOOK (this is beat 1, reuse it as written): {hook}
 VERIFIED CLAIMS — you may only assert what is here:
 {claims}
 
-Write 9 to 13 beats. Aim for 44 seconds of speech in total.
+Write 11 to 14 beats totalling {word_target} spoken Devanagari words
+(count voice_text only). That word count is the single most important
+number here: it is what decides whether the finished video lands in range.
+Aim for {words_per_beat} words per beat on average.
+
+A beat of 4 words and a beat of 16 are both fine and the variety is wanted —
+but the TOTAL must come out near {word_target}.
 
 STRUCTURE (the retention spine — follow the order):
   beat 1        role "hook"        reuse the chosen hook verbatim
@@ -21,7 +27,8 @@ STRUCTURE (the retention spine — follow the order):
   last beat     role "cta"         see LOOP CLOSE below
 
 HARD RULES:
-1. 6 to 14 spoken words per beat. Short beats. No compound sentences.
+1. 4 to 18 spoken words per beat, averaging {words_per_beat}. Vary them
+   deliberately; see rule 2.
 2. VARY sentence length deliberately. A three-word beat next to a
    twelve-word beat. Flat, even rhythm is the clearest AI tell there is.
 3. Assert nothing outside VERIFIED CLAIMS. For legend, say so in the line

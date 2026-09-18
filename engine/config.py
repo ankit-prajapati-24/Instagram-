@@ -74,6 +74,40 @@ class Settings:
         default_factory=lambda: os.getenv("RAHASYA_MODEL_EMBED", ""))
 
     # --- Voice (deliberately NOT through OmniRoute; see spec 5.1) ----------
+    # Piper, chosen by ear over twelve edge-tts voices. It is also offline
+    # and MIT-licensed, which retires the open question about edge-tts's
+    # commercial terms. edge remains as the fallback engine.
+    voice_engine: str = field(
+        default_factory=lambda: os.getenv("RAHASYA_VOICE_ENGINE", "piper"))
+    voice_process: bool = field(
+        default_factory=lambda: os.getenv(
+            "RAHASYA_VOICE_PROCESS", "1").strip().lower()
+        not in {"0", "false", "no", "off"})
+
+    piper_voice: str = field(
+        default_factory=lambda: os.getenv("RAHASYA_PIPER_VOICE", "pratham"))
+    piper_models_dir: Path = field(
+        default_factory=lambda: _env_path("RAHASYA_PIPER_DIR",
+                                          BASE_DIR / "models" / "piper"))
+    # Piper reads roughly 40% faster than edge-tts. At 1.0 a twelve-beat
+    # script lands near 33s and fails the 38-52s duration check, so the
+    # default is slowed — which also suits the niche.
+    piper_length_scale: float = field(
+        default_factory=lambda: float(
+            os.getenv("RAHASYA_PIPER_LENGTH", "1.12")))
+    piper_noise_scale: float = field(
+        default_factory=lambda: float(
+            os.getenv("RAHASYA_PIPER_NOISE", "0.667")))
+    # Variation in phoneme duration: the knob that most affects whether the
+    # rhythm ticks like a metronome.
+    piper_noise_w: float = field(
+        default_factory=lambda: float(
+            os.getenv("RAHASYA_PIPER_NOISE_W", "0.9")))
+    piper_sentence_silence: float = field(
+        default_factory=lambda: float(
+            os.getenv("RAHASYA_PIPER_SILENCE", "0.25")))
+
+    # edge-tts, used when voice_engine is "edge" or Piper is unavailable.
     voice: str = field(
         default_factory=lambda: os.getenv("RAHASYA_VOICE",
                                           "hi-IN-MadhurNeural"))
@@ -89,6 +123,15 @@ class Settings:
     fps: int = 30
     transition_duration: float = 0.5
     target_seconds: float = 45.0
+    # Measured for Piper pratham at length_scale 1.12: 3.03 words/sec across
+    # 9-, 12- and 20-word Hindi lines. The script prompt is given a word
+    # budget derived from this, because word count is what actually decides
+    # runtime — asking for "9-13 beats" let the model write 54 words (18s) or
+    # 182 (60s) and still satisfy the instruction.
+    # Re-measure with scripts/measure_speech_rate.py if the engine changes.
+    words_per_second: float = field(
+        default_factory=lambda: float(
+            os.getenv("RAHASYA_WORDS_PER_SEC", "3.03")))
     duration_min: float = 38.0
     duration_max: float = 52.0
 
@@ -127,7 +170,8 @@ class Settings:
     beats_max: int = 13
 
     def ensure_dirs(self) -> None:
-        for d in (self.work_dir, self.out_dir, self.music_dir):
+        for d in (self.work_dir, self.out_dir, self.music_dir,
+                  self.piper_models_dir):
             d.mkdir(parents=True, exist_ok=True)
 
 

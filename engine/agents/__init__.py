@@ -127,8 +127,16 @@ def run_hooks(client, topic: Topic, provenance: Provenance, *,
 
 
 def run_script(client, topic: Topic, provenance: Provenance,
-               hook: Hook | None, *, model: str | None = None):
+               hook: Hook | None, *, model: str | None = None,
+               word_target: int = 136, beats: int = 12):
+    """``word_target`` is derived from the voice engine's measured rate.
+
+    Duration follows from word count, so the prompt is told the budget
+    rather than a beat range it can satisfy at any length.
+    """
     prompt = load_prompt("script").format(
+        word_target=word_target,
+        words_per_beat=max(round(word_target / beats), 4),
         topic=topic.raw,
         hook=(f"{hook.voice_text}  /  {hook.caption_text}" if hook
               else "(no hook chosen — write your own opening beat)"),
