@@ -236,3 +236,51 @@ def test_a_piper_failure_writes_the_whole_error_to_a_log(monkeypatch,
     # and the exception itself must name the exit code and the log
     assert "exited 1" in str(exc.value)
     assert "piper-error.log" in str(exc.value)
+
+
+def test_piper_is_given_an_explicit_utf8_stdin_encoding(monkeypatch,
+                                                        tmp_path):
+    """The root cause of Piper failing from the panel but not a terminal.
+
+    Piper's Python decodes stdin with the process locale. On cp1252 the
+    third byte of the Devanagari candrabindu became a lone surrogate, espeak
+    raised UnicodeEncodeError, and all that escaped was a wave.Error about
+    channels. Manual tests passed only because the shell happened to export
+    PYTHONIOENCODING, which the child inherited.
+    """
+    import subprocess
+    from engine.media import piper_voice
+
+    seen = {}
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    def fake_run(cmd, **kwargs):
+        # synth() shells out twice: piper, then ffmpeg. Only the first is
+        # under test here.
+        if "piper" in cmd:
+            seen.update(kwargs)
+            out = Path(cmd[cmd.index("-f") + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"RIFF")
+        else:
+            Path(cmd[-1]).parent.mkdir(parents=True, exist_ok=True)
+            Path(cmd[-1]).write_bytes(b"ID3")
+        return Result()
+
+    monkeypatch.setattr(piper_voice, "ensure_model",
+                        lambda v, d: tmp_path / "v.onnx")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    try:
+        piper_voice.synth("कहाँ", tmp_path / "b1.mp3",
+                          FakeSettings(tmp=tmp_path))
+    except piper_voice.PiperUnavailable:
+        pass  # the ffmpeg step is stubbed away; the env is what matters
+
+    assert seen.get("env"), "the child must get an explicit environment"
+    assert seen["env"]["PYTHONIOENCODING"] == "utf-8"
+    assert seen["env"]["PYTHONUTF8"] == "1"
