@@ -118,6 +118,10 @@ def publish_checklist(plan: ReelPlan, video_path: str, *,
         "Synthetic-media disclosure toggle set in Studio",
         "Pinned comment ready to post immediately after publishing",
     ]
+    if plan.safety.moderation_unavailable:
+        items.insert(1, "MODERATION WAS NOT RUN - read the script yourself "
+                        f"before publishing ({plan.safety.moderation_unavailable})")
+
     unsourced = [c.text[:50] for c in plan.provenance.claims
                  if not c.source_url]
     if unsourced:

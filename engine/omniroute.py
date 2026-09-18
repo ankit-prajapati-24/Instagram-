@@ -95,6 +95,53 @@ class ModerationResult:
     flagged: bool
     flags: list[str]
     cost: CostRecord
+    # None = checked. A string = could not check, and why.
+    #
+    # "flagged" and "could not check" are different facts and must not be
+    # collapsed. Treating an unavailable checker as a flag makes the tool
+    # unusable; treating it as clean hides a real gap. It is surfaced instead,
+    # and the human approval gate is the backstop.
+    unavailable: str | None = None
+
+    @property
+    def checked(self) -> bool:
+        return self.unavailable is None
+
+
+def _decode_completion(raw: str) -> dict:
+    """Read a completion body that may be JSON or an SSE stream.
+
+    ``stream: false`` is always sent, but a provider can still answer with
+    ``data: {...}`` lines. Rather than fail on those, reassemble the deltas.
+    """
+    stripped = raw.strip()
+    if not stripped.startswith("data:"):
+        return json.loads(stripped)
+
+    pieces: list[str] = []
+    merged: dict = {}
+    for line in stripped.splitlines():
+        if not line.startswith("data:"):
+            continue
+        chunk = line[5:].strip()
+        if not chunk or chunk == "[DONE]":
+            continue
+        try:
+            parsed = json.loads(chunk)
+        except json.JSONDecodeError:
+            continue
+        merged = merged or parsed
+        choice = (parsed.get("choices") or [{}])[0]
+        delta = choice.get("delta") or {}
+        if delta.get("content"):
+            pieces.append(delta["content"])
+        elif (choice.get("message") or {}).get("content"):
+            pieces.append(choice["message"]["content"])
+
+    return {"choices": [{"message": {"role": "assistant",
+                                     "content": "".join(pieces)}}],
+            "usage": merged.get("usage", {}),
+            "model": merged.get("model", "")}
 
 
 def extract_json(text: str) -> Any:
@@ -220,6 +267,10 @@ class OmniRouteClient:
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
+            # Measured: without this the gateway answers some providers as an
+            # SSE stream even for a plain request, and response.json() then
+            # fails on a body of "data: {...}" lines.
+            "stream": False,
         }
         if want_json:
             payload["response_format"] = {"type": "json_object"}
@@ -236,7 +287,7 @@ class OmniRouteClient:
                 "provider completed the request",
                 status=response.status_code)
 
-        body = response.json()
+        body = _decode_completion(response.text)
         text = (body.get("choices") or [{}])[0].get(
             "message", {}).get("content") or ""
         data = extract_json(text) if want_json else None
@@ -276,9 +327,31 @@ class OmniRouteClient:
 
     def moderate(self, text: str, *,
                  model: str = DEFAULT_MODERATION_MODEL) -> ModerationResult:
-        response = self._post("moderations", {"input": text, "model": model})
+        """Check text, or report honestly that it could not be checked.
+
+        The moderation endpoint routes to its own provider (OpenAI by
+        default), so it can be missing while chat works fine. That is a setup
+        gap, not a content verdict, and the two are reported separately.
+        """
+        try:
+            response = self._post("moderations",
+                                  {"input": text, "model": model})
+        except NoProviderError as exc:
+            return ModerationResult(flagged=False, flags=[],
+                                    cost=CostRecord(),
+                                    unavailable=str(exc).split(" (see ")[0])
+        except OmniRouteError as exc:
+            return ModerationResult(flagged=False, flags=[],
+                                    cost=CostRecord(),
+                                    unavailable=f"moderation call failed: "
+                                                f"{exc}")
+
         cost = self._record(response.headers)
-        result = (response.json().get("results") or [{}])[0]
+        try:
+            result = (response.json().get("results") or [{}])[0]
+        except json.JSONDecodeError:
+            return ModerationResult(flagged=False, flags=[], cost=cost,
+                                    unavailable="unparseable response")
         categories = result.get("categories") or {}
         return ModerationResult(
             flagged=bool(result.get("flagged")),

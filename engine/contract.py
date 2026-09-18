@@ -130,6 +130,10 @@ class Provenance(BaseModel):
 class Safety(BaseModel):
     moderation_passed: bool = False
     flags: list[str] = Field(default_factory=list)
+    # Set when the moderation endpoint could not be reached at all. That is a
+    # setup gap, not a verdict, and it must stay visible rather than passing
+    # silently as "clean".
+    moderation_unavailable: str | None = None
 
 
 class Cost(BaseModel):

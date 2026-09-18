@@ -81,7 +81,15 @@ def check(topic: Topic, store, client=None, *, embed_text: str | None = None,
     if client is not None:
         previous = store.recent_embeddings(history)
         if previous:
-            vector = client.embed([embed_text or topic.raw])[0]
+            try:
+                vector = client.embed([embed_text or topic.raw])[0]
+            except Exception:
+                # Embeddings route to their own provider and can be missing
+                # while chat works. Layers 1, 2 and 4 still ran; skipping 3 is
+                # better than failing the plan over a credential gap.
+                return DedupResult(True, None,
+                                   "layers 1, 2 and 4 clear; semantic layer "
+                                   "skipped (no embedding provider)", best)
             top, top_plan = 0.0, ""
             for plan_id, other in previous:
                 score = cosine(vector, other)

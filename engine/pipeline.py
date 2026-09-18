@@ -173,13 +173,28 @@ def plan_stage(topic_raw: str, client, store, settings, *,
     emit(PipelineEvent(Stage.MODERATION, "started"))
     verdict = client.moderate(plan.all_text())
     store.record_cost(plan.plan_id, Stage.MODERATION, verdict.cost)
-    plan.safety.moderation_passed = not verdict.flagged
     plan.safety.flags = verdict.flags
+    plan.safety.moderation_unavailable = verdict.unavailable
+
     if verdict.flagged:
+        # An actual flag is still a hard stop.
+        plan.safety.moderation_passed = False
         emit(PipelineEvent(Stage.MODERATION, "failed", str(verdict.flags)))
         store.save_plan(plan, status="rejected_moderation")
         raise GateError("moderation", f"flags: {verdict.flags}")
-    emit(PipelineEvent(Stage.MODERATION, "done", "clean"))
+
+    if not verdict.checked:
+        # Unreachable checker. Stopping here would make the whole tool
+        # unusable over a missing key, and passing it off as "clean" would
+        # hide a real gap — so it is carried through as an explicit unchecked
+        # state, surfaced in QC and on the publish checklist. The human
+        # approval gate is the backstop.
+        plan.safety.moderation_passed = False
+        emit(PipelineEvent(Stage.MODERATION, "info",
+                           f"NOT CHECKED - {verdict.unavailable}"))
+    else:
+        plan.safety.moderation_passed = True
+        emit(PipelineEvent(Stage.MODERATION, "done", "clean"))
 
     emit(PipelineEvent(Stage.DEDUP, "started", "semantic layer"))
     result = dedup.check(topic, store, client,
