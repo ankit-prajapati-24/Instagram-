@@ -29,6 +29,7 @@ import argparse
 import asyncio
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 from engine.contract import ReelPlan, WordTiming
@@ -182,6 +183,13 @@ def synth_plan(plan: ReelPlan, work_dir: str | Path, settings,
                 # Fall back for the rest of the plan too: if Piper is broken
                 # for one beat it is broken for all of them, and retrying it
                 # per beat would just be slow.
+                #
+                # Say so loudly. This was silent, and a run that quietly used
+                # edge-tts looked identical to one that used Piper until
+                # someone noticed the voice had changed.
+                print(f"[voice] Piper unavailable, falling back to edge-tts "
+                      f"for the rest of this plan: {exc}",
+                      file=sys.stderr, flush=True)
                 engine = "edge"
                 spoken = synth_beat_edge(beat.voice_text, target, settings)
                 used = f"edge (piper unavailable: {str(exc)[:60]})"
@@ -190,6 +198,7 @@ def synth_plan(plan: ReelPlan, work_dir: str | Path, settings,
             used = "edge"
 
         beat.audio_path = str(target)
+        beat.voice_engine = engine
         beat.measured_seconds = probe_duration(target, settings.ffmpeg)
         # Burned captions are Roman, the voice is Devanagari; align the
         # on-screen words to this beat's measured span. Piper reports no

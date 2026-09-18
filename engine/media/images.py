@@ -28,6 +28,7 @@ import io
 import random
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import httpx
@@ -300,23 +301,46 @@ def _checksum(path: str | Path) -> str:
 def generate_plan_images(plan: ReelPlan, client, work_dir: str | Path,
                          store=None, *, model: str | None = None,
                          use_keyless: bool = True,
+                         workers: int = 4,
                          progress=None) -> dict[str, int]:
-    """Fill ``beat.image_path`` for every beat; report provider counts."""
+    """Fill ``beat.image_path`` for every beat; report provider counts.
+
+    Beats are generated concurrently. Each one is an independent HTTP call
+    that spends most of its time waiting, and at roughly 45 seconds apiece a
+    thirteen-beat script took ten minutes in sequence.
+
+    ``workers`` is deliberately small. Tier 2 is a free public endpoint that
+    answers 500 under load — the retry already exists because of that, and
+    hammering it with thirteen parallel requests would turn a slow path into
+    a failing one. Four is a compromise between wall-clock and hit rate.
+    """
     target_dir = Path(work_dir) / plan.plan_id / "images"
     target_dir.mkdir(parents=True, exist_ok=True)
+    beats = plan.script.beats
     counts: dict[str, int] = {}
 
-    for index, beat in enumerate(plan.script.beats):
+    def make(item):
+        index, beat = item
         path, provider = generate_beat_image(
             client, beat, target_dir / f"{beat.beat_id}.png",
             seed=index, model=model, use_keyless=use_keyless)
-        beat.image_path = path
-        beat.image_provider = provider
-        counts[provider] = counts.get(provider, 0) + 1
-        if store is not None:
-            store.save_asset(plan.plan_id, beat.beat_id, "image", provider,
-                             path, checksum=_checksum(path))
-        if progress:
-            progress(index + 1, len(plan.script.beats), beat.beat_id, provider)
+        return index, beat, path, provider
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=max(workers, 1)) as pool:
+        # as_completed, so progress reflects real completions rather than
+        # waiting on a slow beat in the middle.
+        futures = [pool.submit(make, item) for item in enumerate(beats)]
+        for future in as_completed(futures):
+            index, beat, path, provider = future.result()
+            beat.image_path = path
+            beat.image_provider = provider
+            counts[provider] = counts.get(provider, 0) + 1
+            done += 1
+            if store is not None:
+                store.save_asset(plan.plan_id, beat.beat_id, "image",
+                                 provider, path, checksum=_checksum(path))
+            if progress:
+                progress(done, len(beats), beat.beat_id, provider)
 
     return counts

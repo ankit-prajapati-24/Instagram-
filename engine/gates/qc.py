@@ -173,6 +173,14 @@ def run_qc(plan: ReelPlan, *, similarity: float | None = None,
             "visual_change_rate", rate <= 4.0, "warn",
             f"one visual every {rate:.1f}s (want <=4.0s)"))
 
+    engines = {b.voice_engine for b in beats if b.voice_engine}
+    if engines:
+        checks.append(Check(
+            "voice_engine", len(engines) == 1 and "piper" in engines, "warn",
+            f"{', '.join(sorted(engines))}"
+            + ("" if engines == {"piper"} else " — a fallback engine ran, so "
+               "this does not sound like the voice you chose")))
+
     lengths = [len(s.split()) for s in _sentences(plan.all_text())]
     if len(lengths) >= 3:
         stdev = statistics.pstdev(lengths)

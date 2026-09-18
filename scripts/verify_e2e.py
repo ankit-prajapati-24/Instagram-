@@ -78,8 +78,12 @@ def main() -> int:
     emit = make_emitter(not args.quiet)
 
     print(f"ffmpeg  : {settings.ffmpeg}")
-    print(f"voice   : {settings.voice} "
-          f"rate={settings.voice_rate} pitch={settings.voice_pitch}")
+    engine = (settings.voice_engine or "piper").lower()
+    print(f"voice   : {engine} "
+          + (f"{settings.piper_voice} @ length_scale "
+             f"{settings.piper_length_scale}" if engine == "piper"
+             else f"{settings.voice} rate={settings.voice_rate}"))
+    print(f"images  : {settings.image_workers} workers")
     print(f"captions: {settings.captions_source}")
     print(f"topic   : {args.topic}\n")
 

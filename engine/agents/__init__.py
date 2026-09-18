@@ -21,6 +21,16 @@ from engine.contract import (Hook, Metadata, Provenance, Script, Topic)
 PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 
+class Repairable(Exception):
+    """A semantic problem the model can plausibly fix if told about it.
+
+    Distinct from a shape error, which pydantic raises. This exists so the
+    single repair attempt in ``_ask`` covers both — an off-budget script is
+    exactly as fixable as a mistyped field, and catching it here saves a
+    ten-minute render that QC would reject on duration anyway.
+    """
+
+
 class AgentError(RuntimeError):
     """An agent's output did not match its contract."""
 
@@ -73,6 +83,8 @@ def _ask(client, stage: str, prompt: str, *, model: str | None = None,
                 return result, parse(result.data)
             except ValidationError as exc:
                 problem = _explain(exc)
+            except Repairable as exc:
+                problem = str(exc)
 
         if attempt == 0:
             messages = messages + [
@@ -149,6 +161,21 @@ def run_script(client, topic: Topic, provenance: Provenance,
         script = Script.model_validate(raw)
         if not script.beats:
             raise AgentError("script", "script contained no beats", data)
+
+        # Runtime follows word count, so an off-budget script produces an
+        # out-of-range video. Catching it here costs one extra call; catching
+        # it in QC costs the whole render.
+        words = sum(len(b.voice_text.split()) for b in script.beats)
+        drift = (words - word_target) / word_target
+        if abs(drift) > 0.15:
+            direction = "too long" if drift > 0 else "too short"
+            raise Repairable(
+                f"the script is {direction}: {words} spoken words against a "
+                f"target of {word_target} ({drift * 100:+.0f}%). Rewrite it "
+                f"at {word_target} words, keeping the same beats and "
+                f"meaning — "
+                + ("shorten the longest lines."
+                   if drift > 0 else "lengthen the shortest lines."))
         return script
 
     result, script = _ask(client, "script", prompt, model=model,
