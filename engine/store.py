@@ -340,10 +340,35 @@ class Store:
 
     def entities_in_cooldown(self, entities: Iterable[str],
                              days: int) -> list[str]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        blocked = []
+        return [name for name, _ in self.cooldown_detail(entities, days)]
+
+    def cooldown_detail(self, entities: Iterable[str],
+                        days: int) -> list[tuple[str, int]]:
+        """Blocked entities with how many days are left on each.
+
+        The bare name list was not actionable: it named an entity without
+        saying when it frees up, so the only recourse was to guess.
+        """
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=days)
+        blocked: list[tuple[str, int]] = []
         for entity in entities:
             seen = self.entity_last_seen(entity)
             if seen and seen > cutoff:
-                blocked.append(entity)
+                remaining = days - (now - seen).days
+                blocked.append((entity, max(remaining, 1)))
         return blocked
+
+    def clear_entities(self, plan_id: str | None = None) -> int:
+        """Forget recorded entities. Returns how many rows went.
+
+        Needed because a bad research call can write entities that block
+        unrelated topics, and there was otherwise no way to undo that.
+        """
+        with self._conn() as conn:
+            if plan_id:
+                cur = conn.execute("DELETE FROM entities WHERE plan_id=?",
+                                   (plan_id,))
+            else:
+                cur = conn.execute("DELETE FROM entities")
+            return cur.rowcount

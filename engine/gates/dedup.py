@@ -92,10 +92,11 @@ def check(topic: Topic, store, client=None, *, embed_text: str | None = None,
                                    f"cosine {top:.3f} vs plan {top_plan}", top)
 
     # 4. entity cooldown
-    blocked = store.entities_in_cooldown(topic.entities, cooldown_days)
+    blocked = store.cooldown_detail(topic.entities, cooldown_days)
     if blocked:
+        listed = ", ".join(f"{name} (free in {days}d)"
+                           for name, days in blocked)
         return DedupResult(False, "cooldown",
-                           f"entities used in last {cooldown_days}d: "
-                           f"{', '.join(blocked)}", 1.0)
+                           f"covered too recently: {listed}", 1.0)
 
     return DedupResult(True, None, "all four layers clear", best)

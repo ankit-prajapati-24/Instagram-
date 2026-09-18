@@ -139,7 +139,7 @@ PAYLOADS: dict[str, dict] = {
         ],
         "searched_queries": ["roopkund skeletons dna study",
                              "roopkund lake carbon dating"],
-        "entities": ["Roopkund", "Uttarakhand", "Nanda Devi"],
+        # entities are filled per-topic at call time; see _entities_for.
     },
     "hooks": {"hooks": _hooks()},
     "script": {"script": _script()},
@@ -160,6 +160,40 @@ PAYLOADS: dict[str, dict] = {
                              "cold moonlight, ominous"),
     },
 }
+
+
+def _entities_for(prompt: str) -> list[str]:
+    """Derive plausible entities from whatever topic was actually typed.
+
+    Crude on purpose — this stands in for a model. It only has to be
+    *distinct per topic*, so the dedup gate behaves the way it would with a
+    real research call instead of locking up after one video.
+    """
+    marker = "TOPIC:"
+    line = ""
+    if marker in prompt:
+        line = prompt.split(marker, 1)[1].splitlines()[0]
+    words = [w.strip(".,!?\"'()") for w in line.split()]
+    # Hinglish question words and particles carry no identity.
+    skip = {
+        # particles and question words
+        "ka", "ki", "ke", "ko", "kyu", "kyun", "hai", "hain", "mein", "me",
+        "par", "se", "aur", "ek", "kaun", "kya", "kaise", "nahi", "kaha",
+        "kahan", "kab", "the", "tha", "thi", "wala", "wali", "bhi", "koi",
+        "of", "in", "a", "is", "why", "what", "how", "who", "where",
+        # verbs and adverbs that show up in mystery topics
+        "jana", "jaana", "mana", "hua", "huaa", "gaya", "mile", "milta",
+        "andar", "bahar", "raat", "din", "saal", "purane", "purana",
+        "khaali", "khali", "band", "bandh", "gayab", "lapata",
+        # generic nouns: these are categories, not subjects. Letting them
+        # through would make one fort block every other fort.
+        "fort", "killa", "qila", "jheel", "lake", "gaon", "gaanv", "village",
+        "mandir", "temple", "mahal", "palace", "haveli", "kila", "kankaal",
+        "kankal", "skeleton", "rahasya", "mystery", "sach", "kahani",
+        "kahaani", "story", "log", "logon", "aadmi", "insaan",
+    }
+    picked = [w for w in words if len(w) > 3 and w.lower() not in skip]
+    return [w.title() for w in picked[:3]] or ["Unknown Subject"]
 
 
 class FakeOmniRoute:
@@ -194,7 +228,15 @@ class FakeOmniRoute:
                 stage = name
                 break
         self.stages.append(stage)
-        data = PAYLOADS[stage]
+
+        data = dict(PAYLOADS[stage])
+        if stage == "research":
+            # The sample script is fixed, and the banner says so. The entity
+            # list must NOT be: it feeds the 45-day cooldown layer, and
+            # returning the same three names for every topic wrote them
+            # against the first approved plan and then blocked every topic
+            # after it. The fake has to vary where the gates read from it.
+            data["entities"] = _entities_for(blob)
         return ChatResult(text="", cost=self._cost(), data=data, raw={})
 
     def image(self, prompt, *, model=None, size="1024x1792", n=1):
