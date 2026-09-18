@@ -9,12 +9,22 @@ that answered is recorded on the beat and in the ``assets`` table. A dead
 provider never costs a render: by the time images are generated the script has
 already been written and approved.
 
-Why a chain rather than just the gateway: measured on this machine, OmniRoute
-with no provider key lists **zero** image models and 400s every request, so
-tier 1 is unavailable until a key is added. Local generation is not an option
-either — this machine has Intel Iris Xe integrated graphics, and 40 images a
-day on that would take hours. Tier 2 fills the gap and disappears on its own
-the moment tier 1 starts answering.
+Why a chain rather than just the gateway: tier 1 is intermittently
+unavailable, and measurement rather than guesswork says why. Two distinct
+failures were observed, and they are not the same problem:
+
+  * A model id the image router will not take. It requires a literal
+    ``provider/model``, so ``auto/best-image`` and ``agy/*`` both come back
+    400 "Invalid image model" even though /v1/models lists them.
+  * Quota. On 2026-09-18 the configured provider served six images and then
+    returned 429 RESOURCE_EXHAUSTED for the rest of the run, with a reset
+    delay of 163 hours. Chat quota was unaffected and kept working, so the
+    limit is per-capability -- a run can produce a full script and still get
+    no visuals.
+
+Local generation is not an option either: this machine has Intel Iris Xe
+integrated graphics, and 40 images a day on that would take hours. Tier 2
+fills the gap and steps aside on its own the moment tier 1 answers again.
 
 Tier 2 caveats, both verified: the service stamps its name in the bottom-right
 even when asked not to, so the bottom of the frame is cropped; and it returns
