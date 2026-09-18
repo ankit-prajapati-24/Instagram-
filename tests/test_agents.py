@@ -148,3 +148,54 @@ def test_every_prompt_file_the_agents_load_exists():
     from engine.agents import load_prompt
     for stage in ("research", "hooks", "script", "metadata"):
         assert f"STAGE:{stage}" in load_prompt(stage)
+
+
+# --- prompts and their callers must not drift apart ------------------------
+# A KeyError('word_target') reached the panel: a placeholder was added to
+# script.txt while a long-running process still held the old run_script. The
+# process was stale, but the class of failure is real - load_prompt reads the
+# file at call time, so a prompt can gain a placeholder that no caller fills.
+
+def _placeholders(name):
+    """Field names in a prompt, ignoring {{ }} escapes."""
+    import re
+    from engine.agents import load_prompt
+    text = load_prompt(name).replace("{{", "\0").replace("}}", "\0")
+    return {m.group(1).split(".")[0].split("[")[0]
+            for m in re.finditer(r"\{(\w+)\}", text)}
+
+
+def test_every_prompt_placeholder_is_supplied_by_its_agent():
+    """Call each agent and confirm the prompt formats without a KeyError."""
+    from engine.agents import (run_hooks, run_metadata, run_research,
+                               run_script)
+    from engine.contract import Provenance, Script, Topic
+
+    topic = Topic.make("x")
+    provenance = Provenance()
+
+    run_research(Replaying({"claims": [], "entities": []}), topic)
+    run_hooks(Replaying({"hooks": [
+        {"variant_id": "h1", "voice_text": "v", "caption_text": "c",
+         "style": "question"}]}), topic, provenance)
+    run_script(Replaying({"script": {
+        "total_seconds": 45.0, "chosen_hook": "h1", "beats": [
+            {"beat_id": "b1", "role": "hook", "voice_text": "v",
+             "caption_text": "c", "target_seconds": 4.0,
+             "visual_prompt": "p", "motion": "zoom_in",
+             "transition": "fade"}]}}), topic, provenance, None)
+    run_metadata(Replaying({"yt_title": "t"}), topic,
+                 Script(total_seconds=45.0, chosen_hook="h1"), provenance)
+
+
+def test_the_script_prompt_carries_the_word_budget():
+    """Duration follows word count, so the budget must reach the model."""
+    assert {"word_target", "words_per_beat"} <= _placeholders("script")
+
+
+def test_prompts_declare_their_stage_marker():
+    """The fake client routes on STAGE: markers; a missing one silently
+    returns the wrong payload."""
+    from engine.agents import load_prompt
+    for stage in ("research", "hooks", "script", "metadata"):
+        assert load_prompt(stage).lstrip().startswith(f"STAGE:{stage}")

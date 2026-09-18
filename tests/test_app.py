@@ -27,7 +27,7 @@ def test_health_reports_three_gateway_states_and_ffmpeg(client):
     body = client.get("/api/health").json()
     assert body["omniroute"] in {"ready", "no_provider", "down"}
     assert body["ffmpeg"] is True
-    assert body["voice"].startswith("hi-IN")
+    assert body["voice"], "a voice must always be reported"
     assert body["daily_ceiling"] > 0
     assert "research" in body["stages"]
 
@@ -250,3 +250,10 @@ def test_approve_still_seeds_the_hook_when_beat_one_is_not_edited(client):
     plan = store.get_plan("p1")
     hook = next(h for h in plan.hooks if h.variant_id == "h2")
     assert plan.script.beats[0].caption_text == hook.caption_text
+
+
+def test_health_reports_the_voice_engine_actually_in_use(client):
+    """It reported the edge-tts fallback voice while Piper was working."""
+    body = client.get("/api/health").json()
+    assert body["voice_engine"] == "piper"
+    assert body["voice"] == "pratham"
