@@ -116,10 +116,33 @@ anything else. Until it has them, `plan_stage` will stop at the moderation
 gate. If you want to get moving before sorting that out, run the panel with
 the sample brain, which skips it.
 
-## When free image tiers start throttling
+## Images: what is actually available here
 
-At 2–3 videos a day you need roughly 40 images a day, which free image tiers
-will not sustain. The fix needs no code change: run **ComfyUI** locally and
-register it as an image provider in OmniRoute. It is in the documented
-provider list (`SD WebUI (local)`, `ComfyUI (local)`), and
-`/v1/images/generations` keeps working exactly as it does now.
+Correcting something I wrote before measuring this machine. My first note said
+to run ComfyUI locally once free image tiers start throttling. **That is not
+an option here.** This machine has Intel Iris Xe integrated graphics and no
+discrete GPU, so a FLUX-class image would take minutes, and 2–3 videos a day
+needs roughly 40 images. Local generation is off the table until there is a
+dedicated GPU.
+
+What the engine does instead — `engine/media/images.py` walks three tiers:
+
+| Tier | Source | When it runs |
+|---|---|---|
+| 1 | OmniRoute `/v1/images/generations` | as soon as one image provider has a key |
+| 2 | a keyless public endpoint | whenever tier 1 cannot answer |
+| 3 | a generated placeholder frame | when both are unreachable |
+
+Tier 2 is a real bridge, not a stub: measured at 9 of 10 beats on a full run,
+about 45 seconds per image, with the endpoint's bottom-right watermark cropped
+and the result scaled to cover 1080×1920. It is a free public service though,
+so treat it as best-effort — it can rate-limit or disappear without notice,
+and the images are upscaled from a smaller source than tier 1 returns.
+
+To move to tier 1, add a key for any of the documented image providers —
+Together AI (FLUX), Nebius (FLUX), Fireworks, Hyperbolic, OpenRouter, xAI or
+OpenAI. No code changes: the chain simply stops reaching tier 2, and the
+panel's scene strip will stop labelling frames `keyless`.
+
+`RAHASYA_KEYLESS_IMAGES=0` disables tier 2 if you would rather see obvious
+placeholders than a watermark-cropped stand-in.
