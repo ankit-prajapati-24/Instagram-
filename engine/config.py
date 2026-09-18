@@ -57,6 +57,13 @@ class Settings:
         default_factory=lambda: os.getenv("RAHASYA_MODEL_CHEAP", ""))
     model_image: str = field(
         default_factory=lambda: os.getenv("RAHASYA_MODEL_IMAGE", ""))
+    # Tier 2 of the image chain: a keyless public endpoint, used only when
+    # the gateway has no image provider. Set RAHASYA_KEYLESS_IMAGES=0 to go
+    # straight from the gateway to the placeholder.
+    keyless_images: bool = field(
+        default_factory=lambda: os.getenv(
+            "RAHASYA_KEYLESS_IMAGES", "1").strip().lower()
+        not in {"0", "false", "no", "off"})
     model_embed: str = field(
         default_factory=lambda: os.getenv("RAHASYA_MODEL_EMBED", ""))
 

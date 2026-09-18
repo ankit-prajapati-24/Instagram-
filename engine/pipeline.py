@@ -213,6 +213,7 @@ def produce_stage(plan: ReelPlan, client, store, settings, *,
     counts = generate_plan_images(
         plan, client, settings.work_dir, store,
         model=settings.model_image or None,
+        use_keyless=settings.keyless_images,
         progress=lambda i, n, beat, provider: emit(PipelineEvent(
             Stage.IMAGES, "info", f"{i}/{n} {beat} via {provider}")))
     emit(PipelineEvent(Stage.IMAGES, "done", ", ".join(
