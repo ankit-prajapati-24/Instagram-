@@ -295,3 +295,51 @@ def test_keyless_retries_on_a_network_error_too(monkeypatch):
     monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
     assert mod.fetch_keyless("a lake", 0) == jpeg
     assert calls["n"] == 2
+
+
+# --- the sample script is a fixture the offline harness depends on ---------
+# It drifted out of range once: written for edge-tts's slower pace, it made a
+# 34.7s video once Piper became the engine, and verify_e2e.py failed on the
+# duration gate every run.
+
+def test_sample_script_hits_the_word_budget():
+    import statistics
+    from engine.config import Settings
+    from engine.fake_client import SAMPLE_BEATS
+
+    settings = Settings()
+    budget = settings.target_seconds * settings.words_per_second
+    words = sum(len(beat[1].split()) for beat in SAMPLE_BEATS)
+
+    # Within 15% of the budget, so the rendered video lands inside 38-52s.
+    assert abs(words - budget) / budget < 0.15, (
+        f"sample script is {words} words against a {budget:.0f} budget; "
+        f"that renders at ~{words / settings.words_per_second:.0f}s")
+
+
+def test_sample_script_predicts_a_duration_inside_the_qc_window():
+    from engine.config import Settings
+    from engine.fake_client import SAMPLE_BEATS
+
+    settings = Settings()
+    words = sum(len(beat[1].split()) for beat in SAMPLE_BEATS)
+    predicted = words / settings.words_per_second
+    assert settings.duration_min <= predicted <= settings.duration_max
+
+
+def test_sample_script_varies_its_sentence_lengths():
+    """An even rhythm is the clearest AI tell, and QC warns on it. The
+    sample is the only worked example of a good script in the codebase, so
+    it should not model the thing the prompt forbids."""
+    import statistics
+    from engine.fake_client import SAMPLE_BEATS
+
+    lengths = [len(beat[1].split()) for beat in SAMPLE_BEATS]
+    assert statistics.pstdev(lengths) > 4.0, lengths
+    assert min(lengths) <= 6, "no short punch beats"
+    assert max(lengths) >= 15, "no long beats"
+
+
+def test_sample_script_beat_count_is_in_the_contract_range():
+    from engine.fake_client import SAMPLE_BEATS
+    assert 9 <= len(SAMPLE_BEATS) <= 13

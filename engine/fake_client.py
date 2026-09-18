@@ -14,75 +14,101 @@ from __future__ import annotations
 
 from engine.omniroute import ChatResult, CostRecord, ModerationResult
 
-# A real 10-beat Hinglish script for the reference topic. Written to obey the
-# retention rules in the spec: specific hook, no banned openers, a "lekin"
-# reversal at beat 8, and a loop-closing final line.
+# A real Hinglish script for the reference topic, and the only example in the
+# codebase of what the script agent is supposed to produce. It obeys the
+# retention rules in the spec: a specific hook, no banned openers, a "lekin"
+# reversal, and a loop-closing final line.
+#
+# Two properties matter beyond the story:
+#   * it hits the word budget (~136 spoken words), because runtime follows
+#     word count and the offline harness checks the rendered duration;
+#   * sentence lengths vary hard, from three words to twenty. An even rhythm
+#     is the clearest AI tell there is, and the QC scorecard warns on it.
 SAMPLE_BEATS = [
     ("hook",
-     "पाँच सौ कंकाल, एक ही झील, और एक भी जवाब नहीं।",
-     "500 kankaal. Ek jheel. Ek bhi jawaab nahi.",
+     "पाँच सौ कंकाल, एक ही जमी हुई झील, और आज तक एक भी पक्का जवाब नहीं।",
+     "500 kankaal. Ek jami hui jheel. Aaj tak ek bhi pakka jawaab nahi.",
      "500 KANKAAL",
      "frozen high-altitude lake at dawn, scattered pale bones under clear "
      "ice, himalayan peaks behind, mist"),
     ("setup",
-     "उत्तराखंड की रूपकुंड झील सोलह हज़ार फुट पर है।",
-     "Uttarakhand ki Roopkund jheel 16,000 foot par hai.",
+     "उत्तराखंड। सोलह हज़ार फुट।",
+     "Uttarakhand. 16,000 foot.",
      None,
      "vast himalayan basin, tiny glacial lake far below, scale of emptiness, "
      "cold blue light"),
     ("setup",
-     "उन्नीस सौ बयालीस में एक फ़ॉरेस्ट रेंजर ने इन्हें पहली बार देखा।",
-     "1942 mein ek forest ranger ne inhe pehli baar dekha.",
+     "उन्नीस सौ बयालीस में एक फ़ॉरेस्ट रेंजर ने बर्फ़ पिघलने के बाद इन्हें "
+     "पहली बार देखा।",
+     "1942 mein ek forest ranger ne barf pighalne ke baad inhe pehli baar "
+     "dekha.",
      None,
      "1940s indian forest ranger silhouette at a lake edge, oil lamp, "
      "archival grain, back to camera"),
     ("escalation",
-     "पहले लोगों ने सोचा ये जापानी सैनिक थे।",
-     "Pehle logon ne socha ye Japanese sainik the.",
+     "पहला अंदाज़ा था कि ये जापानी सैनिक हैं।",
+     "Pehla andaaza tha ki ye Japanese sainik hain.",
      None,
      "wartime era rumour, faded map of the himalayas, pins and string, "
      "dim lamplight on paper"),
+    ("escalation",
+     "वो अंदाज़ा ग़लत निकला।",
+     "Wo andaaza galat nikla.",
+     None,
+     "discarded papers on a desk, a single lamp, cold night through a "
+     "window, abandoned investigation"),
     ("reveal",
-     "लेकिन कार्बन डेटिंग ने कुछ और बताया।",
-     "Lekin carbon dating ne kuch aur bataya.",
+     "कार्बन डेटिंग ने बताया — ये हड्डियाँ आठ सौ साल पुरानी हैं। किसी भी "
+     "युद्ध से पहले की।",
+     "Carbon dating ne bataya — ye haddiyan 800 saal purani hain. Kisi bhi "
+     "yudh se pehle ki.",
      "800 SAAL PURANE",
      "laboratory bone sample under cold clinical light, calipers, "
      "scientific instruments, sterile shadows"),
     ("reveal",
-     "ये हड्डियाँ आठ सौ साल पुरानी थीं।",
-     "Ye haddiyan 800 saal purani thi.",
-     None,
-     "ancient weathered bone on dark stone slab, single shaft of light, "
-     "museum darkness"),
-    ("twist",
-     "सबकी खोपड़ी पर ऊपर से गहरी चोट के निशान थे।",
-     "Sabki khopdi par upar se gehri chot ke nishaan the.",
+     "और सबकी खोपड़ी पर चोट एक ही जगह थी। ऊपर से।",
+     "Aur sabki khopdi par chot ek hi jagah thi. Upar se.",
      "UPAR SE",
      "hailstorm over a mountain lake at night, enormous hailstones frozen "
      "mid-air, violent sky"),
     ("twist",
-     "लेकिन दो हज़ार उन्नीस की डीएनए रिपोर्ट ने सब उलट दिया।",
-     "Lekin 2019 ki DNA report ne sab ulat diya.",
+     "लेकिन दो हज़ार उन्नीस की डीएनए जाँच ने वो कहानी भी तोड़ दी। सारे कंकाल "
+     "एक जगह के थे ही नहीं।",
+     "Lekin 2019 ki DNA jaanch ne wo kahaani bhi tod di. Saare kankaal ek "
+     "jagah ke the hi nahi.",
      None,
      "dna sequencing visualisation on a dark screen, cold green traces, "
      "researcher shadow"),
     ("cliffhanger",
-     "कुछ कंकाल भूमध्य सागर के लोगों के थे।",
-     "Kuch kankaal Bhumadhya Saagar ke logon ke the.",
+     "कुछ लोग भूमध्य सागर के थे।",
+     "Kuch log Bhumadhya Saagar ke the.",
      "GREECE SE?",
      "ancient mediterranean traveller's worn sandals on himalayan snow, "
      "impossible juxtaposition, cold dusk"),
+    ("cliffhanger",
+     "वो हिमालय की इस झील तक पहुँचे कैसे।",
+     "Wo Himalaya ki is jheel tak pahunche kaise.",
+     None,
+     "a narrow frozen mountain pass at night, faint tracks in snow leading "
+     "upward, no figures"),
     ("cta",
-     "वो यहाँ क्यों आए थे, ये आज भी कोई नहीं जानता।",
-     "Wo yahan kyun aaye the, ye aaj bhi koi nahi jaanta.",
+     "रिपोर्ट कहती है तीर्थयात्री। डीएनए कहता है कुछ और।",
+     "Report kehti hai teerthyatri. DNA kehta hai kuch aur.",
+     None,
+     "two conflicting documents side by side on dark wood, one official one "
+     "scientific, harsh single light"),
+    ("cta",
+     "और आठ सौ साल बाद भी, कोई नहीं जानता उस रात वहाँ हुआ क्या था।",
+     "Aur 800 saal baad bhi, koi nahi jaanta us raat wahan hua kya tha.",
      None,
      "empty frozen lake at last light, single set of footprints leading in "
      "and not out, silence"),
 ]
 
+
 MOTIONS = ["zoom_in", "move_left", "zoom_out", "move_right"]
 TRANSITIONS = ["fade", "slide_left", "fade", "zoom", "fade", "blur",
-               "fade", "slide_right", "fade", "fade"]
+               "fade", "slide_right", "fade", "fade", "zoom", "fade"]
 
 
 def _hooks() -> list[dict]:
@@ -119,7 +145,7 @@ def _script() -> dict:
             "motion": MOTIONS[index % len(MOTIONS)],
             "transition": TRANSITIONS[index % len(TRANSITIONS)],
         })
-    return {"total_seconds": 44.0, "chosen_hook": "h1", "beats": beats}
+    return {"total_seconds": 45.0, "chosen_hook": "h1", "beats": beats}
 
 
 PAYLOADS: dict[str, dict] = {
