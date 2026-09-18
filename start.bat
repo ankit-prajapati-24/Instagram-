@@ -48,6 +48,8 @@ echo   complete a request. "no provider" means it is running but has no
 echo   provider key yet - see docs\omniroute-setup.md
 echo.
 
-timeout /t 6 /nobreak >NUL
+REM ping, not timeout: a "timeout" earlier on PATH (Git Bash ships one) can
+REM shadow the Windows one, and timeout also fails when stdin is redirected.
+ping -n 7 127.0.0.1 >NUL 2>&1
 start "" http://127.0.0.1:8765
 endlocal
