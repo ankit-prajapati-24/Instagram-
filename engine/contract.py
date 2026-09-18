@@ -111,6 +111,10 @@ class Beat(Coercing):
     image_path: str | None = None
     image_provider: str | None = None
     audio_path: str | None = None
+    # Which TTS engine actually produced this beat. Mirrors image_provider:
+    # the fallback used to be silent, so a run that quietly used edge-tts was
+    # indistinguishable from one that used Piper until someone listened.
+    voice_engine: str | None = None
     measured_seconds: float | None = None
     # Caption-aligned timings (Roman), not the Devanagari narration's.
     words: list[WordTiming] = Field(default_factory=list)

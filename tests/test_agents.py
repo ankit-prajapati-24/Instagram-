@@ -178,12 +178,15 @@ def test_every_prompt_placeholder_is_supplied_by_its_agent():
     run_hooks(Replaying({"hooks": [
         {"variant_id": "h1", "voice_text": "v", "caption_text": "c",
          "style": "question"}]}), topic, provenance)
+    # word_target matches this one-word payload, so the budget check does
+    # not fire; this test is about the prompt formatting, not the budget.
     run_script(Replaying({"script": {
         "total_seconds": 45.0, "chosen_hook": "h1", "beats": [
             {"beat_id": "b1", "role": "hook", "voice_text": "v",
              "caption_text": "c", "target_seconds": 4.0,
              "visual_prompt": "p", "motion": "zoom_in",
-             "transition": "fade"}]}}), topic, provenance, None)
+             "transition": "fade"}]}}), topic, provenance, None,
+        word_target=1)
     run_metadata(Replaying({"yt_title": "t"}), topic,
                  Script(total_seconds=45.0, chosen_hook="h1"), provenance)
 
@@ -199,3 +202,70 @@ def test_prompts_declare_their_stage_marker():
     from engine.agents import load_prompt
     for stage in ("research", "hooks", "script", "metadata"):
         assert load_prompt(stage).lstrip().startswith(f"STAGE:{stage}")
+
+
+# --- the word budget is enforced at the script stage -----------------------
+# A 176-word script against a 136 budget rendered at 99.7s and was rejected
+# by QC on duration - after a ten-minute render. One extra call here is far
+# cheaper than that.
+
+def _script_payload(beats_words):
+    return {"script": {"total_seconds": 45.0, "chosen_hook": "h1", "beats": [
+        {"beat_id": f"b{i}", "role": "setup",
+         "voice_text": " ".join(["शब्द"] * n),
+         "caption_text": " ".join(["shabd"] * n),
+         "target_seconds": 4.0, "visual_prompt": "p",
+         "motion": "zoom_in", "transition": "fade"}
+        for i, n in enumerate(beats_words)]}}
+
+
+def test_an_overlong_script_is_sent_back_once_and_then_accepted():
+    from engine.agents import run_script
+    from engine.contract import Provenance, Topic
+
+    over = _script_payload([20] * 9)      # 180 words
+    good = _script_payload([12] * 11)     # 132 words
+    client = Replaying(over, good)
+
+    script, _ = run_script(client, Topic.make("x"), Provenance(), None,
+                           word_target=136)
+    words = sum(len(b.voice_text.split()) for b in script.beats)
+    assert words == 132
+    assert len(client.seen) == 2
+
+    repair = client.seen[1][-1]["content"]
+    assert "too long" in repair
+    assert "180 spoken words" in repair
+    assert "136" in repair
+
+
+def test_a_short_script_is_told_to_lengthen():
+    from engine.agents import run_script
+    from engine.contract import Provenance, Topic
+
+    short = _script_payload([5] * 9)      # 45 words
+    client = Replaying(short, _script_payload([12] * 11))
+    run_script(client, Topic.make("x"), Provenance(), None, word_target=136)
+    repair = client.seen[1][-1]["content"]
+    assert "too short" in repair
+    assert "lengthen" in repair
+
+
+def test_a_script_inside_the_tolerance_is_accepted_first_time():
+    from engine.agents import run_script
+    from engine.contract import Provenance, Topic
+
+    client = Replaying(_script_payload([12] * 12))   # 144, within 15%
+    run_script(client, Topic.make("x"), Provenance(), None, word_target=136)
+    assert len(client.seen) == 1
+
+
+def test_two_off_budget_scripts_in_a_row_still_raise():
+    from engine.agents import AgentError, run_script
+    from engine.contract import Provenance, Topic
+
+    over = _script_payload([25] * 10)     # 250 words
+    client = Replaying(over, over)
+    with pytest.raises(AgentError):
+        run_script(client, Topic.make("x"), Provenance(), None,
+                   word_target=136)

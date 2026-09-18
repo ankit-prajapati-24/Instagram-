@@ -66,6 +66,11 @@ class Settings:
     # Tier 2 of the image chain: a keyless public endpoint, used only when
     # the gateway has no image provider. Set RAHASYA_KEYLESS_IMAGES=0 to go
     # straight from the gateway to the placeholder.
+    # Scenes are generated concurrently; each is an independent HTTP call
+    # that mostly waits. Kept low because tier 2 is a free endpoint that
+    # answers 500 under load.
+    image_workers: int = field(
+        default_factory=lambda: int(os.getenv("RAHASYA_IMAGE_WORKERS", "4")))
     keyless_images: bool = field(
         default_factory=lambda: os.getenv(
             "RAHASYA_KEYLESS_IMAGES", "1").strip().lower()
