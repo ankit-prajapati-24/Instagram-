@@ -177,10 +177,25 @@ def create_app(db_path: str | Path | None = None,
             raise HTTPException(404, "no such plan")
         return json.loads(plan.model_dump_json())
 
+    # One mystery per video. A whole list pasted in at once produced a
+    # 290-character filename that ffmpeg could not open, and a script that
+    # tried to cover five unrelated stories at the same time.
+    TOPIC_MAX = 160
+
+    def check_topic(topic: str) -> str:
+        topic = topic.strip()
+        if not topic:
+            raise HTTPException(400, "topic is empty")
+        if len(topic) > TOPIC_MAX:
+            raise HTTPException(
+                400, f"that is {len(topic)} characters, which looks like more "
+                     f"than one topic. One mystery per video — paste a single "
+                     f"line under {TOPIC_MAX} characters.")
+        return topic
+
     @app.post("/api/plan")
     def create_plan(request: PlanRequest) -> dict:
-        if not request.topic.strip():
-            raise HTTPException(400, "topic is empty")
+        check_topic(request.topic)
         client = client_for(request.use_fake)
         try:
             plan = plan_stage(request.topic, client, store, settings,
@@ -198,8 +213,7 @@ def create_app(db_path: str | Path | None = None,
     @app.post("/api/plan/async")
     def create_plan_async(request: PlanRequest) -> dict:
         """Same as /api/plan but streams progress over /api/events/{id}."""
-        if not request.topic.strip():
-            raise HTTPException(400, "topic is empty")
+        check_topic(request.topic)
         # A provisional id so the browser can subscribe before work starts.
         import uuid
         job_id = str(uuid.uuid4())

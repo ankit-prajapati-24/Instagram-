@@ -133,3 +133,31 @@ def test_coercion_does_not_loosen_the_shape():
 def test_none_stays_none():
     from engine.contract import Claim
     assert Claim(text="x", source_url=None).beat_id is None
+
+
+# --- the slug ends up in a filename ----------------------------------------
+# Five topics pasted at once made a 290-character name, and Windows refuses
+# a path over 260, so ffmpeg failed with a bare "Invalid argument".
+
+def test_a_very_long_topic_produces_a_usable_slug():
+    from engine.contract import SLUG_MAX
+    topic = ("Jodhpur mein 2012 ka dhamaka jiska koi malba nahi mila "
+             "Kongka La pass par ITBP jawano ne kya dekha Mumbai ke Grant "
+             "Road par 1982 mein ek poori building raatorat khaali kyun "
+             "karayi gayi Nagaur ka woh kuan jisme 1947 ke baad koi nahi utra")
+    slug = Topic.make(topic).slug
+    assert len(slug) <= SLUG_MAX
+    assert not slug.endswith("-")
+    assert slug.startswith("jodhpur-mein-2012")
+
+
+def test_truncation_is_deterministic_so_dedup_still_works():
+    long_topic = "a" * 50 + " " + "b" * 200
+    assert Topic.make(long_topic).slug == Topic.make(long_topic).slug
+    assert (Topic.make(long_topic).dedupe_hash
+            == Topic.make(long_topic).dedupe_hash)
+
+
+def test_a_short_topic_is_untouched():
+    assert Topic.make("Kuldhara gaon khaali kyun hua").slug == \
+        "kuldhara-gaon-khaali-kyun-hua"

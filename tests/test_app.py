@@ -257,3 +257,27 @@ def test_health_reports_the_voice_engine_actually_in_use(client):
     body = client.get("/api/health").json()
     assert body["voice_engine"] == "piper"
     assert body["voice"] == "pratham"
+
+
+def test_a_pasted_list_of_topics_is_refused_with_a_useful_message(client):
+    """Five topics at once produced an unopenable filename and a script
+    that tried to cover five unrelated stories."""
+    five = ("Jodhpur mein 2012 ka dhamaka jiska koi malba nahi mila "
+            "Kongka La pass par ITBP jawano ne kya dekha Mumbai ke Grant "
+            "Road par 1982 mein ek poori building raatorat khaali kyun "
+            "karayi gayi Nagaur ka woh kuan jisme 1947 ke baad koi nahi "
+            "utra Shani Shingnapur ke gharon mein darwaze kyun nahi hote")
+    for route in ("/api/plan", "/api/plan/async"):
+        response = client.post(route, json={"topic": five})
+        assert response.status_code == 400, route
+        detail = response.json()["detail"]
+        assert "more than one topic" in detail
+        assert "One mystery per video" in detail
+
+
+def test_a_normal_length_topic_passes_the_check(client):
+    """It must reject a pasted list without rejecting a real topic."""
+    response = client.post("/api/plan/async", json={
+        "topic": "Kongka La pass par ITBP jawano ne kya dekha",
+        "use_fake": True})
+    assert response.status_code == 200

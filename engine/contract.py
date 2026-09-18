@@ -27,19 +27,30 @@ HookStyle = Literal["question", "claim", "number", "contradiction", "threat"]
 Confidence = Literal["high", "medium", "low"]
 
 
-def slugify(raw: str) -> str:
-    """Lowercase, strip punctuation, collapse to hyphens.
+# The slug becomes part of the output filename, and Windows refuses a path
+# over 260 characters. Five topics pasted at once produced a 290-character
+# name and ffmpeg failed with a bare "Invalid argument".
+SLUG_MAX = 80
 
-    Devanagari is transliteration-free here: we keep the codepoints when the
+
+def slugify(raw: str) -> str:
+    """Lowercase, strip punctuation, collapse to hyphens, cap the length.
+
+    Devanagari is transliteration-free here: the codepoints are kept when the
     string has no ASCII content, so a Hindi-only topic still gets a stable,
     non-empty slug.
+
+    Truncation is deterministic, so the same topic still yields the same slug
+    and the same dedupe hash. Two topics sharing an 80-character prefix would
+    collide — and those are near-duplicates the gate should catch anyway.
     """
     text = unicodedata.normalize("NFKC", raw).strip().lower()
     ascii_slug = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
     if ascii_slug:
-        return ascii_slug
+        return ascii_slug[:SLUG_MAX].rstrip("-")
     devanagari = re.sub(r"[^\w]+", "-", text, flags=re.UNICODE).strip("-")
-    return devanagari or hashlib.sha256(raw.encode()).hexdigest()[:16]
+    return (devanagari[:SLUG_MAX].rstrip("-")
+            or hashlib.sha256(raw.encode()).hexdigest()[:16])
 
 
 class Coercing(BaseModel):
