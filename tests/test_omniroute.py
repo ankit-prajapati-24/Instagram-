@@ -134,8 +134,10 @@ def test_no_provider_503_is_not_retried():
     assert calls["n"] == 1, "a missing provider key must not burn retries"
 
 
-def test_missing_openai_credentials_is_not_retried():
-    from engine.omniroute import NoProviderError
+def test_missing_moderation_credentials_reports_unavailable(self=None):
+    """Moderation routes to its own provider, so it can be missing while
+    chat works. That is a setup gap, not a content verdict — it must not
+    raise (which would stop every plan) and must not read as "clean"."""
     calls = {"n": 0}
 
     def handler(request):
@@ -145,9 +147,22 @@ def test_missing_openai_credentials_is_not_retried():
 
     c = _client(handler)
     c.backoff_base = 0.0
-    with pytest.raises(NoProviderError):
-        c.moderate("anything")
-    assert calls["n"] == 1
+    result = c.moderate("anything")
+    assert calls["n"] == 1, "a credential gap must not burn retries"
+    assert result.checked is False
+    assert result.flagged is False
+    assert "no upstream provider" in result.unavailable.lower()
+
+
+def test_moderation_reports_a_real_flag_as_checked():
+    def handler(request):
+        return httpx.Response(200, json={"results": [
+            {"flagged": True, "categories": {"violence": True}}]})
+
+    result = _client(handler).moderate("something")
+    assert result.checked is True
+    assert result.flagged is True
+    assert result.flags == ["violence"]
 
 
 def test_empty_200_body_is_reported_as_no_provider():
@@ -222,3 +237,55 @@ def test_health_reports_down_when_nothing_answers():
         raise httpx.ConnectError("refused")
 
     assert _client(handler).health()["state"] == "down"
+
+
+# --- the gateway answers SSE even when asked not to -------------------------
+# Measured against a live provider: a plain request came back as
+# "data: {...}" lines, and response.json() fails on that.
+
+def test_chat_always_asks_for_a_non_streaming_response():
+    seen = {}
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "ok"}}]})
+
+    _client(handler).chat([])
+    assert seen["stream"] is False
+
+
+def test_an_sse_body_is_reassembled_instead_of_crashing():
+    body = (
+        'data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n'
+        'data: {"choices":[{"index":0,"delta":{"content":"Hello "}}]}\n\n'
+        'data: {"choices":[{"index":0,"delta":{"content":"world"}}]}\n\n'
+        'data: [DONE]\n\n'
+    )
+
+    def handler(request):
+        return httpx.Response(200, content=body.encode(),
+                              headers={"content-type": "text/event-stream"})
+
+    assert _client(handler).chat([]).text == "Hello world"
+
+
+def test_an_sse_body_still_yields_json_for_want_json():
+    body = ('data: {"choices":[{"index":0,"delta":{"content":"{\\"a\\": 1}"}}]}'
+            '\n\ndata: [DONE]\n\n')
+
+    def handler(request):
+        return httpx.Response(200, content=body.encode())
+
+    assert _client(handler).chat([], want_json=True).data == {"a": 1}
+
+
+def test_sse_message_shaped_chunks_are_handled_too():
+    """Some providers send full messages per chunk rather than deltas."""
+    body = ('data: {"choices":[{"index":0,"message":{"content":"done"}}]}\n\n'
+            'data: [DONE]\n\n')
+
+    def handler(request):
+        return httpx.Response(200, content=body.encode())
+
+    assert _client(handler).chat([]).text == "done"

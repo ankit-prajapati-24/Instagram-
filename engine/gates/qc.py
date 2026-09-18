@@ -114,10 +114,17 @@ def run_qc(plan: ReelPlan, *, similarity: float | None = None,
             "semantic_similarity", similarity < 0.88, "hard",
             f"cosine {similarity:.3f} (limit 0.88)"))
 
-    checks.append(Check(
-        "moderation", plan.safety.moderation_passed, "hard",
-        "passed" if plan.safety.moderation_passed
-        else f"flags: {plan.safety.flags}"))
+    if plan.safety.moderation_unavailable:
+        # Not a hard fail: the checker was unreachable, which is a setup gap
+        # rather than a content verdict. It stays loud so a human decides.
+        checks.append(Check(
+            "moderation", False, "warn",
+            f"NOT CHECKED - {plan.safety.moderation_unavailable}"))
+    else:
+        checks.append(Check(
+            "moderation", plan.safety.moderation_passed, "hard",
+            "passed" if plan.safety.moderation_passed
+            else f"flags: {plan.safety.flags}"))
 
     haystack = plan.all_text().lower()
     hits = [p for p in BANNED_PHRASES if p in haystack]

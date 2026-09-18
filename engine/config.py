@@ -51,12 +51,18 @@ class Settings:
             "OMNIROUTE_BASE", "http://127.0.0.1:20128/v1"))
     omniroute_key: str = field(
         default_factory=lambda: os.getenv("OMNIROUTE_KEY", "omniroute"))
+    # Pinned, not auto/*. Measured: auto/best-chat walks a pool of dead
+    # keyless providers, exhausts its retry limit and never reaches the
+    # provider that actually works. These two were verified completing.
     model_strong: str = field(
-        default_factory=lambda: os.getenv("RAHASYA_MODEL_STRONG", ""))
+        default_factory=lambda: os.getenv(
+            "RAHASYA_MODEL_STRONG", "antigravity/claude-sonnet-5"))
     model_cheap: str = field(
-        default_factory=lambda: os.getenv("RAHASYA_MODEL_CHEAP", ""))
+        default_factory=lambda: os.getenv(
+            "RAHASYA_MODEL_CHEAP", "antigravity/gemini-3.1-flash-lite"))
     model_image: str = field(
-        default_factory=lambda: os.getenv("RAHASYA_MODEL_IMAGE", ""))
+        default_factory=lambda: os.getenv(
+            "RAHASYA_MODEL_IMAGE", "antigravity/gemini-3.1-flash-image"))
     # Tier 2 of the image chain: a keyless public endpoint, used only when
     # the gateway has no image provider. Set RAHASYA_KEYLESS_IMAGES=0 to go
     # straight from the gateway to the placeholder.
