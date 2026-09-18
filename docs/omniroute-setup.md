@@ -106,7 +106,7 @@ own provider:
 | Capability | Endpoint | Used for | If missing |
 |---|---|---|---|
 | Chat | `/v1/chat/completions` | research, hooks, script, metadata | the panel falls back to the built-in sample script |
-| Images | `/v1/images/generations` | scene visuals | placeholder frames — watchable, but do not publish them |
+| Images | `/v1/images/generations` | scene visuals | falls to the keyless tier, which works but watermarks and upscales; then to placeholders |
 | Embeddings | `/v1/embeddings` | semantic dedup, layer 3 | layers 1, 2 and 4 still run; layer 3 is skipped |
 | Moderation | `/v1/moderations` | pre-render safety gate | the gate fails closed and stops the plan |
 

@@ -17,7 +17,7 @@ Hindi/India audience that is where the money actually is —
                           [ you approve or edit ]
                                    |
       local edge-tts ──────────────┤  hi-IN voice, measured per beat
-      OmniRoute images ────────────┤  scenes (placeholder if no provider)
+      image chain ─────────────────┤  gateway -> keyless -> placeholder
                                    v
       ffmpeg v7.1 ─────────────────┤  zoompan · xfade · libass · loudnorm
                                    v
@@ -55,7 +55,7 @@ whole pipeline work before spending anything. To get real scripts, follow
 python scripts/verify_e2e.py      # full pipeline, fake brain, real everything else
 python scripts/probe_omniroute.py # which gateway endpoints actually answer
 python scripts/reset_cooldown.py  # what the dedup gate is currently blocking
-python -m pytest tests/ -q        # 145 tests
+python -m pytest tests/ -q        # 175 tests
 ```
 
 `verify_e2e.py` exits non-zero unless it produced a playable 1080x1920 MP4 with
@@ -73,12 +73,13 @@ Measured on this machine, 2026-09-17/18:
 | Caption burn-in | libass, with karaoke word highlighting |
 | Dedup gate | refused a repeat topic on the exact-hash layer |
 | Web panel | full flow driven end to end, including an edit to the hook beat surviving approval. No console errors, no mobile overflow |
-| 145 tests | `pytest tests/ -q` |
+| Scene images | 9 of 10 beats from the keyless tier, watermark cropped, matching their captions |
+| 175 tests | `pytest tests/ -q` |
 
 | Not verified | Why |
 |---|---|
 | Real model output | OmniRoute has no provider configured — `docs/omniroute-setup.md` |
-| Generated scene images | same; placeholder frames stand in |
+| Tier-1 image quality | needs a provider key; tier 2 is watermark-cropped and upscaled from a smaller source |
 | Voice *tone* | both `hi-IN` voices are tagged "Friendly, Positive", which is wrong for dark mystery. The rate and pitch offsets pull them darker, but this needs your ears, not a test |
 | edge-tts commercial terms | check Microsoft's terms before monetising the audio |
 | Publishing | no upload path exists. Payloads are built for you to copy |
@@ -104,6 +105,15 @@ Measured on this machine, 2026-09-17/18:
 **Voice does not go through OmniRoute.** Its `/v1/audio/speech` documents only
 `openai/tts-1`, which speaks Hindi with a foreign accent. Local `edge-tts`
 gives real `hi-IN` neural voices, free and unmetered.
+
+**Images walk a three-tier chain**, in `engine/media/images.py`: the gateway
+first, then a keyless public endpoint, then a generated placeholder. With no
+provider key the gateway lists zero image models, and this machine has no
+usable GPU for local generation, so tier 2 is what actually draws scenes
+today. It retries — one attempt per beat landed 3 of 10 images, retrying
+landed 9 of 10 — crops the bottom 7% to remove the endpoint's watermark, and
+scales to cover 1080x1920. Add a key and tier 1 takes over with no code
+change. `RAHASYA_KEYLESS_IMAGES=0` skips tier 2.
 
 **Every beat carries two texts.** `voice_text` in Devanagari drives
 pronunciation; `caption_text` in Roman Hinglish is what gets burned on screen.
