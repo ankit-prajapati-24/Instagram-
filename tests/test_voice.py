@@ -199,3 +199,40 @@ def test_caption_timings_are_filled_even_though_piper_reports_none(
         assert beat.spoken_words == 0
         assert beat.words, "captions must still be timed"
         assert beat.words[-1].end == pytest.approx(4.4)
+
+
+def test_a_piper_failure_writes_the_whole_error_to_a_log(monkeypatch,
+                                                         tmp_path):
+    """The first diagnosis of a real failure was impossible: stderr was
+    truncated to its last 300 characters, leaving only a traceback tail
+    from Python's wave module and no command, text or exit code."""
+    import subprocess
+    from engine.media import piper_voice
+
+    class Result:
+        returncode = 1
+        stdout = b""
+        stderr = ("Traceback (most recent call last):\n"
+                  "  File \"x\", line 1\n"
+                  "ValueError: something specific went wrong\n"
+                  + "padding\n" * 200).encode()
+
+    monkeypatch.setattr(piper_voice, "ensure_model",
+                        lambda v, d: tmp_path / "v.onnx")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: Result())
+
+    settings = FakeSettings(tmp=tmp_path)
+    with pytest.raises(piper_voice.PiperUnavailable) as exc:
+        piper_voice.synth("कुछ", tmp_path / "out" / "b1.mp3", settings)
+
+    log = tmp_path / "out" / "piper-error.log"
+    assert log.exists(), "the full error must be written somewhere"
+    body = log.read_text(encoding="utf-8")
+    assert "command:" in body
+    assert "returncode : 1" in body
+    assert "कुछ" in body, "the input text must be recorded"
+    assert "something specific went wrong" in body
+
+    # and the exception itself must name the exit code and the log
+    assert "exited 1" in str(exc.value)
+    assert "piper-error.log" in str(exc.value)

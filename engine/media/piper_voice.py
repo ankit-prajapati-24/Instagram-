@@ -87,18 +87,48 @@ def synth(text: str, out_path: str | Path, settings) -> None:
     onnx = ensure_model(settings.piper_voice, settings.piper_models_dir)
     wav = out_path.with_suffix(".raw.wav")
 
-    result = subprocess.run(
-        [sys.executable, "-m", "piper", "-m", str(onnx), "-f", str(wav),
-         "--length-scale", str(settings.piper_length_scale),
-         "--noise-scale", str(settings.piper_noise_scale),
-         "--noise-w-scale", str(settings.piper_noise_w),
-         "--sentence-silence", str(settings.piper_sentence_silence)],
-        input=text.encode("utf-8"), capture_output=True)
+    command = [
+        sys.executable, "-m", "piper", "-m", str(onnx), "-f", str(wav),
+        "--length-scale", str(settings.piper_length_scale),
+        "--noise-scale", str(settings.piper_noise_scale),
+        "--noise-w-scale", str(settings.piper_noise_w),
+        "--sentence-silence", str(settings.piper_sentence_silence),
+    ]
+    result = subprocess.run(command, input=text.encode("utf-8"),
+                            capture_output=True)
 
     if result.returncode != 0 or not wav.exists():
+        # Write the whole thing to a file and name it in the exception.
+        # Truncating stderr to its last 300 characters once hid the actual
+        # cause and left only a traceback tail from Python's wave module.
+        detail = result.stderr.decode("utf-8", "replace")
+        report = Path(out_path).parent / "piper-error.log"
+        try:
+            report.write_text("\n".join([
+                "command:",
+                "  " + " ".join(str(a) for a in command),
+                "",
+                f"returncode : {result.returncode}",
+                f"wav written: {wav.exists()}",
+                f"text ({len(text)} chars):",
+                "  " + text,
+                "",
+                "stdout:",
+                result.stdout.decode("utf-8", "replace"),
+                "",
+                "stderr:",
+                detail,
+            ]), encoding="utf-8")
+        except OSError:
+            report = None
+
+        first = next((line for line in detail.splitlines()
+                      if line.strip() and not line.startswith(" ")
+                      and "Traceback" not in line), "")
         raise PiperUnavailable(
-            "piper failed: "
-            + result.stderr.decode("utf-8", "replace")[-300:])
+            f"piper exited {result.returncode}"
+            + (f": {first.strip()[:200]}" if first else "")
+            + (f" (full log: {report})" if report else ""))
 
     chain = PROCESS_CHAIN if settings.voice_process else "loudnorm=I=-15"
     convert = subprocess.run(
