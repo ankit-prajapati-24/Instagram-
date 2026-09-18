@@ -22,6 +22,7 @@ it: pace, a small room, and the EQ that dry synthesis always needs.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import urllib.request
@@ -94,8 +95,24 @@ def synth(text: str, out_path: str | Path, settings) -> None:
         "--noise-w-scale", str(settings.piper_noise_w),
         "--sentence-silence", str(settings.piper_sentence_silence),
     ]
+    # Force UTF-8 on the child's stdin. This is the whole bug that made Piper
+    # work from a terminal and fail from the panel.
+    #
+    # The text goes in as UTF-8 bytes, but Piper's Python decodes stdin using
+    # the process locale — cp1252 here — and surrogateescape turns each
+    # undecodable byte into a lone surrogate. The third byte of the Devanagari
+    # candrabindu (U+0901 encodes as E0 A4 81) arrived as U+DC81, espeak then
+    # raised UnicodeEncodeError, and the only symptom that escaped the
+    # subprocess was "wave.Error: # channels not specified" from the
+    # half-written file.
+    #
+    # Every manual test passed because those commands were run with
+    # PYTHONIOENCODING=utf-8 set, and the child inherited it. The panel was
+    # started without it. Setting it here removes the dependency on however
+    # the parent happened to be launched.
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
     result = subprocess.run(command, input=text.encode("utf-8"),
-                            capture_output=True)
+                            capture_output=True, env=env)
 
     if result.returncode != 0 or not wav.exists():
         # Write the whole thing to a file and name it in the exception.
