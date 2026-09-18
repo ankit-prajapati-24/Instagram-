@@ -47,21 +47,66 @@ def _claims_block(provenance: Provenance) -> str:
 
 
 def _ask(client, stage: str, prompt: str, *, model: str | None = None,
-         temperature: float = 0.85):
-    result = client.chat([{"role": "user", "content": prompt}], model=model,
-                         want_json=True, temperature=temperature)
-    if result.data is None:
-        raise AgentError(stage, "model returned no JSON", result.text)
-    return result
+         temperature: float = 0.85, parse=None):
+    """One agent call, with a single repair attempt on a shape mismatch.
+
+    Models miss the schema in small, mechanical ways — a claim id as the
+    integer 1 instead of "b1", a number as "4.5s". Failing the stage outright
+    throws away every call made so far in the run, so the exact validation
+    error is handed back once and the model is asked to correct it. A second
+    failure is real and raises.
+
+    ``parse`` takes the decoded JSON and returns the model object, raising
+    ValidationError if the shape is wrong.
+    """
+    messages = [{"role": "user", "content": prompt}]
+
+    for attempt in range(2):
+        result = client.chat(messages, model=model, want_json=True,
+                             temperature=temperature)
+        if result.data is None:
+            problem = "model returned no JSON"
+        else:
+            if parse is None:
+                return result, None
+            try:
+                return result, parse(result.data)
+            except ValidationError as exc:
+                problem = _explain(exc)
+
+        if attempt == 0:
+            messages = messages + [
+                {"role": "assistant",
+                 "content": json.dumps(result.data)[:4000]
+                 if result.data is not None else (result.text or "")[:4000]},
+                {"role": "user",
+                 "content": ("That did not match the required schema:\n"
+                             f"{problem}\n\n"
+                             "Return the SAME content again, corrected. JSON "
+                             "only, no commentary. Keep every id a quoted "
+                             "string and every duration a plain number.")},
+            ]
+            continue
+
+        raise AgentError(stage, problem,
+                         result.data if result.data is not None else result.text)
+
+
+def _explain(exc: ValidationError) -> str:
+    """The parts of a pydantic error a model can act on."""
+    lines = []
+    for error in exc.errors()[:6]:
+        where = ".".join(str(p) for p in error["loc"])
+        lines.append(f"- {where}: {error['msg']} "
+                     f"(got {error.get('input')!r})")
+    return "\n".join(lines)
 
 
 def run_research(client, topic: Topic, *, model: str | None = None):
     prompt = load_prompt("research").format(topic=topic.raw)
-    result = _ask(client, "research", prompt, model=model, temperature=0.4)
-    try:
-        provenance = Provenance.model_validate(result.data)
-    except ValidationError as exc:
-        raise AgentError("research", str(exc), result.data) from exc
+    result, provenance = _ask(client, "research", prompt, model=model,
+                              temperature=0.4,
+                              parse=Provenance.model_validate)
     return provenance, result.cost
 
 
@@ -69,16 +114,15 @@ def run_hooks(client, topic: Topic, provenance: Provenance, *,
               model: str | None = None):
     prompt = load_prompt("hooks").format(
         topic=topic.raw, claims=_claims_block(provenance))
-    result = _ask(client, "hooks", prompt, model=model, temperature=1.0)
+    def parse(data):
+        raw = data.get("hooks") if isinstance(data, dict) else None
+        if not isinstance(raw, list) or not raw:
+            raise AgentError("hooks", "expected a non-empty 'hooks' list",
+                             data)
+        return [Hook.model_validate(h) for h in raw]
 
-    raw = result.data.get("hooks") if isinstance(result.data, dict) else None
-    if not isinstance(raw, list) or not raw:
-        raise AgentError("hooks", "expected a non-empty 'hooks' list",
-                         result.data)
-    try:
-        hooks = [Hook.model_validate(h) for h in raw]
-    except ValidationError as exc:
-        raise AgentError("hooks", str(exc), result.data) from exc
+    result, hooks = _ask(client, "hooks", prompt, model=model,
+                         temperature=1.0, parse=parse)
     return hooks, result.cost
 
 
@@ -90,17 +134,17 @@ def run_script(client, topic: Topic, provenance: Provenance,
               else "(no hook chosen — write your own opening beat)"),
         hook_id=hook.variant_id if hook else "h1",
         claims=_claims_block(provenance))
-    result = _ask(client, "script", prompt, model=model, temperature=0.9)
-
-    raw = result.data.get("script") if isinstance(result.data, dict) else None
-    if not isinstance(raw, dict):
-        raise AgentError("script", "expected a 'script' object", result.data)
-    try:
+    def parse(data):
+        raw = data.get("script") if isinstance(data, dict) else data
+        if not isinstance(raw, dict):
+            raise AgentError("script", "expected a 'script' object", data)
         script = Script.model_validate(raw)
-    except ValidationError as exc:
-        raise AgentError("script", str(exc), result.data) from exc
-    if not script.beats:
-        raise AgentError("script", "script contained no beats", result.data)
+        if not script.beats:
+            raise AgentError("script", "script contained no beats", data)
+        return script
+
+    result, script = _ask(client, "script", prompt, model=model,
+                          temperature=0.9, parse=parse)
     return script, result.cost
 
 
@@ -113,15 +157,14 @@ def run_metadata(client, topic: Topic, script: Script,
     prompt = load_prompt("metadata").format(
         topic=topic.raw, script=script_block,
         sources=sources or "(none)")
-    result = _ask(client, "metadata", prompt, model=model, temperature=0.8)
+    def parse(data):
+        payload = data
+        if isinstance(payload, dict) and "metadata" in payload:
+            payload = payload["metadata"]
+        return Metadata.model_validate(payload)
 
-    payload = result.data
-    if isinstance(payload, dict) and "metadata" in payload:
-        payload = payload["metadata"]
-    try:
-        metadata = Metadata.model_validate(payload)
-    except ValidationError as exc:
-        raise AgentError("metadata", str(exc), result.data) from exc
+    result, metadata = _ask(client, "metadata", prompt, model=model,
+                            temperature=0.8, parse=parse)
     return metadata, result.cost
 
 

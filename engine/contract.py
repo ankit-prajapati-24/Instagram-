@@ -17,7 +17,7 @@ import unicodedata
 import uuid
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 Motion = Literal["zoom_in", "zoom_out", "move_left", "move_right"]
 Transition = Literal["fade", "slide_left", "slide_right", "zoom", "blur"]
@@ -42,13 +42,39 @@ def slugify(raw: str) -> str:
     return devanagari or hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
+class Coercing(BaseModel):
+    """Base for models filled from LLM output.
+
+    Models return ids as bare integers (``beat_id: 1``) and numbers as
+    strings (``"4.5"``) often enough that rejecting them throws away a whole
+    multi-call run over a type that is trivially convertible. The *shape* is
+    still enforced — only these near-misses are absorbed.
+    """
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _coerce_scalars(cls, value, info):
+        field = cls.model_fields.get(info.field_name)
+        if field is None or value is None:
+            return value
+        annotation = str(field.annotation)
+        if "str" in annotation and isinstance(value, (int, float)):
+            return str(value)
+        if "float" in annotation and isinstance(value, str):
+            try:
+                return float(value.strip().rstrip("s").strip())
+            except ValueError:
+                return value
+        return value
+
+
 class WordTiming(BaseModel):
     word: str
     start: float
     end: float
 
 
-class Topic(BaseModel):
+class Topic(Coercing):
     raw: str
     slug: str
     entities: list[str] = Field(default_factory=list)
@@ -62,7 +88,7 @@ class Topic(BaseModel):
                    dedupe_hash=hashlib.sha256(slug.encode()).hexdigest())
 
 
-class Hook(BaseModel):
+class Hook(Coercing):
     variant_id: str
     voice_text: str
     caption_text: str
@@ -70,7 +96,7 @@ class Hook(BaseModel):
     seconds: float = 3.0
 
 
-class Beat(BaseModel):
+class Beat(Coercing):
     beat_id: str
     role: Role
     voice_text: str
@@ -97,13 +123,13 @@ class Beat(BaseModel):
                 else self.target_seconds)
 
 
-class Script(BaseModel):
+class Script(Coercing):
     total_seconds: float
     chosen_hook: str
     beats: list[Beat] = Field(default_factory=list)
 
 
-class Metadata(BaseModel):
+class Metadata(Coercing):
     yt_title: str = ""
     yt_description: str = ""
     ig_caption: str = ""
@@ -112,14 +138,14 @@ class Metadata(BaseModel):
     thumbnail_prompt: str = ""
 
 
-class Claim(BaseModel):
+class Claim(Coercing):
     beat_id: str | None = None
     text: str
     source_url: str | None = None
     confidence: Confidence = "medium"
 
 
-class Provenance(BaseModel):
+class Provenance(Coercing):
     claims: list[Claim] = Field(default_factory=list)
     searched_queries: list[str] = Field(default_factory=list)
     # Named people, places and organisations. These drive the 45-day cooldown

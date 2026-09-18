@@ -30,8 +30,7 @@ Return ONLY this JSON:
 
 {{
   "claims": [
-    {{"beat_id": null,
-      "text": "<one factual claim, plain Hinglish or English>",
+    {{"text": "<one factual claim, plain Hinglish or English>",
       "source_url": "<real URL>",
       "confidence": "high|medium|low"}}
   ],
