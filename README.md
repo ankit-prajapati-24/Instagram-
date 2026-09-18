@@ -27,6 +27,9 @@ Hindi/India audience that is where the money actually is —
 
 ## Run it
 
+Setting up from scratch on a new machine? **`SETUP.md`** walks the whole thing,
+including OmniRoute and the known gaps. The short version:
+
 ```bat
 pip install -r requirements.txt
 start.bat
