@@ -114,7 +114,7 @@ def main() -> int:
     print(f"duration   : {probe.get('duration', 0):.2f}s")
     print(f"resolution : {probe.get('width')}x{probe.get('height')}")
     print(f"audio      : {'present' if probe.get('has_audio') else 'MISSING'}")
-    print(f"providers  : {result['providers']}")
+    print(f"providers  : {result.get('providers', {})}")
     print(f"cost       : ${result['cost_usd']:.6f}")
     print(f"qc         : {'PASS' if card['passed'] else 'FAIL'}")
 
