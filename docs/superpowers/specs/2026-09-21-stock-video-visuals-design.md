@@ -177,10 +177,25 @@ That invariant is the whole reason for per-beat segmentation. It is asserted in
 tests, and the existing `av_sync` QC check is untouched.
 
 Slots divide the beat evenly: each clip's `duration` is
-`beat.seconds() / len(beat.clips)`, with any floating-point remainder added to
-the last slot so the sum is exact rather than approximately right. A beat
-shorter than 2.5s yields a single slot spanning the whole beat, which
-`ceil(duration / 2.5)` already gives.
+`beat.seconds() / len(beat.clips)`, with the residual folded into the last
+slot. A beat shorter than 2.5s yields a single slot spanning the whole beat,
+which `ceil(duration / 2.5)` already gives.
+
+An earlier draft of this section claimed the sum had to be exact because "a
+rounding crumb per slot accumulates into visible drift". Measured, that is
+false, and it sent a review round chasing the wrong property. Across 20,000
+random `(total, count)` pairs the worst summation error is 1.78e-15 seconds
+against a frame duration of 3.33e-2 seconds — thirteen orders of magnitude
+below one frame — and over a twelve-beat video the accumulated error was
+exactly zero. Bit-exact equality is not even achievable: 563 of those 20,000
+sums differ from their total in the last bit.
+
+What the guard is actually for is a *coarse* implementation — one that rounds
+slots to two decimals, truncates, or quantises to whole frames. Those produce
+errors around 1e-3 and would drift. A tolerance of 1e-9 separates that class
+cleanly from floating-point noise, and any implementation that folds the
+residual into one slot passes it regardless of the arithmetic path it takes
+to get there. Asserting bit-exactness instead only pins one specific formula.
 
 Source footage is fitted to its slot, never the other way round: longer than
 the slot is trimmed, shorter is looped. A clip's source length has no effect on

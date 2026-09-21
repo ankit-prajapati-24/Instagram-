@@ -14,7 +14,7 @@
 
 - One clip per 2.5 seconds: `ceil(duration / 2.5)`, already implemented by `VisualQueryGenerator.calculate_clip_count`.
 - A clip never straddles a beat boundary. Per-beat segmentation is what preserves A/V sync.
-- `beat.seconds() == sum(clip.duration for clip in beat.clips)` — exact, not approximate. Remainder goes in the last slot.
+- `sum(clip.duration for clip in beat.clips)` equals `beat.seconds()` to within 1e-9. The residual goes in the last slot. The tolerance is deliberate: it separates a coarse implementation (rounding to 2dp, truncating, quantising to frames — errors ~1e-3) from floating-point noise (~1e-15, thirteen orders below one frame). Bit-exactness is not achievable and pinning it only tests one formula.
 - Clip count and slot size derive from `beat.measured_seconds` only. Never `target_seconds`.
 - Visuals run **after** voice. Stage order is `VOICE → CLIPS → CAPTIONS → RENDER`.
 - `stock_agent.py` is not modified. Its `main()` CLI must keep working.
