@@ -658,7 +658,7 @@ def test_clip_spans_fill_their_beat_segment_exactly():
 
     Beat 1 mixes footage with a fallback still on purpose. That is the
     common production shape, not a corner case: generate_plan_clips fills
-    any slot Pexels could not supply with a `<beat_id>-<slot>.png` still,
+    any slot Pexels could not supply with a `<beat_id>/<slot>.png` still,
     so a still sits beside video in the same beat whenever the provider
     under-delivers -- and the two branches encode their span differently.
     """

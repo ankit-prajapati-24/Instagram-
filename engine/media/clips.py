@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -67,6 +68,33 @@ def slot_durations(total: float, count: int) -> list[float]:
     return slots + [total - sum(slots)]
 
 
+# Characters a beat id may contribute to a directory name. Everything else
+# becomes "_". Deliberately a whitelist: beat_id reaches here from the
+# script agent's JSON, i.e. it is model-authored text, and the moment it
+# became a path component it became an injection surface. A "/" or "\\"
+# would nest the beat's clips under an unexpected tree, ".." would climb
+# out of the plan's work directory entirely, and ":", "?", "*", '"', "<",
+# ">" and "|" are simply illegal in Windows filenames — a beat id carrying
+# one would fail the whole beat at mkdir rather than fall back cleanly.
+_SAFE_BEAT_ID = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def safe_beat_id(beat_id: str) -> str:
+    """A single path component that can only ever name a child directory.
+
+    Slugified rather than validated-and-rejected: a weird beat id should
+    still render, and the id is only ever used to keep beats apart on disk,
+    never to look anything up. Collisions between two ids that slugify the
+    same are possible in principle but need two beats whose ids differ only
+    in punctuation; the plan's own uniqueness rules make that far less
+    likely than the traversal it prevents.
+    """
+    cleaned = _SAFE_BEAT_ID.sub("_", str(beat_id)).strip("._")
+    # "", ".", ".." and friends all reduce to empty here — none of them can
+    # name a child directory, so fall back to a fixed stand-in.
+    return cleaned or "beat"
+
+
 def beat_output_dir(target_dir: str | Path, beat_id: str) -> Path:
     """Where one beat's clips and fallback stills live.
 
@@ -85,8 +113,12 @@ def beat_output_dir(target_dir: str | Path, beat_id: str) -> Path:
     module's file) and without needing ``clip_index`` to stay unique across
     the whole plan. Both real clips and their fallback stills use this same
     helper so the two never drift apart.
+
+    ``beat_id`` is slugified on the way in (see ``safe_beat_id``): it is
+    LLM-supplied text, and as a path component it could otherwise nest,
+    escape ``target_dir``, or be illegal on Windows.
     """
-    return Path(target_dir) / beat_id
+    return Path(target_dir) / safe_beat_id(beat_id)
 
 
 def beat_clips(agent, beat: Beat, target_dir: str | Path) -> list[Clip]:

@@ -8,7 +8,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from engine.contract import Beat
-from engine.media.clips import beat_clips, clip_count, slot_durations
+from engine.media.clips import (beat_clips, beat_output_dir, clip_count,
+                                safe_beat_id, slot_durations)
 from tests.factories import make_plan
 
 
@@ -515,3 +516,152 @@ def test_a_rate_limit_is_surfaced_not_retried(tmp_path, monkeypatch):
     assert agent.match.call_count == len(plan.script.beats), \
         "one attempt per beat, no retry storm"
     assert counts.get("placeholder") == len(plan.script.beats)
+
+
+# ---------------------------------------------------------------------------
+# The real agent, offline: shared-instance state, not filenames
+# ---------------------------------------------------------------------------
+
+from stock_agent import StockVideoMatcherAgent
+
+
+class MockModeAdapter:
+    """Lets ``beat_clips`` drive a **real** ``StockVideoMatcherAgent``.
+
+    ``beat_clips`` cannot pass ``mock=True`` itself (production code must
+    never ask for mock footage), so this adapter — test-only — forwards the
+    call and adds that one flag. Everything else is the real thing: the real
+    ``match()`` body, the real ``ClipDownloader``, the real
+    ``download_clip`` (whose ``https://static.pexels.com/mock/`` fast path
+    writes real bytes to disk). No network is touched: ``mock=True`` selects
+    ``generate_mock_queries`` and ``PexelsFetcher.mock_video``.
+
+    This is deliberately *not* a hand-written fake. ``RealNamingAgent``
+    above reproduces the downloader's *filename* mechanism, which a
+    per-beat ``output_dir`` already fixes. The defect this exercises lives
+    in the other mechanism: one ``ClipDownloader`` shared by every
+    concurrent ``match()`` call, whose ``output_dir`` attribute is written
+    at the top of ``match()`` and read at the bottom.
+    """
+
+    def __init__(self, agent):
+        self.agent = agent
+
+    def match(self, script_segment, duration_seconds, download=True,
+              output_dir="output_clips"):
+        return self.agent.match(script_segment=script_segment,
+                                duration_seconds=duration_seconds,
+                                download=download,
+                                output_dir=output_dir,
+                                mock=True)
+
+
+def _slow_query_generation(agent, seconds):
+    """Stand in for the latency the real ``match()`` always has.
+
+    In production, between the moment ``match()`` records ``output_dir``
+    and the moment it downloads, there is an LLM round trip plus a Pexels
+    search per clip — seconds of wall clock during which other beats enter
+    ``match()`` and overwrite that recorded directory. The mock path is
+    instant, so without this the interleaving depends on GIL luck. Sleeping
+    inside query generation reproduces the real timing, and does it in the
+    same place the real delay occurs: after the assignment, before the
+    download.
+    """
+    real = agent.query_generator.generate_mock_queries
+
+    def slow(script_segment, duration_seconds):
+        time.sleep(seconds)
+        return real(script_segment=script_segment,
+                    duration_seconds=duration_seconds)
+
+    agent.query_generator.generate_mock_queries = slow
+
+
+def test_one_agent_many_threads_keeps_each_beats_clips_in_its_own_dir(
+        tmp_path):
+    """``engine/pipeline.py`` builds ONE ``StockVideoMatcherAgent`` and
+    ``generate_plan_clips`` runs beats through a 4-worker pool. Passing a
+    per-beat ``output_dir`` into ``match()`` is not enough on its own: the
+    agent stores it on ``self.downloader``, shared by every thread, so the
+    directory a beat downloads into is whichever beat most recently
+    *entered* ``match()`` — not its own. Beats then land in each other's
+    directories, collide on ``clip_NN.mp4`` again, and race on the
+    ``clip_NN.mp4.tmp`` staging path.
+
+    Run with a real agent in mock mode so the whole of ``match()`` —
+    assignment, latency, download — actually executes, offline.
+    """
+    agent = StockVideoMatcherAgent()
+    _slow_query_generation(agent, 0.05)
+
+    plan = make_plan(beats=6)
+    for beat in plan.script.beats:
+        beat.measured_seconds = 5.0   # 2 clip slots per beat
+
+    generate_plan_clips(plan, MockModeAdapter(agent), client=None,
+                        work_dir=tmp_path, workers=4)
+
+    seen: dict[str, str] = {}
+    for beat in plan.script.beats:
+        paths = [c.path for c in beat.clips if c.provider == "pexels"]
+        assert len(paths) == 2, f"{beat.beat_id} missing clips: {paths}"
+        for path in paths:
+            assert Path(path).exists(), (
+                f"{beat.beat_id}'s clip {path} is missing after the run")
+            assert Path(path).stat().st_size > 0
+            owner = seen.setdefault(path, beat.beat_id)
+            assert owner == beat.beat_id, (
+                f"{beat.beat_id} and {owner} both point at {path}: the "
+                f"agent's shared downloader sent them to the same "
+                f"directory")
+
+    expected = Path(tmp_path) / plan.plan_id / "clips"
+    for beat in plan.script.beats:
+        for clip in beat.clips:
+            if clip.provider != "pexels":
+                continue
+            assert Path(clip.path).parent == expected / beat.beat_id, (
+                f"{beat.beat_id}'s clip landed in "
+                f"{Path(clip.path).parent}, not its own directory")
+
+
+# ---------------------------------------------------------------------------
+# beat_id is a path component, and it comes from the model
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("beat_id", [
+    "../../escape",
+    "a/b",
+    "a\b",
+    "C:evil",
+    "what?",
+    "star*",
+    "..",
+    ".",
+    "",
+    "   ",
+    "trailing.",
+])
+def test_a_hostile_beat_id_still_names_a_child_of_the_clips_dir(
+        beat_id, tmp_path):
+    """beat_id is written by the script model and became a path component
+    when each beat got its own directory. It must not be able to nest, to
+    climb out of the plan's clips folder, or to produce a name Windows
+    refuses."""
+    target = tmp_path / "p1" / "clips"
+    out = beat_output_dir(target, beat_id)
+
+    assert out.parent == target, f"{beat_id!r} escaped or nested: {out}"
+    assert out.resolve().is_relative_to(target.resolve())
+    assert not set(out.name) & set(r'<>:"/\|?*')
+    assert out.name not in ("", ".", "..")
+    out.mkdir(parents=True, exist_ok=True)   # must be creatable on Windows
+
+
+def test_ordinary_beat_ids_are_left_alone():
+    """The slug must not churn the normal case: b0..b9 and dashed ids are
+    already safe and are what every stored plan on disk uses."""
+    for beat_id in ("b0", "b12", "hook-1", "beat_3", "a.b"):
+        assert safe_beat_id(beat_id) == beat_id

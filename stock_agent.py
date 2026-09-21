@@ -24,7 +24,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import requests
 from dotenv import load_dotenv
@@ -446,19 +446,28 @@ RENDER_TARGET_PIXELS = RENDER_TARGET_WIDTH * RENDER_TARGET_HEIGHT  # 2,073,600
 
 # _select_best_video scoring bands (see the resolution-scoring comment
 # there for the full rationale). The orientation bonus must stay the
-# dominant term: ORIENTATION_BONUS (5,000,000) is strictly greater than
-# _RESOLUTION_COVER_CEILING (4,000,000), the resolution term's maximum, so a
-# correctly-oriented file always outscores a wrongly-oriented one no matter
-# its resolution. Within the resolution term, the "covers the target" band
-# is [_RESOLUTION_COVER_FLOOR, _RESOLUTION_COVER_CEILING] = [2,000,000,
+# dominant term: a correctly-oriented file must outscore a wrongly-oriented
+# one no matter what the other terms award. Those other terms are the
+# resolution score AND the HD-quality bonus, and they are summed, so the
+# comparison that matters is against their combined maximum
+# (_RESOLUTION_COVER_CEILING + _HD_QUALITY_BONUS = 4,500,000), not against
+# the resolution term alone. Real headroom under ORIENTATION_BONUS is
+# 500,000. Within the resolution term, the "covers the target" band is
+# [_RESOLUTION_COVER_FLOOR, _RESOLUTION_COVER_CEILING] = [2,000,000,
 # 4,000,000] and the "undersized" band is [0, _RESOLUTION_UNDERSIZED_CEILING)
 # = [0, 1,000,000) — the bands don't overlap, so every covering file
 # outscores every undersized one.
+#
+# These asserts document the invariants; note they are stripped under
+# `python -O`, so they are a statement of intent for whoever edits the
+# numbers, not a runtime guard. Keep them honest.
 ORIENTATION_BONUS = 5_000_000.0
 _RESOLUTION_COVER_CEILING = 4_000_000.0
 _RESOLUTION_COVER_FLOOR = 2_000_000.0
 _RESOLUTION_UNDERSIZED_CEILING = 1_000_000.0
-assert _RESOLUTION_COVER_CEILING < ORIENTATION_BONUS
+# Awarded on top of the resolution score when Pexels flags a file "hd".
+_HD_QUALITY_BONUS = 500_000.0
+assert _RESOLUTION_COVER_CEILING + _HD_QUALITY_BONUS < ORIENTATION_BONUS
 assert _RESOLUTION_UNDERSIZED_CEILING < _RESOLUTION_COVER_FLOOR < _RESOLUTION_COVER_CEILING
 
 
@@ -643,9 +652,10 @@ class PexelsFetcher:
                 #   undersized file can ever outscore a covering one.
                 #
                 # The resolution term's maximum (_RESOLUTION_COVER_CEILING)
-                # is a fixed constant kept strictly below ORIENTATION_BONUS,
-                # so a correctly-oriented file always beats a wrongly-oriented
-                # one regardless of resolution.
+                # plus the HD bonus is kept strictly below ORIENTATION_BONUS
+                # (see the constants), so a correctly-oriented file always
+                # beats a wrongly-oriented one regardless of resolution or
+                # quality flag.
                 pixel_count = width * height
                 if pixel_count >= RENDER_TARGET_PIXELS:
                     coverage_ratio = RENDER_TARGET_PIXELS / pixel_count  # (0, 1], 1.0 = exact match
@@ -659,7 +669,7 @@ class PexelsFetcher:
 
                 # 3. Quality flag bonus
                 if quality == "hd":
-                    score += 500000.0
+                    score += _HD_QUALITY_BONUS
 
                 if score > best_file_score:
                     best_file_score = score
@@ -706,12 +716,25 @@ class ClipDownloader:
         clip_index: int,
         progress: Optional[Progress] = None,
         task_id: Any = None,
+        output_dir: Optional[Union[str, Path]] = None,
     ) -> Path:
-        """Download video from URL directly into output_clips/clip_{index:02d}.mp4 atomically."""
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        """Download video from URL directly into <output_dir>/clip_{index:02d}.mp4 atomically.
+
+        ``output_dir`` is per call and overrides ``self.output_dir``. It
+        exists because a single downloader is shared by concurrent
+        ``StockVideoMatcherAgent.match()`` calls: a destination *stored* on
+        the instance is whatever the most recent caller wrote there, which
+        sent one beat's clips into another beat's folder (and raced on the
+        ``.tmp`` staging path, so a half-written file could be renamed over
+        a finished one). A destination *passed* cannot be clobbered by
+        another thread. ``self.output_dir`` remains the default for
+        single-threaded callers.
+        """
+        target_dir = Path(output_dir) if output_dir is not None else self.output_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
         filename = f"clip_{clip_index:02d}.mp4"
-        final_path = self.output_dir / filename
-        temp_path = self.output_dir / f"{filename}.tmp"
+        final_path = target_dir / filename
+        temp_path = target_dir / f"{filename}.tmp"
 
         # Fast-path for mock testing URLs
         if url.startswith("https://static.pexels.com/mock/") or url.startswith("mock://"):
@@ -792,7 +815,18 @@ class StockVideoMatcherAgent:
             StockMatcherResult containing all queries, matches, and file paths.
         """
         start_time = time.time()
-        self.downloader.output_dir = Path(output_dir)
+        # output_dir is carried in a local and handed to each download_clip
+        # call below; it is deliberately NOT stored on self.downloader.
+        # match() is re-entrant: engine/pipeline.py builds ONE agent and
+        # engine/media/clips.generate_plan_clips runs beats through a
+        # 4-worker pool, and seconds pass between here and the downloads —
+        # an LLM round trip plus a Pexels search per clip. Recording the
+        # destination on the shared downloader therefore meant a beat
+        # downloaded into whichever directory the most recently *started*
+        # call had asked for, not its own: clip_NN.mp4 names collided
+        # across beats again, and the clip_NN.mp4.tmp staging path raced,
+        # so a half-written file could be renamed over a finished one.
+        # Nothing here may mutate self (or anything reachable from it).
 
         # 1. Generate queries via OmniRoute or Mock
         if mock:
@@ -848,6 +882,7 @@ class StockVideoMatcherAgent:
                         saved_path = self.downloader.download_clip(
                             url=match.video.selected_file.link,
                             clip_index=match.clip_index,
+                            output_dir=output_dir,
                         )
                         match.download_path = str(saved_path)
                     except Exception as err:
@@ -1095,6 +1130,11 @@ def main() -> int:
 
         # Handle downloads with Rich progress if requested
         if args.download:
+            # The CLI downloads outside match() (it wants a Rich progress
+            # bar per clip), so it names --output-dir itself. match() used
+            # to leave the destination on agent.downloader as a side
+            # effect; it no longer does, because that shared mutation raced
+            # when match() is called concurrently.
             clips_to_download = [m for m in result.matches if m.video and m.video.selected_file]
             if clips_to_download:
                 if console and not args.output_json:
@@ -1118,6 +1158,7 @@ def main() -> int:
                                     clip_index=m.clip_index,
                                     progress=progress,
                                     task_id=task,
+                                    output_dir=args.output_dir,
                                 )
                                 m.download_path = str(saved_path)
                             except Exception as err:
@@ -1128,6 +1169,7 @@ def main() -> int:
                             saved_path = agent.downloader.download_clip(
                                 url=m.video.selected_file.link,
                                 clip_index=m.clip_index,
+                                output_dir=args.output_dir,
                             )
                             m.download_path = str(saved_path)
                         except Exception as err:
