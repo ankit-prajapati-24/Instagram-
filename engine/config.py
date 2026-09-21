@@ -82,6 +82,8 @@ class Settings:
         default_factory=lambda: os.getenv("RAHASYA_BROWSER_IMAGE_API", "").strip())
     model_embed: str = field(
         default_factory=lambda: os.getenv("RAHASYA_MODEL_EMBED", ""))
+    pexels_api_key: str = field(
+        default_factory=lambda: os.getenv("PEXELS_API_KEY", "").strip())
 
     # --- Voice (deliberately NOT through OmniRoute; see spec 5.1) ----------
     # Piper, chosen by ear over twelve edge-tts voices. It is also offline

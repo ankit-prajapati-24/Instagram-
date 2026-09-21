@@ -366,7 +366,7 @@
 const STAGES = [
   ["research","Research"], ["hooks","Hooks"], ["script","Script"],
   ["metadata","Metadata"], ["moderation","Moderation"], ["dedup","Dedup"],
-  ["images","Scenes"], ["voice","Voice"], ["captions","Captions"],
+  ["voice","Voice"], ["clips","Scenes"], ["captions","Captions"],
   ["render","Render"], ["qc","Inspection"]
 ];
 
@@ -532,7 +532,7 @@ function renderResult(result) {
     <dt>Size</dt><dd>${((probe.bytes || 0) / 1048576).toFixed(2)} MB</dd>
     <dt>Audio</dt><dd>${probe.has_audio ? "present" : "missing"}</dd>
     <dt>Cost</dt><dd>$${(result.cost_usd || 0).toFixed(6)}</dd>
-    <dt>Scenes</dt><dd>${Object.entries(result.image_providers || {})
+    <dt>Scenes</dt><dd>${Object.entries(result.providers || {})
       .map(([k, v]) => `${v} ${k}`).join(", ")}</dd>`;
   show("s-video");
 

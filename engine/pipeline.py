@@ -5,9 +5,11 @@ Split deliberately in two, either side of the human gate:
   ``plan_stage``    research -> hooks -> script -> metadata -> moderation ->
                     dedup. Cheap, text only, and stops before anything is
                     rendered.
-  ``produce_stage`` images -> voice -> captions -> render -> QC. This is where
+  ``produce_stage`` voice -> clips -> captions -> render -> QC. This is where
                     time and credits go, so it only ever runs on a plan a
-                    human approved.
+                    human approved. Voice runs before clips because clip
+                    count is derived from ``beat.measured_seconds``, which
+                    synthesis is what writes.
 
 No function here publishes anything, and nothing calls into
 ``engine.publish``. That is a constraint from the spec, not an oversight.
@@ -26,8 +28,9 @@ from engine.assembly.render import probe_video, render
 from engine.contract import ReelPlan, Script, Topic
 from engine.gates import dedup
 from engine.gates.qc import run_qc
-from engine.media.images import generate_plan_images
+from engine.media.clips import generate_plan_clips, unavailable_reason
 from engine.media.voice import synth_plan
+from stock_agent import StockVideoMatcherAgent
 
 
 class Stage:
@@ -37,16 +40,16 @@ class Stage:
     METADATA = "metadata"
     MODERATION = "moderation"
     DEDUP = "dedup"
-    IMAGES = "images"
+    CLIPS = "clips"
     VOICE = "voice"
     CAPTIONS = "captions"
     RENDER = "render"
     QC = "qc"
 
     ORDER = (RESEARCH, HOOKS, SCRIPT, METADATA, MODERATION, DEDUP,
-             IMAGES, VOICE, CAPTIONS, RENDER, QC)
+             VOICE, CLIPS, CAPTIONS, RENDER, QC)
     PLAN = (RESEARCH, HOOKS, SCRIPT, METADATA, MODERATION, DEDUP)
-    PRODUCE = (IMAGES, VOICE, CAPTIONS, RENDER, QC)
+    PRODUCE = (VOICE, CLIPS, CAPTIONS, RENDER, QC)
 
 
 @dataclass
@@ -227,19 +230,6 @@ def produce_stage(plan: ReelPlan, client, store, settings, *,
     settings.ensure_dirs()
     captions_source = captions_source or settings.captions_source
 
-    emit(PipelineEvent(Stage.IMAGES, "started",
-                       f"{len(plan.script.beats)} scenes"))
-    counts = generate_plan_images(
-        plan, client, settings.work_dir, store,
-        model=settings.model_image or None,
-        use_keyless=settings.keyless_images,
-        browser_image_api=settings.browser_image_api,
-        workers=settings.image_workers,
-        progress=lambda i, n, beat, provider: emit(PipelineEvent(
-            Stage.IMAGES, "info", f"{i}/{n} {beat} via {provider}")))
-    emit(PipelineEvent(Stage.IMAGES, "done", ", ".join(
-        f"{k}:{v}" for k, v in counts.items()), {"providers": counts}))
-
     emit(PipelineEvent(Stage.VOICE, "started",
                        f"{settings.voice_engine}: "
                        f"{settings.piper_voice if settings.voice_engine == 'piper' else settings.voice}"))
@@ -249,6 +239,31 @@ def produce_stage(plan: ReelPlan, client, store, settings, *,
                    f"{i}/{n} {beat} {secs:.1f}s via {engine}")))
     emit(PipelineEvent(Stage.VOICE, "done",
                        f"{plan.duration():.1f}s measured"))
+
+    reason = unavailable_reason(settings)
+    emit(PipelineEvent(Stage.CLIPS, "started",
+                       f"{len(plan.script.beats)} scenes"))
+    if reason:
+        # Surfaced as its own event, not buried in the provider counts. A
+        # run with no key still produces a video, which is exactly how a
+        # broken setup passes for a working one.
+        emit(PipelineEvent(Stage.CLIPS, "info", reason))
+    agent = StockVideoMatcherAgent(
+        omniroute_base_url=settings.omniroute_base,
+        omniroute_api_key=settings.omniroute_key,
+        omniroute_model=settings.model_cheap or None,
+        pexels_api_key=settings.pexels_api_key)
+    counts = generate_plan_clips(
+        plan, agent, client, settings.work_dir, store,
+        model=settings.model_image or None,
+        use_keyless=settings.keyless_images,
+        browser_image_api=settings.browser_image_api,
+        workers=settings.image_workers,
+        reason=reason,
+        progress=lambda i, n, beat, provider: emit(PipelineEvent(
+            Stage.CLIPS, "info", f"{i}/{n} {beat} via {provider}")))
+    emit(PipelineEvent(Stage.CLIPS, "done", ", ".join(
+        f"{k}:{v}" for k, v in counts.items()), {"providers": counts}))
 
     emit(PipelineEvent(Stage.CAPTIONS, "started", captions_source))
     font = (settings.caption_font_devanagari
@@ -297,4 +312,4 @@ def produce_stage(plan: ReelPlan, client, store, settings, *,
     return {"video": str(out_path), "ass": ass_path, "probe": info,
             "scorecard": scorecard.to_dict(),
             "cost_usd": store.plan_cost(plan.plan_id),
-            "image_providers": counts}
+            "providers": counts}
