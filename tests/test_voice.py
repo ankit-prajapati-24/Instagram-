@@ -284,3 +284,84 @@ def test_piper_is_given_an_explicit_utf8_stdin_encoding(monkeypatch,
     assert seen.get("env"), "the child must get an explicit environment"
     assert seen["env"]["PYTHONIOENCODING"] == "utf-8"
     assert seen["env"]["PYTHONUTF8"] == "1"
+
+
+# --- the tool that tells the next person what rate to configure -------------
+# scripts/measure_speech_rate.py is where RAHASYA_WORDS_PER_SEC comes from, so
+# it decides the word budget and therefore the length of every video. It got
+# that answer wrong once: five clean conversational sample lines read 2.94 w/s
+# while production ran at 2.29, and 3.03 was configured from it. Adding
+# numeral lines to the sample moved the reading to 2.41 -- "accurate" by its
+# own 8% drift check with three points of margin, on a sample that was by then
+# half numerals, denser than any real script. That is tuning, not measuring.
+#
+# So the sample is no longer a second script kept in step with the first by
+# hand: it IS the worked example, synthesised beat by beat the way synth_plan
+# synthesises it, and what it prints is read as a ceiling rather than as an
+# answer.
+
+def _rate_tool():
+    import importlib.util
+    from pathlib import Path
+
+    path = (Path(__file__).resolve().parent.parent / "scripts"
+            / "measure_speech_rate.py")
+    spec = importlib.util.spec_from_file_location("measure_speech_rate", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_rate_tool_measures_the_worked_example_itself():
+    """No second sample to drift away from the first."""
+    from engine.fake_client import SAMPLE_BEATS
+
+    tool = _rate_tool()
+    assert not hasattr(tool, "SAMPLES"), (
+        "a hand-maintained sample is what made this tool wrong twice")
+    assert tool.sample_lines() == [beat[1] for beat in SAMPLE_BEATS]
+
+
+def test_the_rate_tool_synthesises_one_utterance_per_beat(monkeypatch):
+    """Production pays --sentence-silence once per beat; so must the tool.
+
+    A flat sample of ten short lines does not pay the same tail per word as
+    thirteen beats do, and that unpaid cost is part of why the tool read
+    faster than production.
+    """
+    from engine.fake_client import SAMPLE_BEATS
+
+    tool = _rate_tool()
+    spoken = []
+    monkeypatch.setattr(tool, "synth",
+                        lambda text, out, settings: spoken.append(text))
+    monkeypatch.setattr(tool, "probe_duration", lambda path, ffmpeg: 3.5)
+
+    assert tool.main() == 0
+    assert spoken == [beat[1] for beat in SAMPLE_BEATS]
+
+
+def test_the_rate_tool_reads_its_measurement_as_a_ceiling():
+    """Clean prose is the fastest thing this pipeline ever says.
+
+    The failure that matters is configuring a rate the voice cannot reach,
+    because that hands the script agent more words than fit the window. A
+    configured rate at or below the measured one is not a problem to report.
+    """
+    tool = _rate_tool()
+
+    ok, advice = tool.verdict(measured=2.60, configured=3.03)
+    assert not ok and "ceiling" in advice.lower()
+    assert "2.60" in advice           # what to configure at most
+
+    assert tool.verdict(measured=2.60, configured=2.29)[0]
+    assert tool.verdict(measured=2.60, configured=2.60)[0]
+
+
+def test_the_rate_tool_refuses_a_rate_below_anything_measured():
+    """Too slow is a real failure too: it starves the script of words."""
+    tool = _rate_tool()
+
+    ok, advice = tool.verdict(measured=2.60, configured=1.20)
+    assert not ok
+    assert str(tool.OBSERVED_SLOWEST) in advice

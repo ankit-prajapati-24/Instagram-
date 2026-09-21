@@ -7,8 +7,35 @@ comes from. Re-run it whenever the engine, the voice or length_scale change.
 
     python scripts/measure_speech_rate.py
 
-It prints the measured rate and the RAHASYA_WORDS_PER_SEC line to put in
-.env if it differs from what is configured.
+What it measures, and why it measures that
+------------------------------------------
+It synthesises ``engine.fake_client.SAMPLE_BEATS`` -- the repo's only worked
+example of a script -- one beat at a time, exactly as ``synth_plan`` does.
+That is deliberate, and it replaced a separate list of sample lines kept in
+this file.
+
+The separate list was wrong twice. First it was five clean conversational
+lines with no numerals, dates or acronyms: it read 2.94 w/s while production
+ran at 2.29, and 3.03 was configured from it, which handed the script agent a
+third more words than the duration window could hold. Then numeral lines were
+added to it and it read 2.41 -- inside its own 8% drift check by three
+points, on a sample that was by then half numerals, denser than any real
+script, and still faster than production. Each round made the number less
+wrong without making the sample representative; a third round would have done
+the same again.
+
+Measuring the worked example removes the choice. There is one script in this
+repo, other tests already hold it to the word budget and the duration window,
+and synthesising it beat by beat pays ``--sentence-silence`` once per beat
+the way a real run does -- a per-beat cost a flat list of lines never paid,
+and part of why this tool always read faster than production.
+
+What it can still not know is how numeral-dense the *next* script will be.
+The sample is prose with its numbers spelled out, which is the fast end of
+what this voice does. So the reading is printed and checked as a **ceiling**:
+configuring at or below it is fine, configuring above it is the failure that
+happened. It no longer claims a two-sided "accurate" verdict it has no sample
+to support.
 """
 
 from __future__ import annotations
@@ -20,32 +47,55 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from engine.config import Settings  # noqa: E402
+from engine.fake_client import SAMPLE_BEATS  # noqa: E402
 from engine.media.voice import probe_duration  # noqa: E402
 
-# Short, medium and long lines, so the rate is not measured on one shape.
-#
-# The second block is not decoration. This sample used to be clean
-# conversational Hindi only, and it measured 2.94 w/s while real scripts ran
-# at 2.29 -- so the configured rate was set 32% high and the script agent was
-# handed a budget a third larger than the window could hold. The difference
-# is entirely numerals, dates and acronyms: "१९६५" is one word that Piper
-# says as "unnees sau painsath", and every script about a real event is full
-# of them. Keep both blocks, and keep their proportions roughly like a real
-# script's, or this tool will overstate the voice again.
-SAMPLES = [
-    "तीन साल पहले इसी जगह पर एक आदमी गायब हो गया।",
-    "सीसीटीवी में वो अंदर जाता दिखता है लेकिन बाहर आता कभी नहीं।",
-    "पुलिस ने केस बंद कर दिया।",
-    "और हर रात ठीक दो बजकर चौदह मिनट पर उस नंबर से एक मैसेज आता है "
-    "जो कोई नहीं भेजता।",
-    "तुम्हें क्या लगता है कौन भेज रहा है और क्यों।",
-    # Dates, figures and technical terms: slow per word, common in scripts.
-    "अक्टूबर १९६५। भयंकर बर्फीला तूफान आया।",
-    "१९४२ में एक फ़ॉरेस्ट रेंजर ने इन्हें पहली बार देखा।",
-    "समुद्र तल से १६,००० फुट ऊपर।",
-    "डीएनए सीक्वेंसिंग रिपोर्ट २००४ में आई।",
-    "सीबीआई ने केस नंबर ३४७ बंद कर दिया।",
-]
+# Every per-script rate this repo has evidence for. The rate is a property of
+# the content -- numerals, dates and acronyms are slow per "word", because
+# Piper says "१९६५" as "unnees sau painsath", one word and eleven syllables --
+# so a single measurement is a point inside this spread, never the whole of
+# it. Cited in engine/config.py and in the pre-render gate's margin.
+OBSERVED_SLOWEST = 1.83   # numeral- and acronym-heavy lines
+OBSERVED_FASTEST = 2.94   # clean conversational Hindi, no numerals
+
+
+def sample_lines() -> list[str]:
+    """The worked example's narration, beat by beat, in order."""
+    return [voice for _role, voice, *_rest in SAMPLE_BEATS]
+
+
+def verdict(measured: float, configured: float) -> tuple[bool, str]:
+    """Is ``configured`` a defensible setting given this measurement?
+
+    One-sided on purpose. Above the measured rate is the failure this tool
+    exists to prevent: the budget then asks for more words than the voice can
+    say inside the window, and nothing discovers it until the render. Below it
+    is the safe direction, and the direction production landed in -- so it is
+    only reported when it falls under anything ever measured here, which
+    starves the script instead.
+    """
+    if configured > measured:
+        return False, (
+            f"the configured {configured:.2f} w/s is faster than the "
+            f"{measured:.2f} w/s this voice manages on the sample script, "
+            f"and the sample is prose with its numbers spelled out -- the "
+            f"fast end of what real scripts contain. Treat {measured:.2f} as "
+            f"a ceiling, not a target: set RAHASYA_WORDS_PER_SEC to at most "
+            f"{measured:.2f}, and lower if your topics carry dates, figures "
+            f"or acronyms. Configuring above the ceiling is how 3.03 got set "
+            f"and how a 66.5s video reached QC.")
+    if configured < OBSERVED_SLOWEST:
+        return False, (
+            f"the configured {configured:.2f} w/s is slower than "
+            f"{OBSERVED_SLOWEST:.2f}, the slowest rate ever measured here. "
+            f"That is not caution, it is a budget too small to fill the "
+            f"window: the script agent will be asked for a script that "
+            f"renders short.")
+    return True, (
+        f"the configured {configured:.2f} w/s sits at or below the "
+        f"{measured:.2f} w/s ceiling and inside the {OBSERVED_SLOWEST:.2f}-"
+        f"{OBSERVED_FASTEST:.2f} w/s spread this repo has measured. Nothing "
+        f"to change.")
 
 
 def synth(text: str, out: Path, settings) -> None:
@@ -69,31 +119,50 @@ def main() -> int:
     detail = (f"{settings.piper_voice} @ length_scale "
               f"{settings.piper_length_scale}" if engine == "piper"
               else f"{settings.voice} @ {settings.voice_rate}")
-    print(f"engine: {engine} ({detail})\n")
+    lines = sample_lines()
+    print(f"engine: {engine} ({detail})")
+    print(f"sample: engine.fake_client.SAMPLE_BEATS, "
+          f"{len(lines)} beats synthesised one at a time\n")
 
     total_words = total_seconds = 0.0
-    for index, text in enumerate(SAMPLES):
-        out = tmp / f"s{index}.mp3"
+    for index, text in enumerate(lines):
+        out = tmp / f"b{index + 1}.mp3"
         synth(text, out, settings)
         seconds = probe_duration(out, settings.ffmpeg)
         words = len(text.split())
         total_words += words
         total_seconds += seconds
-        print(f"  {words:2d} words -> {seconds:5.2f}s   "
+        print(f"  beat {index + 1:2d}: {words:2d} words -> {seconds:5.2f}s   "
               f"({words / seconds:.2f} w/s)")
 
     rate = total_words / total_seconds
     budget = int(settings.target_seconds * rate)
-    print(f"\n  measured rate : {rate:.2f} words/sec")
-    print(f"  configured    : {settings.words_per_second:.2f} words/sec")
-    print(f"  word budget for {settings.target_seconds:.0f}s: {budget} words")
 
-    drift = abs(rate - settings.words_per_second) / rate
-    if drift > 0.08:
-        print(f"\n  Configured rate is off by {drift * 100:.0f}%. Put this in "
-              f".env:\n    RAHASYA_WORDS_PER_SEC={rate:.2f}")
-    else:
-        print("\n  Configured rate is accurate; nothing to change.")
+    # Named, because it is a real part of the runtime and the old flat sample
+    # under-paid it: every beat is its own synthesis and carries its own
+    # trailing silence.
+    silence = len(lines) * settings.piper_sentence_silence
+
+    print(f"\n  {total_words:.0f} words -> {total_seconds:.2f}s "
+          f"across {len(lines)} beats")
+    if engine == "piper":
+        print(f"  of which ~{silence:.2f}s is the per-beat sentence silence "
+              f"({settings.piper_sentence_silence}s x {len(lines)})")
+    print(f"\n  measured rate : {rate:.2f} words/sec  "
+          f"(a CEILING: this sample spells its numbers out)")
+    print(f"  configured    : {settings.words_per_second:.2f} words/sec")
+    print(f"  measured spread in this repo: {OBSERVED_SLOWEST:.2f}-"
+          f"{OBSERVED_FASTEST:.2f} words/sec")
+    print(f"  word budget for {settings.target_seconds:.0f}s at the "
+          f"ceiling: {budget} words")
+
+    ok, advice = verdict(rate, settings.words_per_second)
+    print(f"\n  {'OK' if ok else 'PROBLEM'}: {advice}")
+    if not (OBSERVED_SLOWEST <= rate <= OBSERVED_FASTEST):
+        print(f"\n  Note: {rate:.2f} w/s is outside the spread recorded "
+              f"above, so the voice or its tuning has changed materially. "
+              f"Update OBSERVED_SLOWEST/OBSERVED_FASTEST here and the "
+              f"evidence quoted in engine/config.py before trusting either.")
     return 0
 
 
