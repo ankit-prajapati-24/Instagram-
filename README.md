@@ -99,6 +99,35 @@ Measured on this machine, 2026-09-17/18:
 | `engine/media/` | edge-tts voice, image generation with fallback |
 | `engine/assembly/` | ASS captions, ffmpeg graph, legacy-endpoint compiler |
 | `engine/pipeline.py` | stage orchestration either side of the human gate |
+
+### Browser-backed Gemini images
+
+This project can optionally use the working browser-driven image generator from
+the sibling `gemini-chat-bot` project. The adapter is enabled by
+`RAHASYA_BROWSER_IMAGE_API` in `.env` and calls the local Node endpoint for
+each scene. The Node service drives the already logged-in Edge UI through CDP,
+downloads the real image response, and returns a local file URL. The existing
+OmniRoute, keyless, and placeholder tiers remain as fallbacks.
+
+Start the services in this order:
+
+```powershell
+# 1. Start Edge with the logged-in CDP profile
+& "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" `
+   --remote-debugging-port=9222 `
+   --user-data-dir="C:\edge-playwright"
+
+# 2. In gemini-chat-bot/
+npm run server
+
+# 3. In Instagram-/
+python -m engine.app
+```
+
+When this tier is enabled, image generation is serialized because one Edge UI
+session should not receive concurrent prompts. If the Node service, Edge CDP,
+or Gemini UI tool is unavailable, the pipeline falls through to the existing
+providers instead of failing the whole render.
 | `engine/app.py` + `engine/ui/` | the local panel |
 | `engine/fake_client.py` | stands in for the gateway; what the sample script comes from |
 | `docs/` | spec, plan, setup, playbook, upstream repo fixes |

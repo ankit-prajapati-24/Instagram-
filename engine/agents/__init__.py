@@ -12,6 +12,7 @@ ones that can be checked mechanically.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -72,8 +73,12 @@ def _ask(client, stage: str, prompt: str, *, model: str | None = None,
     messages = [{"role": "user", "content": prompt}]
 
     for attempt in range(2):
+        started = time.monotonic()
+        print(f"[AGENT] {stage} attempt={attempt + 1}/2 model={model or 'default'} started", flush=True)
         result = client.chat(messages, model=model, want_json=True,
                              temperature=temperature)
+        elapsed = time.monotonic() - started
+        print(f"[AGENT] {stage} attempt={attempt + 1}/2 completed seconds={elapsed:.1f} json={result.data is not None}", flush=True)
         if result.data is None:
             problem = "model returned no JSON"
         else:
@@ -87,6 +92,7 @@ def _ask(client, stage: str, prompt: str, *, model: str | None = None,
                 problem = str(exc)
 
         if attempt == 0:
+            print(f"[AGENT] {stage} schema validation failed; starting repair attempt", flush=True)
             messages = messages + [
                 {"role": "assistant",
                  "content": json.dumps(result.data)[:4000]

@@ -50,11 +50,10 @@ from engine.contract import ReelPlan
 # unrelated images. "no text" matters: burned captions are our text layer, and
 # image models love to add garbled signage.
 STYLE_SUFFIX = (
-    ", dark cinematic still, vertical 9:16 composition, volumetric fog, "
-    "low-key lighting, desaturated teal and amber, 35mm film grain, "
-    "deep shadows, ominous atmosphere, photorealistic, no text, "
-    "no watermark, no people facing camera"
+    ", cinematic vertical 9:16, photorealistic, dark atmosphere, "
+    "detailed, no text, no watermark"
 )
+IMAGE_PROMPT_PREFIX = "Create image: "
 
 WIDTH, HEIGHT = 1080, 1920
 
@@ -68,6 +67,7 @@ KEYLESS_BACKOFF = 2.5
 # Its watermark sits in the bottom-right corner. Captions occupy the bottom
 # ~15% of the frame anyway, so losing 7% costs very little composition.
 KEYLESS_CROP_BOTTOM = 0.07
+BROWSER_IMAGE_TIMEOUT = 180.0
 
 # Cool-to-warm pairs that all sit in the same tonal family, so consecutive
 # placeholder beats look deliberate instead of random.
@@ -264,13 +264,49 @@ def _looks_like_an_image(payload: bytes) -> bool:
     return bool(payload) and payload.startswith(IMAGE_MAGIC)
 
 
+def fetch_browser_image(prompt: str, api_url: str,
+                        timeout: float = BROWSER_IMAGE_TIMEOUT) -> bytes:
+    """Ask the local Edge-backed Node service for one generated image.
+
+    The Node service owns browser automation and returns a local downloads URL;
+    this adapter only fetches the bytes so the existing cover-fit pipeline can
+    continue unchanged.
+    """
+    response = httpx.post(api_url, json={"prompt": prompt}, timeout=timeout)
+    response.raise_for_status()
+    data = response.json()
+    if data.get("type") != "image" or not data.get("imageUrl"):
+        detail = data.get("details") or data.get("message") or "no image returned"
+        raise RuntimeError(f"browser image service failed: {detail}")
+
+    image_url = urllib.parse.urljoin(api_url, data["imageUrl"])
+    image_response = httpx.get(image_url, timeout=timeout)
+    image_response.raise_for_status()
+    if not _looks_like_an_image(image_response.content):
+        raise RuntimeError("browser image service returned non-image bytes")
+    return image_response.content
+
+
 def generate_beat_image(client, beat, out_path: str | Path, *,
                         seed: int = 0, model: str | None = None,
                         use_keyless: bool = True,
-                        keyless_fetch=fetch_keyless) -> tuple[str, str]:
+                        keyless_fetch=fetch_keyless,
+                        browser_image_api: str = "") -> tuple[str, str]:
     """Walk the chain for one beat. Returns ``(path, provider)``."""
     out_path = Path(out_path)
-    prompt = beat.visual_prompt.rstrip(" .,") + STYLE_SUFFIX
+    prompt = IMAGE_PROMPT_PREFIX + beat.visual_prompt.rstrip(" .,") + STYLE_SUFFIX
+
+    # Tier 0 — the local Edge-backed Gemini UI service. It is deliberately
+    # optional because it needs an interactive Edge session with CDP enabled.
+    if browser_image_api:
+        try:
+            payload = fetch_browser_image(prompt, browser_image_api)
+            return cover_fit(payload, out_path), "gemini-browser"
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:
+            print(f"[IMAGE] browser provider failed for {beat.beat_id}: {exc}", flush=True)
+            pass
 
     # Tier 1 — the gateway.
     try:
@@ -311,6 +347,7 @@ def _checksum(path: str | Path) -> str:
 def generate_plan_images(plan: ReelPlan, client, work_dir: str | Path,
                          store=None, *, model: str | None = None,
                          use_keyless: bool = True,
+                         browser_image_api: str = "",
                          workers: int = 4,
                          progress=None) -> dict[str, int]:
     """Fill ``beat.image_path`` for every beat; report provider counts.
@@ -333,11 +370,14 @@ def generate_plan_images(plan: ReelPlan, client, work_dir: str | Path,
         index, beat = item
         path, provider = generate_beat_image(
             client, beat, target_dir / f"{beat.beat_id}.png",
-            seed=index, model=model, use_keyless=use_keyless)
+            seed=index, model=model, use_keyless=use_keyless,
+            browser_image_api=browser_image_api)
         return index, beat, path, provider
 
     done = 0
-    with ThreadPoolExecutor(max_workers=max(workers, 1)) as pool:
+    # One Edge UI session should process one generation at a time.
+    effective_workers = 1 if browser_image_api else max(workers, 1)
+    with ThreadPoolExecutor(max_workers=effective_workers) as pool:
         # as_completed, so progress reflects real completions rather than
         # waiting on a slow beat in the middle.
         futures = [pool.submit(make, item) for item in enumerate(beats)]

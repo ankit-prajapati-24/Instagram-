@@ -1,5 +1,6 @@
 # Brain + web panel
 httpx
+python-dotenv
 pydantic
 fastapi
 uvicorn
@@ -22,6 +23,11 @@ imageio-ffmpeg
 
 # Fallback text shaper, only needed if you replace the libass caption path
 uharfbuzz
+
+# Stock Video Matcher Agent
+openai
+requests
+rich
 
 # Tests
 pytest

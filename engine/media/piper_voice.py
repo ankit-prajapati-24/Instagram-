@@ -58,7 +58,8 @@ def model_path(voice: str, models_dir: str | Path) -> Path:
 def ensure_model(voice: str, models_dir: str | Path) -> Path:
     """Download the voice on first use. Returns the .onnx path."""
     target = model_path(voice, models_dir)
-    if target.exists():
+    metadata = Path(f"{target}.json")
+    if target.exists() and metadata.exists():
         return target
 
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -69,8 +70,10 @@ def ensure_model(voice: str, models_dir: str | Path) -> Path:
                        if e.get("type") == "directory")
         stem = (f"{VOICE_REPO}/resolve/main/hi/hi_IN/{voice}/{quality}/"
                 f"hi_IN-{voice}-{quality}.onnx")
-        urllib.request.urlretrieve(stem, target)
-        urllib.request.urlretrieve(stem + ".json", str(target) + ".json")
+        if not target.exists():
+            urllib.request.urlretrieve(stem, target)
+        if not metadata.exists():
+            urllib.request.urlretrieve(stem + ".json", metadata)
     except Exception as exc:
         raise PiperUnavailable(
             f"could not fetch the Piper voice '{voice}': {exc}") from exc

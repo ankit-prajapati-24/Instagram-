@@ -11,7 +11,10 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 
 
 def _resolve_ffmpeg() -> str:
@@ -75,6 +78,8 @@ class Settings:
         default_factory=lambda: os.getenv(
             "RAHASYA_KEYLESS_IMAGES", "1").strip().lower()
         not in {"0", "false", "no", "off"})
+    browser_image_api: str = field(
+        default_factory=lambda: os.getenv("RAHASYA_BROWSER_IMAGE_API", "").strip())
     model_embed: str = field(
         default_factory=lambda: os.getenv("RAHASYA_MODEL_EMBED", ""))
 
