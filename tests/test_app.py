@@ -1,14 +1,56 @@
+import base64
 import inspect
+import io
+import subprocess
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
 import engine.publish.payloads as payloads
 from engine.app import create_app
 from engine.config import Settings
-from engine.contract import Metadata
+from engine.contract import Clip, Metadata
 from engine.store import Store
 from tests.factories import make_plan
+
+# A minimal, real, decodable 1x1 PNG. Used so "served directly" tests prove
+# the route streams the file byte-for-byte rather than merely returning 200.
+PNG_1x1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY"
+    "42YAAAAASUVORK5CYII=")
+
+
+def _clip(path, provider="pexels") -> Clip:
+    return Clip(path=str(path), query="skeletal lake", provider=provider,
+               duration=4.0)
+
+
+def _seed_with_visual(client, *, clips=None, image_path=None, plan_id="p1"):
+    """A one-beat plan whose beat has the given clips/image_path."""
+    store: Store = client.app.state.store
+    plan = make_plan(plan_id=plan_id, beats=1)
+    beat = plan.script.beats[0].model_copy(update={
+        "clips": clips or [], "image_path": image_path})
+    plan.script.beats = [beat]
+    store.save_plan(plan, status="awaiting_approval")
+    return plan
+
+
+def _skip_without_ffmpeg(settings: Settings) -> None:
+    if not Path(settings.ffmpeg).exists():
+        pytest.skip("ffmpeg is not available in this environment")
+
+
+def _make_test_video(path: Path, ffmpeg: str) -> None:
+    """A tiny, real 64x64 1-frame-per-second mp4, via ffmpeg's testsrc."""
+    result = subprocess.run(
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+         "-i", "testsrc=size=64x64:rate=1", "-t", "1", "-pix_fmt",
+         "yuv420p", "-y", str(path)], capture_output=True)
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+    assert path.is_file()
 
 
 @pytest.fixture()
@@ -285,7 +327,111 @@ def test_a_normal_length_topic_passes_the_check(client):
 
 def test_the_panel_reports_clip_providers(client):
     """A run that fell back to stills must not look like a run that got
-    footage. The old strip only knew about image_provider."""
+    footage. The old strip only knew about image_provider.
+
+    The regression this guards against is subtler than "the word clips
+    appears somewhere" (it always does, e.g. in STAGES) or "image_provider
+    is gone" (necessary but not sufficient): the mixed-beat flag has to be
+    an ANY-clip-fell-back check, not an ALL-clips-fell-back one. A beat that
+    got one real Pexels clip and one placeholder still is a fallback beat
+    and must be flagged; an all-or-nothing check would hide it."""
     page = client.get("/").text
-    assert "clips" in page
     assert "image_provider" not in page
+    # Pins the exact "ph" (needs-attention) condition in renderStrip. If a
+    # future edit regresses this to an all-or-nothing `.every(...)` check,
+    # this substring disappears from the page and the test fails.
+    assert "b.clips.some((c) => c.provider !== 'pexels')" in page
+
+
+# -- frame route --------------------------------------------------------
+
+
+def test_frame_serves_an_image_clip_directly(client, tmp_path):
+    image = tmp_path / "still.png"
+    image.write_bytes(PNG_1x1)
+    _seed_with_visual(client, clips=[_clip(image)])
+
+    response = client.get("/api/frame/p1/b0")
+
+    assert response.status_code == 200
+    assert response.content == PNG_1x1
+
+
+def test_frame_extracts_a_poster_from_a_video_clip(client, tmp_path):
+    settings: Settings = client.app.state.settings
+    _skip_without_ffmpeg(settings)
+    video = tmp_path / "clip.mp4"
+    _make_test_video(video, settings.ffmpeg)
+    _seed_with_visual(client, clips=[_clip(video)])
+
+    response = client.get("/api/frame/p1/b0")
+
+    assert response.status_code == 200
+    # A real, decodable JPEG -- not the mp4 bytes, and not a stub.
+    assert response.content[:2] == b"\xff\xd8"
+    image = Image.open(io.BytesIO(response.content))
+    image.verify()
+    image = Image.open(io.BytesIO(response.content))  # verify() closes it
+    assert image.format == "JPEG"
+    assert image.size == (64, 64)
+
+
+def test_frame_reuses_the_cached_poster_instead_of_re_extracting(
+        client, tmp_path, monkeypatch):
+    settings: Settings = client.app.state.settings
+    _skip_without_ffmpeg(settings)
+    video = tmp_path / "clip.mp4"
+    _make_test_video(video, settings.ffmpeg)
+    _seed_with_visual(client, clips=[_clip(video)])
+
+    first = client.get("/api/frame/p1/b0")
+    assert first.status_code == 200
+
+    def _boom(*args, **kwargs):
+        raise AssertionError(
+            "ffmpeg ran again; the cached poster should have been reused")
+    monkeypatch.setattr("engine.app.subprocess.run", _boom)
+
+    second = client.get("/api/frame/p1/b0")
+
+    assert second.status_code == 200
+    assert second.content == first.content
+
+
+def test_frame_falls_back_to_the_legacy_image_path(client, tmp_path):
+    """Plans stored before clips existed still show a thumbnail."""
+    image = tmp_path / "legacy.png"
+    image.write_bytes(PNG_1x1)
+    _seed_with_visual(client, clips=[], image_path=str(image))
+
+    response = client.get("/api/frame/p1/b0")
+
+    assert response.status_code == 200
+    assert response.content == PNG_1x1
+
+
+def test_frame_prefers_an_existing_clip_over_stale_ones_and_the_legacy_image(
+        client, tmp_path):
+    missing = tmp_path / "gone.mp4"  # never written to disk
+    used = tmp_path / "second.png"
+    used.write_bytes(PNG_1x1)
+    legacy = tmp_path / "legacy.jpg"
+    legacy.write_bytes(b"not the file that should be served")
+    _seed_with_visual(client, clips=[_clip(missing), _clip(used)],
+                      image_path=str(legacy))
+
+    response = client.get("/api/frame/p1/b0")
+
+    assert response.status_code == 200
+    assert response.content == PNG_1x1
+
+
+def test_frame_404s_naming_which_case_it_hit(client):
+    _seed_with_visual(client, clips=[], image_path=None)
+
+    response = client.get("/api/frame/p1/b0")
+
+    assert response.status_code == 404
+    detail = response.json()["detail"].lower()
+    assert "clip" in detail
+    assert "image" in detail

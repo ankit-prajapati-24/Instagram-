@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import queue
+import subprocess
 import threading
 import time
 import traceback
@@ -24,6 +25,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from engine.assembly.render import VIDEO_SUFFIXES
 from engine.config import Settings
 from engine.contract import Beat, Motion, Transition
 from engine.omniroute import OmniRouteClient
@@ -34,6 +36,34 @@ from engine.publish.payloads import (instagram_payload, publish_checklist,
 from engine.store import Store
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
+
+
+def _poster_path(clip_path: Path) -> Path:
+    """Where a video clip's cached poster frame lives: next to the clip.
+
+    The scene strip requests every beat's frame on each page load, so this
+    has to be stable across requests rather than a temp file.
+    """
+    return clip_path.with_name(clip_path.name + ".poster.jpg")
+
+
+def _extract_poster(clip_path: Path, poster_path: Path,
+                    settings: Settings) -> None:
+    """Grab a single frame from ``clip_path`` and write it to ``poster_path``.
+
+    Same subprocess shape as ``engine.media.piper_voice``: run, check the
+    return code and the output file, and raise with ffmpeg's own stderr
+    rather than swallowing the failure.
+    """
+    result = subprocess.run(
+        [settings.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+         "-i", str(clip_path), "-frames:v", "1", "-q:v", "3",
+         str(poster_path)],
+        capture_output=True)
+    if result.returncode != 0 or not poster_path.is_file():
+        detail = result.stderr.decode("utf-8", "replace")[-300:]
+        raise RuntimeError(
+            f"ffmpeg could not extract a frame from {clip_path}: {detail}")
 
 
 class PlanRequest(BaseModel):
@@ -393,15 +423,46 @@ def create_app(db_path: str | Path | None = None,
 
     @app.get("/api/frame/{plan_id}/{beat_id}")
     def frame(plan_id: str, beat_id: str) -> FileResponse:
+        """A thumbnail for the scene strip: the beat's visual, browser-safe.
+
+        A beat's visual is now ``beat.clips`` (Pexels footage, or a still
+        wrapped as a Clip when sourcing fell back). A video clip can't be
+        put in an <img> directly, so it gets a poster frame extracted with
+        ffmpeg and cached next to the clip. Beats saved before clips
+        existed have no ``clips`` at all, so those still fall back to the
+        legacy ``beat.image_path``.
+        """
         plan = store.get_plan(plan_id)
         if plan is None:
             raise HTTPException(404, "no such plan")
-        for beat in plan.script.beats:
-            if beat.beat_id == beat_id and beat.image_path:
-                path = Path(beat.image_path)
-                if path.is_file():
-                    return FileResponse(path)
-        raise HTTPException(404, "no image for that beat")
+        beat = next((b for b in plan.script.beats if b.beat_id == beat_id),
+                   None)
+        if beat is None:
+            raise HTTPException(404, f"no such beat: {beat_id}")
+
+        for clip in beat.clips:
+            clip_path = Path(clip.path)
+            if not clip_path.is_file():
+                continue
+            if clip_path.suffix.lower() not in VIDEO_SUFFIXES:
+                return FileResponse(clip_path)
+            poster_path = _poster_path(clip_path)
+            if not poster_path.is_file():
+                try:
+                    _extract_poster(clip_path, poster_path, settings)
+                except RuntimeError:
+                    continue
+            if poster_path.is_file():
+                return FileResponse(poster_path)
+
+        if beat.image_path:
+            path = Path(beat.image_path)
+            if path.is_file():
+                return FileResponse(path)
+
+        raise HTTPException(
+            404, f"beat {beat_id!r} has no usable clip on disk and no "
+                 f"legacy image_path")
 
     app.state.settings = settings
     app.state.store = store
