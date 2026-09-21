@@ -33,8 +33,6 @@ def slot_durations(total: float, count: int) -> list[float]:
     if count < 1:
         raise ValueError(f"a beat needs at least one clip slot, got {count}")
     base = total / count
-    # Create all slots at base size, then adjust the last one for any
-    # floating-point error to ensure exact sum and non-negative remainder.
-    all_slots = [base] * count
-    error = total - sum(all_slots)
-    return all_slots[:-1] + [all_slots[-1] + error]
+    slots = [base] * (count - 1)
+    # Last slot: total minus sum of others ensures exact sum by construction.
+    return slots + [total - sum(slots)]

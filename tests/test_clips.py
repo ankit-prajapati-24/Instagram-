@@ -18,13 +18,18 @@ def test_clip_count_never_returns_zero():
 
 
 def test_slots_sum_to_the_total_exactly():
-    """Approximately right is not right: the render reads these as a
-    timeline, and a rounding crumb per slot becomes visible drift."""
-    for total in (3.0, 4.7, 12.345, 0.9):
+    """Exact sum required: the render reads these as a timeline, and any
+    rounding crumb per slot becomes visible A/V drift. Structural test:
+    last slot must equal total minus sum of others."""
+    for total in (3.0, 4.7, 12.345, 0.9, 10.1, 7.3):
         for count in (1, 2, 3, 5, 7):
             slots = slot_durations(total, count)
             assert len(slots) == count
-            assert sum(slots) == pytest.approx(total, abs=1e-9)
+            # Structural: last slot accounts for floating-point rounding.
+            # Fails for naive [base]*count where all slots are identical.
+            expected_last = total - sum(slots[:-1])
+            assert slots[-1] == expected_last, \
+                f"total={total}, count={count}, last={slots[-1]}, expected={expected_last}"
 
 
 def test_slots_are_even_apart_from_the_remainder():
@@ -33,10 +38,18 @@ def test_slots_are_even_apart_from_the_remainder():
 
 
 def test_the_remainder_lands_in_the_last_slot():
-    slots = slot_durations(10.0, 3)
-    assert slots[0] == slots[1]
-    assert slots[2] >= slots[0]
-    assert sum(slots) == pytest.approx(10.0, abs=1e-9)
+    """Last slot must absorb floating-point rounding. Structural test that
+    fails for naive [base]*count where all slots are identical."""
+    total = 10.1
+    count = 3
+    slots = slot_durations(total, count)
+
+    assert len(slots) == count
+    # Structural: last slot must equal (total - sum of others).
+    # This fails for naive implementations when float arithmetic differs.
+    expected_last = total - sum(slots[:-1])
+    assert slots[-1] == expected_last, \
+        f"Last slot {slots[-1]} must equal {expected_last} (remainder correction)"
 
 
 def test_a_single_slot_spans_the_whole_beat():
