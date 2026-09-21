@@ -402,6 +402,219 @@ def test_zoompan_survives_on_a_still_fallback():
     assert graph.count("zoompan") == 1
 
 
+# --- the grade and the punch-in --------------------------------------------
+# One grade over every frame is the answer to the spec's own stated risk,
+# that "twenty unrelated stock clips can read as a generic template rather
+# than one piece". The thing that can quietly break it is a beat that slips
+# past the grade: a single ungraded shot in twenty-six is more conspicuous
+# than no grade at all, because it reads as a mistake rather than a style.
+
+
+def _beat_producers(graph):
+    """The one part per beat that emits the label xfade consumes.
+
+    A multi-clip beat's is its concat; a one-clip beat's is that clip's own
+    chain. Anything applied per beat has to appear in exactly these, and the
+    point of looking them up by label is that a new branch into the chain
+    cannot be added without showing up here.
+    """
+    import re
+    # A clip inside a multi-clip beat is not a producer: its label is eaten
+    # by that beat's concat, which is the producer.
+    swallowed = set()
+    for part in graph.split(";"):
+        if "concat=n=" in part and "a=0" in part:
+            swallowed |= set(re.findall(r"\[([vb]\d+)\]",
+                                        part.split("concat=n=")[0]))
+    producers = {}
+    for part in graph.split(";"):
+        if "xfade=" in part or ("concat=n=" in part and "a=1" in part):
+            continue
+        found = re.search(r"\[([vb]\d+)\]$", part)
+        if found and found.group(1) not in swallowed:
+            producers[found.group(1)] = part
+    return producers
+
+
+def _mixed_shape_plan(beats=4):
+    """One clip, two clips with a still among them, and no-clip fallbacks."""
+    plan = _timed_plan(beats=beats, measured=4.0)
+    plan.script.beats[0].clips = [Clip(path="a.mp4", query="q",
+                                       provider="pexels", duration=4.0)]
+    plan.script.beats[1].clips = [
+        Clip(path="b0.mp4", query="q", provider="pexels", duration=2.0),
+        Clip(path="b1.png", query="q", provider="placeholder", duration=2.0)]
+    for beat in plan.script.beats[2:]:
+        beat.clips = []
+        beat.image_path = f"{beat.beat_id}.png"
+    return plan
+
+
+def test_the_grade_reaches_every_beat_whichever_branch_built_it():
+    plan = _mixed_shape_plan()
+    graph, _, _ = build_filter_graph(plan, audio_offset=len(plan_inputs(plan)))
+    producers = _beat_producers(graph)
+    assert len(producers) == len(plan.script.beats)
+    for label, part in producers.items():
+        assert "colorbalance=" in part, f"{label} is ungraded: {part}"
+        assert "eq=contrast=1.20:saturation=0.62:gamma=0.90" in part
+        assert "vignette=" in part
+        assert "noise=alls=9" in part
+
+
+def test_a_fallback_still_is_graded_exactly_like_the_footage():
+    """The whole point: the one still among twenty-six stock clips must not
+    be the one shot that stands out."""
+    plan = _mixed_shape_plan()
+    graph, _, _ = build_filter_graph(plan, audio_offset=len(plan_inputs(plan)))
+    producers = _beat_producers(graph)
+    footage = producers["v0"]                             # one video clip
+    still = producers[f"v{len(plan_inputs(plan)) - 1}"]   # no-clip fallback
+    assert "zoompan=" in still and "zoompan=" not in footage
+    for filt in ("colorbalance=", "eq=contrast=1.20", "vignette=",
+                 "noise=alls=9"):
+        assert filt in footage and filt in still
+
+
+def test_the_grade_is_applied_once_per_beat_not_once_per_clip():
+    plan = _clipped(make_plan(beats=3), per_beat=4)
+    graph, _, _ = build_filter_graph(plan, audio_offset=len(plan_inputs(plan)))
+    assert graph.count("colorbalance=") == 3
+
+
+def test_grading_can_be_turned_off():
+    plan = _mixed_shape_plan()
+    graph, _, _ = build_filter_graph(plan, audio_offset=len(plan_inputs(plan)),
+                                     grade=False)
+    for filt in ("colorbalance=", "eq=contrast=", "vignette=", "noise="):
+        assert filt not in graph
+
+
+def test_grain_is_tunable_separately_from_the_rest_of_the_grade():
+    plan = _mixed_shape_plan()
+    graph, _, _ = build_filter_graph(plan, audio_offset=len(plan_inputs(plan)),
+                                     grain=3)
+    assert "noise=alls=3:allf=t+u" in graph
+    assert "colorbalance=" in graph
+
+
+def test_zero_grain_keeps_the_colour_and_drops_the_noise_filter():
+    plan = _mixed_shape_plan()
+    graph, _, _ = build_filter_graph(plan, audio_offset=len(plan_inputs(plan)),
+                                     grain=0)
+    assert "noise=" not in graph
+    assert graph.count("colorbalance=") == len(plan.script.beats)
+
+
+def test_settings_carry_the_grade_into_the_command():
+    import tempfile
+    from pathlib import Path
+
+    from engine.assembly.render import build_command
+    from engine.config import Settings
+
+    plan = _clipped(_timed_plan(beats=2), per_beat=1)
+    with tempfile.TemporaryDirectory() as tmp:
+        for beat in plan.script.beats:
+            beat.audio_path = str(Path(tmp) / f"{beat.beat_id}.wav")
+        settings = Settings()
+        settings.video_grade, settings.video_grain = True, 4
+        command, _, _ = build_command(plan, settings, Path(tmp) / "out.mp4")
+        graph = command[command.index("-filter_complex") + 1]
+        assert "colorbalance=" in graph and "noise=alls=4" in graph
+
+        settings.video_grade = False
+        command, _, _ = build_command(plan, settings, Path(tmp) / "out.mp4")
+        graph = command[command.index("-filter_complex") + 1]
+        assert "colorbalance=" not in graph
+
+
+def test_the_push_lands_only_on_the_beats_that_carry_the_turn():
+    """hook, reveal and twist. Motion everywhere is noise; motion on the
+    turn is emphasis, and the difference is that it is not everywhere."""
+    from engine.assembly.render import PUSH_ROLES
+
+    plan = _timed_plan(beats=10, measured=4.0)
+    for beat in plan.script.beats:
+        beat.clips = []
+        beat.image_path = f"{beat.beat_id}.png"
+    roles = [beat.role for beat in plan.script.beats]
+    assert set(roles) & PUSH_ROLES and set(roles) - PUSH_ROLES
+
+    graph, _, _ = build_filter_graph(plan, audio_offset=len(plan_inputs(plan)))
+    producers = _beat_producers(graph)
+    for index, beat in enumerate(plan.script.beats):
+        part = producers[f"v{index}"]
+        pushed = "eval=frame" in part
+        assert pushed == (beat.role in PUSH_ROLES), (
+            f"{beat.role} beat {'has' if pushed else 'lacks'} a push")
+    assert graph.count("eval=frame") == sum(r in PUSH_ROLES for r in roles)
+
+
+def test_the_push_is_not_zoompan_on_a_video_clip():
+    """zoompan's `d` counts output frames per input frame, so on video it
+    multiplies the segment; the push has to be a filter that cannot."""
+    plan = _clipped(make_plan(beats=3), per_beat=2)
+    assert plan.script.beats[0].role == "hook"
+    graph, _, _ = build_filter_graph(plan, audio_offset=len(plan_inputs(plan)))
+    assert "zoompan" not in graph
+    assert "eval=frame" in graph
+
+
+def test_the_push_ramps_across_the_padded_beat_segment():
+    """It must finish on the beat's segment -- the padded one the xfade
+    chain actually consumes -- not on the raw narration slot."""
+    import re
+
+    plan = _clipped(_timed_plan(beats=3, measured=4.0), per_beat=2)
+    lengths, _, _ = segment_lengths([b.seconds() for b in plan.script.beats],
+                                    0.5)
+    graph, _, _ = build_filter_graph(plan, audio_offset=len(plan_inputs(plan)))
+    spans = [float(m) for m in re.findall(r"min\(t/([\d.]+),1\)", graph)]
+    assert spans, "no push found"
+    # Beat 0 is the hook and the only pushed beat here; each push declares
+    # its span twice, once for width and once for height.
+    assert set(spans) == {round(lengths[0], 3)}
+
+
+def test_the_push_keeps_a_constant_frame_size_for_xfade():
+    """xfade needs both of its inputs the same size, so the growing scale
+    is always followed by a crop back to the canvas."""
+    from engine.assembly.render import push_expr
+
+    expr = push_expr(4.0, 30, 1080, 1920)
+    assert expr.endswith("crop=1080:1920")
+    assert "eval=frame" in expr
+    # Even dimensions only: an odd one is not representable in yuv420p.
+    assert expr.count("/2)*2") == 2
+
+
+def test_the_look_never_costs_the_timeline():
+    """Nothing in the grade or the push may move a timestamp."""
+    plan = _mixed_shape_plan(beats=5)
+    graded, total, _ = build_filter_graph(
+        plan, audio_offset=len(plan_inputs(plan)))
+    plain, plain_total, _ = build_filter_graph(
+        plan, audio_offset=len(plan_inputs(plan)), grade=False)
+    assert total == plain_total == pytest.approx(
+        sum(b.seconds() for b in plan.script.beats))
+    # The xfade joins are identical either way: same offsets, same overlaps.
+    graded_joins = [p for p in graded.split(";") if "xfade=" in p]
+    plain_joins = [p for p in plain.split(";") if "xfade=" in p]
+    assert graded_joins == plain_joins
+
+
+def test_a_graded_beat_still_declares_its_timebase_last():
+    """settb has to stay the last thing on every label, whatever the look
+    put in front of it -- concat emits 1/1000000 and xfade will not mix
+    that with the 1/30 the other two branches emit."""
+    plan = _mixed_shape_plan()
+    graph, _, _ = build_filter_graph(plan, audio_offset=len(plan_inputs(plan)))
+    for label, part in _beat_producers(graph).items():
+        assert part.endswith(f"settb=1/30[{label}]"), (
+            f"{label} does not end on its timebase: {part}")
+
+
 def test_xfade_count_matches_beat_joins_not_clip_joins():
     """Hard cuts inside a beat; crossfade only where beats meet."""
     plan = _clipped(make_plan(), per_beat=3)
@@ -664,3 +877,105 @@ def test_every_beat_label_declares_the_same_timebase(tmp_path):
     assert producers, "no video segment producers found"
     for part in producers:
         assert "settb=1/30" in part, f"segment without a timebase: {part}"
+
+
+# --- a real ffmpeg render, graded, over beats of mixed shape ---------------
+# The grade lives in a filtergraph, and a filtergraph is a string until
+# ffmpeg accepts it. Every assertion above this line would still pass if
+# `colorbalance` were spelled wrong, if `vignette=PI/4` parsed as an option
+# name, or if the growing `scale` handed xfade a frame of the wrong size --
+# all of which are graph-setup failures, before a single frame is written.
+#
+# It also cannot be checked on the string that the grade reached the
+# *pixels* of both branches. So this renders the same plan twice, ungraded
+# and graded, and compares frames sampled inside a video beat and inside the
+# no-clip fallback still. If either comes back unchanged, some path skipped
+# the grade, which is the one failure that matters: a single ungraded shot
+# is more conspicuous than no grade at all.
+
+def _frame_rgb(ffmpeg, path, at):
+    """One frame as raw rgb24, so pixels can be read without Pillow."""
+    import subprocess
+    result = subprocess.run(
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-ss", f"{at:.3f}",
+         "-i", str(path), "-frames:v", "1", "-f", "rawvideo",
+         "-pix_fmt", "rgb24", "-"], check=True, capture_output=True)
+    assert result.stdout, f"no frame at {at}s of {path}"
+    return result.stdout
+
+
+def _mean_channels(raw):
+    pixels = len(raw) // 3
+    return tuple(sum(raw[c::3]) / pixels for c in range(3))
+
+
+def _mean_saturation(raw):
+    """Mean chroma spread per pixel: what `saturation=0.62` has to reduce."""
+    total = 0
+    for i in range(0, len(raw), 3):
+        pixel = raw[i:i + 3]
+        total += max(pixel) - min(pixel)
+    return total / (len(raw) / 3)
+
+
+def test_real_render_grades_both_branches_and_keeps_the_narration_total(
+        tmp_path):
+    """Render the graded graph for real, on beats of four different shapes.
+
+    Beat 0 is one video clip and a `hook`, so it takes the push on footage;
+    beat 1 is three clips with a still among them, joined by concat; beat 2
+    is two clips; beat 3 has no clips at all, so it is the `zoompan`
+    fallback still -- and it is a `reveal`, so it takes the push on a still
+    as well. All four reach the same xfade chain, and the picture still has
+    to come out exactly as long as the narration.
+    """
+    from engine.assembly.render import probe_video
+
+    settings = _render_settings(tmp_path)
+    plan = _mixed_clip_count_plan(tmp_path, settings.ffmpeg)
+    roles = [beat.role for beat in plan.script.beats]
+    assert roles[0] == "hook" and roles[3] == "reveal", roles
+    assert not plan.script.beats[3].clips, "beat 3 must be the still fallback"
+    total = sum(beat.seconds() for beat in plan.script.beats)
+
+    settings.video_grade = False
+    plain = tmp_path / "plain.mp4"
+    render(plan, settings, plain)
+
+    settings.video_grade, settings.video_grain = True, 9
+    graded = tmp_path / "graded.mp4"
+    render(plan, settings, graded)
+
+    probe = probe_video(graded, settings.ffmpeg)
+    assert probe["bytes"] > 0
+    # The invariant the whole pipeline rests on: picture == narration. The
+    # grade and the push must not have moved it by so much as a frame.
+    assert probe["duration"] == pytest.approx(total, abs=0.05)
+    assert probe["duration"] == pytest.approx(
+        probe_video(plain, settings.ffmpeg)["duration"], abs=0.05)
+    assert (probe["width"], probe["height"]) == (settings.width,
+                                                 settings.height)
+    assert probe["has_audio"]
+
+    # Sampled clear of every transition: mid-beat-0 (footage) and
+    # mid-beat-3 (the no-clip fallback still).
+    footage_at, still_at = total / 8, total * 7 / 8
+    for at, what in ((footage_at, "footage"), (still_at, "the still")):
+        before = _frame_rgb(settings.ffmpeg, plain, at)
+        after = _frame_rgb(settings.ffmpeg, graded, at)
+        assert before != after, f"{what} came out ungraded"
+        # Desaturation is the half of the grade that actually makes
+        # unrelated sources read as one camera, and it is the one effect
+        # big enough to assert on without pinning encoder noise.
+        assert _mean_saturation(after) < _mean_saturation(before) * 0.75, \
+            f"{what} kept its saturation"
+        # Crushed: contrast 1.20 with gamma 0.90 under a vignette.
+        assert sum(_mean_channels(after)) < sum(_mean_channels(before))
+
+    # The fallback still is the shot most likely to slip the grade, and the
+    # easiest to prove did not: ungraded it is one flat colour end to end,
+    # so the vignette and the grain have nowhere to hide.
+    flat = _frame_rgb(settings.ffmpeg, plain, still_at)
+    assert len(set(flat)) <= 8, "the fallback still is not flat to begin with"
+    assert len(set(_frame_rgb(settings.ffmpeg, graded, still_at))) > 20, \
+        "the fallback still came out flat: no vignette and no grain on it"

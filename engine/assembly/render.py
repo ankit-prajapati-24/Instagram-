@@ -25,6 +25,29 @@ ZOOM_RATE = 0.0012
 PAN_ZOOM = 1.18
 STATIC_ZOOM = 1.06
 
+# --- the look ---------------------------------------------------------------
+#
+# The spec's own stated risk is that "twenty unrelated stock clips can read as
+# a generic template rather than one piece". A 50-second Reel draws its 20-26
+# clips from as many different Pexels creators, each shot on different glass,
+# in different light, with a different camera's colour science. One grade over
+# every frame is what makes them a single video: cold, desaturated, crushed
+# blacks, a vignette pulling the eye to centre, and grain over the top — grain
+# especially, because a shared noise floor is the thing the eye reads as "one
+# piece of film" across an otherwise mismatched cut.
+#
+# Chosen by the user from rendered comparison frames. Do not retune by taste.
+GRADE_CHAIN = ("colorbalance=rs=-0.08:gs=-0.02:bs=0.10:rm=-0.04:bm=0.06,"
+               "eq=contrast=1.20:saturation=0.62:gamma=0.90,"
+               "vignette=PI/4")
+GRAIN_DEFAULT = 9.0
+
+# Beats that carry a turn in the story get a slow push; every other beat is
+# held still. Constant motion everywhere reads as noise and stops signifying
+# anything, so the push has to be the exception to mean "look here".
+PUSH_ROLES = frozenset({"hook", "reveal", "twist"})
+PUSH_AMOUNT = 0.08
+
 
 def segment_lengths(durations: list[float],
                     transition_duration: float) -> tuple[list[float],
@@ -134,6 +157,51 @@ def zoompan_expr(motion: str, duration: float, fps: int = 30,
             f"s={width}x{height}:fps={fps}")
 
 
+def grade_chain(grain: float = GRAIN_DEFAULT) -> str:
+    """The approved grade, with the grain amount dialled in.
+
+    ``grain`` of zero keeps the colour work and drops the noise filter
+    entirely rather than passing ``alls=0``, which still costs a full pass
+    over every plane to add nothing.
+    """
+    if grain > 0:
+        return f"{GRADE_CHAIN},noise=alls={grain:g}:allf=t+u"
+    return GRADE_CHAIN
+
+
+def push_expr(span: float, fps: int = 30, width: int = 1080,
+              height: int = 1920, amount: float = PUSH_AMOUNT) -> str:
+    """A slow push from 1.0 to ``1 + amount`` over ``span`` seconds.
+
+    Deliberately NOT ``zoompan``, even though zoompan is what the still
+    branch uses. zoompan's ``d`` is output frames per *input* frame, so on a
+    multi-frame video input it multiplies the segment: the beat that should
+    run 4 seconds emits 4 seconds of output for every frame it is fed (see
+    ``zoompan_expr``). ``d=1`` would avoid that, but zoompan then rounds its
+    crop origin to whole pixels every frame, and at this zoom rate — eight
+    percent over four seconds, well under a pixel per frame — that rounding
+    is the whole movement, so the push arrives as a visible step rather than
+    a drift. It also re-declares the frame rate, which is exactly the kind of
+    thing that broke the timebase before.
+
+    ``scale`` with ``eval=frame`` re-evaluates its size expression per frame
+    without touching a timestamp, and the fixed ``crop`` behind it hands the
+    chain a constant ``width x height`` frame, so xfade sees the same picture
+    geometry it always did. Frame count in equals frame count out, verified
+    on a real render: the timeline cannot move.
+
+    The scaled size is forced even, because an odd dimension is not
+    representable in yuv420p.
+    """
+    # `t` is seconds into the beat, so the ramp is wall-clock, not frame
+    # index: whatever rate the source arrived at, the push lands on the cut.
+    span = max(span, 1.0 / fps)
+    zoom = f"(1+{amount:g}*min(t/{span:.3f},1))"
+    return (f"scale=w='trunc({width}*{zoom}/2)*2':"
+            f"h='trunc({height}*{zoom}/2)*2':eval=frame,"
+            f"crop={width}:{height}")
+
+
 def _loop_frames(span: float, fps: int) -> int:
     """How many frames ``loop`` must hold to fill a ``span``-second slot.
 
@@ -165,7 +233,9 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
                        ass_path: str | None = None,
                        audio_offset: int = 0,
                        music_index: int | None = None,
-                       music_gain_db: float = -18.0
+                       music_gain_db: float = -18.0,
+                       grade: bool = True,
+                       grain: float = GRAIN_DEFAULT
                        ) -> tuple[str, float, str]:
     """Build the filter_complex string, total duration and video out-label.
 
@@ -179,6 +249,14 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
     audio is input ``audio_offset + k``, passed in explicitly rather than
     rewritten afterwards, because a post-hoc regex would also catch the music
     input's label.
+
+    ``grade`` applies the house look (see ``GRADE_CHAIN``) and ``grain`` sets
+    its noise strength. Both are applied *per beat*, on the one label every
+    beat hands onward, which is what guarantees footage and fallback stills
+    get identical treatment: the grade sits downstream of the point where the
+    three source branches have already merged, so there is no path into the
+    xfade chain that can miss it. An ungraded fallback still would be the one
+    shot in the video that stands out, which is the opposite of the point.
     """
     beats = plan.script.beats
     if not beats:
@@ -243,6 +321,33 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
             spans = [lengths[beat_index] / len(slots)] * len(slots)
         clip_labels: list[str] = []
 
+        # --- the beat's finishing chain ----------------------------------
+        #
+        # Grade and push are applied once, to the whole beat, at the last
+        # point before its label goes out. Every visual — a video slot, a
+        # still slot inside a multi-clip beat, or a no-clip beat's fallback
+        # image — passes through here exactly once, so the three branches
+        # cannot diverge in look. It also means the push ramps across the
+        # beat rather than restarting on every hard cut inside it.
+        #
+        # The push is measured against `lengths[beat_index]`, the beat's
+        # padded segment, so it finishes on the segment and not somewhere
+        # inside it. It reads `t`, not a frame index, and neither filter
+        # touches a timestamp, so segment_lengths' arithmetic is untouched.
+        look: list[str] = []
+        if beat.role in PUSH_ROLES:
+            look.append(push_expr(lengths[beat_index], fps, width, height))
+        if grade:
+            look.append(grade_chain(grain))
+        # Re-declared on the way out: `scale` is free to negotiate another
+        # pixel format, and xfade wants both of its inputs in the same one.
+        finish = ("," + ",".join(look) + ",format=yuv420p") if look else ""
+
+        # A one-clip beat has no concat to hang the finish on, so it goes on
+        # that single clip's own chain — same filters, same one application
+        # per beat, and the label it emits keeps its old name.
+        tail = finish if len(spans) == 1 else ""
+
         for span in spans:
             _path, is_video = inputs[cursor]
             # A one-clip beat keeps the old label, so a plan with no clips
@@ -265,12 +370,12 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
                     f"[{cursor}:v]{common},fps={fps},"
                     f"loop=loop=-1:size={_loop_frames(span, fps)}:start=0,"
                     f"trim=duration={span:.3f},setpts=PTS-STARTPTS,"
-                    f"fps={fps},format=yuv420p,{timebase}[{label}]")
+                    f"fps={fps},format=yuv420p{tail},{timebase}[{label}]")
             else:
                 parts.append(
                     f"[{cursor}:v]{common},"
                     f"{zoompan_expr(beat.motion, span, fps, width, height)},"
-                    f"format=yuv420p,{timebase}[{label}]")
+                    f"format=yuv420p{tail},{timebase}[{label}]")
             clip_labels.append(label)
             cursor += 1
 
@@ -281,8 +386,8 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
             joined = "".join(f"[{c}]" for c in clip_labels)
             # concat resets the timebase to 1/1000000 regardless of what its
             # inputs carried, so it is re-declared on the way out.
-            parts.append(f"{joined}concat=n={len(clip_labels)}:v=1:a=0,"
-                         f"{timebase}[b{beat_index}]")
+            parts.append(f"{joined}concat=n={len(clip_labels)}:v=1:a=0"
+                         f"{finish},{timebase}[b{beat_index}]")
             beat_labels.append(f"b{beat_index}")
 
     # --- crossfade between beats -----------------------------------------
@@ -366,7 +471,8 @@ def build_command(plan: ReelPlan, settings, out_path: Path, *,
     graph, total, video_label = build_filter_graph(
         plan, fps=settings.fps, width=settings.width, height=settings.height,
         transition_duration=settings.transition_duration, ass_path=ass_name,
-        audio_offset=len(inputs), music_index=music_index)
+        audio_offset=len(inputs), music_index=music_index,
+        grade=settings.video_grade, grain=settings.video_grain)
 
     command += [
         "-filter_complex", graph,

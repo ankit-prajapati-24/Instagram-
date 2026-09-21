@@ -146,6 +146,20 @@ class Settings:
             os.getenv("RAHASYA_WORDS_PER_SEC", "3.03")))
     duration_min: float = 38.0
     duration_max: float = 52.0
+    # One grade over every frame, so twenty-odd Pexels clips from as many
+    # different creators read as one video rather than a template. Mirrors
+    # voice_process: on by default, off with RAHASYA_VIDEO_GRADE=0. Turning
+    # it off also removes the grain, because the grain is part of the grade.
+    video_grade: bool = field(
+        default_factory=lambda: os.getenv(
+            "RAHASYA_VIDEO_GRADE", "1").strip().lower()
+        not in {"0", "false", "no", "off"})
+    # Film grain strength, separate because it is the most taste-dependent
+    # part of the look and the most likely thing to be retuned. 0 keeps the
+    # colour grade and drops the grain.
+    video_grain: float = field(
+        default_factory=lambda: float(
+            os.getenv("RAHASYA_VIDEO_GRAIN", "9")))
 
     # --- Captions ----------------------------------------------------------
     captions_source: str = field(
