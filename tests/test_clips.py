@@ -280,6 +280,36 @@ def test_beat_clips_uses_measured_seconds_not_target(tmp_path):
     assert agent.match.call_args.kwargs["duration_seconds"] == 2.0
 
 
+def test_beat_clips_sends_visual_prompt_not_voice_text(tmp_path):
+    """The matcher (VisualQueryGenerator) is an English physical-visual
+    query generator. Handing it the Devanagari narration makes it search
+    for the *story* ("DNA says Greece" -> "ancient greek temple columns")
+    instead of the *shot*. beat.visual_prompt is the English visual
+    description the script agent already wrote for this purpose."""
+    agent = MagicMock()
+    agent.match.return_value = SimpleNamespace(matches=[_match(0)])
+    beat = _beat(3.0)
+    beat.voice_text = "डीएनए ग्रीस की ओर इशारा करता है"
+    beat.visual_prompt = "frozen alpine lake with skeletons under ice"
+    beat_clips(agent, beat, tmp_path)
+    assert (agent.match.call_args.kwargs["script_segment"]
+            == "frozen alpine lake with skeletons under ice")
+
+
+def test_beat_clips_falls_back_to_voice_text_when_visual_prompt_is_empty(
+        tmp_path):
+    """Stored plans and hand-edited beats may not have a visual_prompt.
+    Sending an empty string to the matcher breaks its query generation the
+    same way translating narration does, so fall back to voice_text."""
+    agent = MagicMock()
+    agent.match.return_value = SimpleNamespace(matches=[_match(0)])
+    beat = _beat(3.0)
+    beat.voice_text = "कुछ मंत्र"
+    beat.visual_prompt = ""
+    beat_clips(agent, beat, tmp_path)
+    assert agent.match.call_args.kwargs["script_segment"] == "कुछ मंत्र"
+
+
 def test_a_slot_the_agent_could_not_fill_is_marked_unfilled(tmp_path):
     """The caller falls those back to the image chain; this function only
     reports them honestly rather than dropping the slot."""

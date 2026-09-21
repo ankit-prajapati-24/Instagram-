@@ -107,7 +107,25 @@ def beat_clips(agent, beat: Beat, target_dir: str | Path) -> list[Clip]:
     durations = slot_durations(seconds, count)
 
     beat_dir = beat_output_dir(target_dir, beat.beat_id)
-    result = agent.match(script_segment=beat.voice_text,
+    # The matcher (VisualQueryGenerator in stock_agent.py) turns whatever
+    # text it's given into English physical-visual search queries. Handing
+    # it beat.voice_text — the Devanagari narration — used to make it
+    # translate/interpret the story instead of describing the shot: a beat
+    # about skeletons in a frozen Himalayan lake, narrated with "DNA says
+    # Greece", searched for "ancient greek temple columns". Measured
+    # against the real generator, appending voice_text to visual_prompt
+    # doesn't fix this either — the narration still leaks through and can
+    # still pull in the wrong-location query (see task-10a-report.md for
+    # the comparison). beat.visual_prompt is already an English shot
+    # description written by the script agent for exactly this purpose, so
+    # it goes alone. Only fall back to voice_text when visual_prompt is
+    # missing (stored plans / hand-edited beats may not have one) — an
+    # empty string would otherwise reach the matcher and break its query
+    # generation the same way translating narration does.
+    segment = beat.visual_prompt.strip() if beat.visual_prompt else ""
+    if not segment:
+        segment = beat.voice_text
+    result = agent.match(script_segment=segment,
                          duration_seconds=seconds,
                          download=True,
                          output_dir=str(beat_dir))
