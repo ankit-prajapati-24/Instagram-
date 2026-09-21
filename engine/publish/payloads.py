@@ -126,11 +126,36 @@ def publish_checklist(plan: ReelPlan, video_path: str, *,
                  if not c.source_url]
     if unsourced:
         items.append(f"UNSOURCED CLAIMS present: {unsourced}")
-    placeholders = [b.beat_id for b in plan.script.beats
-                    if b.image_provider == "placeholder"]
-    if placeholders:
+
+    # Visuals are Pexels stock clips now (see engine/media/clips.py), with
+    # still images as the per-slot fallback and a generated gradient frame
+    # as the last resort. A beat with clips is judged by its clips'
+    # providers; a beat with none is a plan stored before clips existed, and
+    # is judged by the legacy beat.image_provider field instead — that field
+    # is never set by the current pipeline, so this branch only fires for
+    # old plans.
+    fallback_ids = []
+    placeholder_ids = []
+    for beat in plan.script.beats:
+        if beat.clips:
+            providers = {c.provider for c in beat.clips}
+            if providers - {"pexels"}:
+                fallback_ids.append(beat.beat_id)
+            if "placeholder" in providers:
+                placeholder_ids.append(beat.beat_id)
+        elif beat.image_provider == "placeholder":
+            fallback_ids.append(beat.beat_id)
+            placeholder_ids.append(beat.beat_id)
+
+    if placeholder_ids:
         items.append(
-            f"{len(placeholders)} beats use placeholder visuals "
-            f"({', '.join(placeholders[:4])}...) — add an image provider "
-            f"before publishing this publicly")
+            f"{len(placeholder_ids)} beats show blank placeholder frames "
+            f"({', '.join(placeholder_ids[:4])}...) — add a Pexels key or "
+            f"an image provider before publishing this publicly")
+    stills_only = [b for b in fallback_ids if b not in placeholder_ids]
+    if stills_only:
+        items.append(
+            f"{len(stills_only)} beats fell back to still images instead "
+            f"of stock video ({', '.join(stills_only[:4])}...) — add a "
+            f"Pexels key before publishing this publicly")
     return items

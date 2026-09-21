@@ -220,11 +220,68 @@ def test_title_is_truncated_to_the_platform_limit():
 
 
 def test_checklist_flags_placeholder_visuals():
+    """Every beat's clips are placeholder-provider — the worst case, where
+    the render leaned on blank gradient frames for the whole video."""
+    plan = make_plan()
+    for beat in plan.script.beats:
+        beat.clips = [_clip("still.png", provider="placeholder")]
+    items = payloads.publish_checklist(plan, "o.mp4")
+    assert any("placeholder frames" in item for item in items)
+
+
+def test_checklist_flags_still_image_fallback_visuals():
+    """Every beat's clips fell back to a real still (e.g. an image-gateway
+    provider), never reaching a blank placeholder frame. That is a milder
+    problem than the placeholder case and should read differently."""
+    plan = make_plan()
+    for beat in plan.script.beats:
+        beat.clips = [_clip("still.png", provider="omniroute")]
+    items = payloads.publish_checklist(plan, "o.mp4")
+    assert any("fell back to still images" in item for item in items)
+    assert not any("placeholder frames" in item for item in items)
+
+
+def test_checklist_flags_mixed_pexels_and_fallback_beats():
+    """The common production shape: some beats got real Pexels footage,
+    others fell back (one to a still, one to a placeholder). The checklist
+    should call out only the beats that actually fell back, and should
+    still separate the placeholder beat from the milder still-image one."""
+    plan = make_plan()
+    beats = plan.script.beats
+    beats[0].clips = [_clip("clip.mp4", provider="pexels")]
+    beats[1].clips = [_clip("still.png", provider="keyless")]
+    beats[2].clips = [_clip("still.png", provider="placeholder")]
+    for beat in beats[3:]:
+        beat.clips = [_clip("clip.mp4", provider="pexels")]
+    items = payloads.publish_checklist(plan, "o.mp4")
+    placeholder_items = [i for i in items if "placeholder frames" in i]
+    stills_items = [i for i in items if "fell back to still images" in i]
+    assert len(placeholder_items) == 1
+    assert beats[2].beat_id in placeholder_items[0]
+    assert len(stills_items) == 1
+    assert beats[1].beat_id in stills_items[0]
+    assert beats[0].beat_id not in stills_items[0]
+    assert beats[0].beat_id not in placeholder_items[0]
+
+
+def test_checklist_flags_legacy_image_provider_placeholder():
+    """A plan stored before clips existed has no beat.clips at all — the
+    legacy beat.image_provider field is the only signal, and must still be
+    honoured so old stored plans keep getting warned."""
     plan = make_plan()
     for beat in plan.script.beats:
         beat.image_provider = "placeholder"
     items = payloads.publish_checklist(plan, "o.mp4")
-    assert any("placeholder visuals" in item for item in items)
+    assert any("placeholder frames" in item for item in items)
+
+
+def test_checklist_silent_when_all_beats_used_pexels():
+    plan = make_plan()
+    for beat in plan.script.beats:
+        beat.clips = [_clip("clip.mp4", provider="pexels")]
+    items = payloads.publish_checklist(plan, "o.mp4")
+    assert not any("placeholder" in item or "fell back" in item
+                   for item in items)
 
 
 def test_checklist_flags_unsourced_claims():
