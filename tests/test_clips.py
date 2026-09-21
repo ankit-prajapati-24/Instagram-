@@ -634,7 +634,7 @@ def test_one_agent_many_threads_keeps_each_beats_clips_in_its_own_dir(
 @pytest.mark.parametrize("beat_id", [
     "../../escape",
     "a/b",
-    "a\b",
+    r"a\b",
     "C:evil",
     "what?",
     "star*",

@@ -16,8 +16,8 @@ Hindi/India audience that is where the money actually is —
                                    v
                           [ you approve or edit ]
                                    |
-      local edge-tts ──────────────┤  hi-IN voice, measured per beat
-      image chain ─────────────────┤  gateway -> keyless -> placeholder
+      local Piper (hi-IN) ─────────┤  hi-IN voice, measured per beat
+      clip chain ──────────────────┤  pexels -> image -> placeholder
                                    v
       ffmpeg v7.1 ─────────────────┤  zoompan · xfade · libass · loudnorm
                                    v
@@ -58,7 +58,7 @@ whole pipeline work before spending anything. To get real scripts, follow
 python scripts/verify_e2e.py      # full pipeline, fake brain, real everything else
 python scripts/probe_omniroute.py # which gateway endpoints actually answer
 python scripts/reset_cooldown.py  # what the dedup gate is currently blocking
-python -m pytest tests/ -q        # 175 tests
+python -m pytest tests/ -q        # 330 tests
 ```
 
 `verify_e2e.py` exits non-zero unless it produced a playable 1080x1920 MP4 with
@@ -70,21 +70,23 @@ Measured on this machine, 2026-09-17/18:
 
 | Verified | Detail |
 |---|---|
-| End-to-end render | 50.16s, 1080x1920, 6.80 MB, audio present, QC pass |
+| End-to-end render | 50.000s render vs 50.010s narration, 0.010s diff (sub-frame — one frame at 30fps is 0.033s, so this is quantisation, not drift); 1080x1920, audio present, 62 MB, QC pass |
 | A/V sync | 0.000s drift, proven by rendering labelled frames and reading back image + caption at the middle of every beat |
-| Hindi TTS | `hi-IN-MadhurNeural` at `rate=-8% pitch=-6Hz` |
+| Hindi TTS | Piper `pratham` at `length_scale=1.12` |
 | Caption burn-in | libass, with karaoke word highlighting |
 | Dedup gate | refused a repeat topic on the exact-hash layer |
 | Web panel | full flow driven end to end, including an edit to the hook beat surviving approval. No console errors, no mobile overflow |
-| Scene images | 9 of 10 beats from the keyless tier, watermark cropped, matching their captions |
-| 175 tests | `pytest tests/ -q` |
+| Stock footage | 12/12 beats matched real Pexels footage on a real run, zero fallbacks; the matcher now downloads the smallest file that still covers 1080x1920 instead of the largest available (was up to 1.6 GB of 4K source for one video) |
+| Colour grade cost | +80.1s on a 49.8s render (143.0s ungraded → 223.1s graded); `RAHASYA_VIDEO_GRAIN=0` buys back most of that (187.5s) because grain, not the colour work, is what defeats inter-frame compression |
+| 330 tests | `pytest tests/ -q` |
 
 | Not verified | Why |
 |---|---|
 | Real model output | OmniRoute has no provider configured — `docs/omniroute-setup.md` |
 | Tier-1 image quality | needs a provider key; tier 2 is watermark-cropped and upscaled from a smaller source |
 | Voice *tone* | both `hi-IN` voices are tagged "Friendly, Positive", which is wrong for dark mystery. The rate and pitch offsets pull them darker, but this needs your ears, not a test |
-| edge-tts commercial terms | check Microsoft's terms before monetising the audio |
+| Pexels licence terms | clips are tagged `licence='pexels'`, which records the source, not a verified commercial clearance — check Pexels' licence before monetising |
+| Whether the grade reads as "one video" | it has been judged on comparison frames, not evaluated by eye over a full finished render with 20+ cuts |
 | Publishing | no upload path exists. Payloads are built for you to copy |
 
 ## Layout
@@ -96,7 +98,7 @@ Measured on this machine, 2026-09-17/18:
 | `engine/agents/` | the four prompts and their parsers |
 | `engine/prompts/` | **the retention rules live here**, as constraints |
 | `engine/gates/` | four-layer dedup, QC scorecard |
-| `engine/media/` | edge-tts voice, image generation with fallback |
+| `engine/media/` | Piper voice, stock clip matching (`clips.py`), image generation with fallback |
 | `engine/assembly/` | ASS captions, ffmpeg graph, legacy-endpoint compiler |
 | `engine/pipeline.py` | stage orchestration either side of the human gate |
 
@@ -132,20 +134,50 @@ providers instead of failing the whole render.
 | `engine/fake_client.py` | stands in for the gateway; what the sample script comes from |
 | `docs/` | spec, plan, setup, playbook, upstream repo fixes |
 
-## Three decisions worth knowing before you change anything
+## Decisions worth knowing before you change anything
 
 **Voice does not go through OmniRoute.** Its `/v1/audio/speech` documents only
-`openai/tts-1`, which speaks Hindi with a foreign accent. Local `edge-tts`
-gives real `hi-IN` neural voices, free and unmetered.
+`openai/tts-1`, which speaks Hindi with a foreign accent. Local Piper gives
+real `hi-IN` neural voices, offline and MIT-licensed; `edge-tts` remains as
+the fallback engine (`RAHASYA_VOICE_ENGINE=edge`).
 
-**Images walk a three-tier chain**, in `engine/media/images.py`: the gateway
-first, then a keyless public endpoint, then a generated placeholder. With no
-provider key the gateway lists zero image models, and this machine has no
-usable GPU for local generation, so tier 2 is what actually draws scenes
-today. It retries — one attempt per beat landed 3 of 10 images, retrying
-landed 9 of 10 — crops the bottom 7% to remove the endpoint's watermark, and
-scales to cover 1080x1920. Add a key and tier 1 takes over with no code
-change. `RAHASYA_KEYLESS_IMAGES=0` skips tier 2.
+**Visuals are stock footage, in a three-tier chain**, in
+`engine/media/clips.py`: Pexels first, then the still-image chain in
+`images.py` (itself gateway → keyless → placeholder), then a generated
+placeholder. One clip per 2.5 seconds of narration, matched per beat so a
+clip never straddles a beat boundary — that constraint is what keeps the A/V
+sync work intact, because the clip layer only subdivides a span the beat
+already owns. Clips hard-cut inside a beat and crossfade only where beats
+meet, which is what fast-cut pacing actually looks like. A slot Pexels
+cannot fill becomes a still with zoompan, keeping its slot duration: a
+fallback changes what is on screen, never when. `PEXELS_API_KEY` in `.env`
+is what switches tier 1 on. The matcher is sent `beat.visual_prompt` — the
+English shot description the script agent writes for exactly this purpose —
+never `voice_text`, the Devanagari narration: handing it the narration made
+it search for what the story *means* instead of what is physically in
+frame (a beat about skeletons in a frozen Himalayan lake, narrated with a
+DNA claim about Greek ancestry, pulled "ancient greek temple columns").
+Measured on a real 12-beat run: 12/12 beats matched real footage, zero
+fallbacks.
+
+**One colour grade ties twenty mismatched clips into one video.** A
+50-second Reel pulls 20-26 clips from as many different Pexels creators,
+each shot on different glass in different light, with a different camera's
+colour science. `engine/assembly/render.py` applies one grade — cold,
+desaturated, crushed blacks, a vignette pulling the eye to centre, and film
+grain — over every frame alike: clip, fallback still and beat all get the
+same treatment, because the grade sits downstream of the point where the
+xfade chain could otherwise miss one. Beats tagged `hook`, `reveal` or
+`twist` also get a slow push (a gentle zoom); every other beat holds still,
+because motion everywhere stops signifying anything and the push has to be
+the exception that means "look here." `RAHASYA_VIDEO_GRADE=0` turns the
+whole look off; `RAHASYA_VIDEO_GRAIN` (default `9`) controls just the grain,
+which is the expensive part — measured on a real 49.8s render, the full
+grade costs 143.0s → 223.1s to encode (grain wrecks inter-frame
+compression), and `RAHASYA_VIDEO_GRAIN=0` keeps the colour work and vignette
+for 187.5s instead. The look was chosen from rendered comparison frames;
+whether it reads as one video across a full finished render has not yet
+been judged by eye.
 
 **Every beat carries two texts.** `voice_text` in Devanagari drives
 pronunciation; `caption_text` in Roman Hinglish is what gets burned on screen.

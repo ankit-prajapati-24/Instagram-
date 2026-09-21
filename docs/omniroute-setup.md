@@ -106,7 +106,7 @@ own provider:
 | Capability | Endpoint | Used for | If missing |
 |---|---|---|---|
 | Chat | `/v1/chat/completions` | research, hooks, script, metadata | the panel falls back to the built-in sample script |
-| Images | `/v1/images/generations` | scene visuals | falls to the keyless tier, which works but watermarks and upscales; then to placeholders |
+| Images | `/v1/images/generations` | scene visuals, but only as a fallback now — see below | falls to the keyless tier, which works but watermarks and upscales; then to placeholders |
 | Embeddings | `/v1/embeddings` | semantic dedup, layer 3 | layers 1, 2 and 4 still run; layer 3 is skipped |
 | Moderation | `/v1/moderations` | pre-render safety gate | the gate fails closed and stops the plan |
 
@@ -116,7 +116,16 @@ anything else. Until it has them, `plan_stage` will stop at the moderation
 gate. If you want to get moving before sorting that out, run the panel with
 the sample brain, which skips it.
 
-## Images: what is actually available here
+## Images: what is actually available here — and it is the fallback, not tier 1
+
+**This whole section describes the fallback path.** Scene visuals now come
+first from stock footage (`engine/media/clips.py`, Pexels, keyed by
+`PEXELS_API_KEY` in `.env` — not OmniRoute at all). A slot Pexels cannot fill
+falls through to the OmniRoute image chain below, then to a placeholder. On a
+real 12-beat run with a Pexels key, all 12 beats matched real footage and
+nothing reached this fallback. `README.md` and `SETUP.md` have the stock
+chain's detail; what follows is only what happens when Pexels comes up empty
+for a slot, or `PEXELS_API_KEY` is unset.
 
 Correcting something I wrote before measuring this machine. My first note said
 to run ComfyUI locally once free image tiers start throttling. **That is not

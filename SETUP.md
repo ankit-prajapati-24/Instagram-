@@ -138,7 +138,7 @@ facts as each stage finishes, not progress guesses.
 python scripts/verify_e2e.py        # full pipeline, fake brain, everything else real
 python scripts/probe_omniroute.py   # which gateway endpoints answer
 python scripts/reset_cooldown.py    # what the dedup gate is blocking
-python -m pytest -q                 # 220 tests
+python -m pytest -q                 # 330 tests
 ```
 
 `verify_e2e.py` exits non-zero unless it produced a playable 1080x1920 MP4 with
@@ -159,6 +159,9 @@ documents the defaults. The ones worth knowing:
 | `RAHASYA_CAPTIONS` | `caption_text` | Roman Hinglish, or `voice_text` for Devanagari |
 | `RAHASYA_DAILY_USD` | `2.0` | pipeline pauses when the day's spend crosses this |
 | `RAHASYA_KEYLESS_IMAGES` | `1` | set `0` to skip the free image tier |
+| `PEXELS_API_KEY` | _(none)_ | stock footage for scenes, the primary visual source; free to register, and without it every scene falls back to the still-image chain |
+| `RAHASYA_VIDEO_GRADE` | `1` | one colour grade + vignette over every frame, so 20-odd clips from different Pexels creators read as one video; `0` renders ungraded |
+| `RAHASYA_VIDEO_GRAIN` | `9` | film grain strength within the grade; this is the expensive part of the render (it wrecks inter-frame compression, not the CPU cost of the filter itself) — `0` keeps the colour work and vignette but skips the grain and most of the extra render time |
 
 **Provider API keys do not go in this file.** They belong to OmniRoute, in its
 own env file or dashboard.
@@ -197,17 +200,33 @@ It means both the gateway and the free image endpoint failed. See below.
 
 These are real, current, and not hidden:
 
-**Images are the weakest part.** The chain is gateway → free keyless endpoint →
-placeholder. On 2026-09-18 the configured provider served six images and then
-returned `429 RESOURCE_EXHAUSTED` with a 163-hour reset, so most runs land on
-the free endpoint, and some runs have come out more than half placeholder
-frames. The quota is per-capability: chat kept working the whole time, so a run
-can write a full script and still produce no visuals. Adding an image provider
-key fixes this with no code change.
+**Visuals depend on a free Pexels key.** The chain is Pexels → the still-image
+chain → a placeholder frame. Without `PEXELS_API_KEY` the pipeline still
+produces a video, but every scene is a still, and the panel's scene strip will
+say `fallback` on each one. The old image path is still there underneath and
+still carries its own limits: the gateway tier exhausted its quota on
+2026-09-18 with a 163-hour reset, and the free keyless endpoint watermarks and
+upscales. On a real 12-beat run with a Pexels key, all 12 beats matched real
+footage with zero fallbacks, so the fallback chain below is a safety net, not
+the expected path.
 
-**The free image endpoint's commercial terms have not been checked.** Assets
-are tagged `licence='ai-generated'`, which is a default I set, not a verified
-licence. Check before monetising.
+**The Pexels licence terms have not been independently checked.** Downloaded
+clips are tagged `licence='pexels'`, which records the source, not a verified
+commercial clearance. Check Pexels' terms before monetising.
+
+**There is no music or sound effects.** `engine/assembly/render.py` supports
+mixing in a music bed, but nothing supplies one and `assets/music/` is empty,
+so every video renders over silence. Short-form retention research weighs
+sound design heavily, so this is a real gap, not a nicety — it is the next
+thing worth fixing, not a footnote.
+
+**Whether the grade actually makes 20-odd stock clips read as one video is
+still a judgement call, not a measurement.** The colour grade, vignette and
+grain (see `README.md`) were chosen from rendered comparison frames, and the
+render cost is measured (143.0s → 223.1s on a 49.8s video, `RAHASYA_VIDEO_GRAIN=0`
+brings it to 187.5s). Whether the *look* actually reads as one coherent piece
+across a full finished render, rather than generic stock filler, still needs
+eyes on a real output.
 
 **Moderation is not running.** It routes to its own provider (OpenAI by
 default) and needs credentials like anything else. Until then the safety gate
