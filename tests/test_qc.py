@@ -1,3 +1,4 @@
+from engine.contract import Clip
 from engine.gates.qc import BANNED_PHRASES, run_qc
 from tests.factories import make_plan
 
@@ -130,3 +131,62 @@ def test_a_short_render_fails_even_when_beats_look_fine():
     plan = make_plan(beats=10, measured=4.4)      # 44s of beats, in range
     assert run_qc(plan).passed
     assert not run_qc(plan, actual_duration=31.0).passed
+
+
+# --- one beat is no longer one visual --------------------------------------
+# The clip stage puts several stock clips inside a single beat: the failing
+# run had 13 beats and 33 clips. Dividing the duration by the beat count
+# reported a visual every 5.1s and warned, when the picture was actually
+# cutting every 2.0s.
+
+def test_visual_change_rate_counts_clips_not_beats():
+    plan = make_plan(beats=13, measured=5.1, clips=True)
+    visuals = sum(len(b.clips) for b in plan.script.beats)
+    assert visuals > len(plan.script.beats), "fixture must be multi-clip"
+
+    check = next(c for c in run_qc(plan).checks
+                 if c.name == "visual_change_rate")
+
+    expected = plan.duration() / visuals
+    assert expected <= 4.0
+    assert check.ok, check.detail
+    assert f"{expected:.1f}s" in check.detail
+
+
+def test_visual_change_rate_falls_back_to_beats_without_clips():
+    """Plans stored before clips existed carry no clips at all."""
+    plan = make_plan(beats=10, measured=5.4)
+    assert not any(b.clips for b in plan.script.beats)
+
+    check = next(c for c in run_qc(plan).checks
+                 if c.name == "visual_change_rate")
+    assert not check.ok
+    assert "5.4s" in check.detail
+
+
+def test_visual_change_rate_still_warns_when_the_cuts_are_slow():
+    """The check must remain able to fail once it counts clips."""
+    plan = make_plan(beats=10, measured=5.0)
+    for beat in plan.script.beats:                 # one long clip per beat
+        beat.clips = [Clip(path="c.mp4", query="q", provider="pexels",
+                           duration=beat.seconds())]
+
+    check = next(c for c in run_qc(plan).checks
+                 if c.name == "visual_change_rate")
+    assert not check.ok
+    assert "5.0s" in check.detail
+
+
+def test_a_mixed_beat_counts_every_clip_it_holds():
+    """Beats do not all hold the same number of clips."""
+    plan = make_plan(beats=10, measured=4.4)
+    plan.script.beats[0].clips = [
+        Clip(path=f"a{i}.mp4", query="q", provider="pexels", duration=1.1)
+        for i in range(4)]
+    for beat in plan.script.beats[1:]:
+        beat.clips = [Clip(path="b.mp4", query="q", provider="pexels",
+                           duration=beat.seconds())]
+
+    check = next(c for c in run_qc(plan).checks
+                 if c.name == "visual_change_rate")
+    assert f"{plan.duration() / 13:.1f}s" in check.detail

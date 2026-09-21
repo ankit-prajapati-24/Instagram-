@@ -30,6 +30,16 @@ BANNED_PHRASES: tuple[str, ...] = (
 )
 
 
+# The finished-video duration window, in seconds. Named, because more than
+# one stage scores against it: ``run_qc`` below, and the pre-render length
+# gate in ``engine.pipeline`` that refuses a script before the clip stage
+# spends twelve minutes on it. Two copies of these numbers would separate the
+# first time either moved, and a gate that disagrees with the check it fronts
+# is worse than no gate.
+DURATION_MIN = 38.0
+DURATION_MAX = 52.0
+
+
 @dataclass
 class Check:
     name: str
@@ -70,8 +80,19 @@ def _sentences(text: str) -> list[str]:
     return [s.strip() for s in re.split(r"[.!?|।]+", text) if s.strip()]
 
 
+def duration_in_range(seconds: float, duration_min: float = DURATION_MIN,
+                      duration_max: float = DURATION_MAX) -> bool:
+    """Is a length inside the window this pipeline ships? One definition.
+
+    ``run_qc`` asks it of the rendered file; the length gate asks it of the
+    narration, before anything is rendered. Same window, same comparison.
+    """
+    return duration_min <= seconds <= duration_max
+
+
 def run_qc(plan: ReelPlan, *, similarity: float | None = None,
-           duration_min: float = 38.0, duration_max: float = 52.0,
+           duration_min: float = DURATION_MIN,
+           duration_max: float = DURATION_MAX,
            actual_duration: float | None = None,
            narration_seconds: float | None = None,
            expect_render: bool = False) -> Scorecard:
@@ -98,7 +119,8 @@ def run_qc(plan: ReelPlan, *, similarity: float | None = None,
 
     # --- hard ------------------------------------------------------------
     checks.append(Check(
-        "duration", duration_min <= duration <= duration_max, "hard",
+        "duration", duration_in_range(duration, duration_min, duration_max),
+        "hard",
         f"{duration:.1f}s {measured} "
         f"(need {duration_min:.0f}-{duration_max:.0f}s)"))
 
@@ -168,10 +190,19 @@ def run_qc(plan: ReelPlan, *, similarity: float | None = None,
 
     # --- warn ------------------------------------------------------------
     if beats:
-        rate = duration / len(beats)  # same duration source as above
+        # Count visuals, not beats. A beat holds several stock clips now —
+        # 13 beats carried 33 clips on the first real run — so dividing by
+        # the beat count reported a cut every 5.1s when the picture was
+        # actually changing every 2.0s, and warned about it.
+        #
+        # Beats are the fallback, not the measure: a plan stored before
+        # clips existed has none, and renders one still per beat.
+        visuals = sum(len(b.clips) for b in beats) or len(beats)
+        rate = duration / visuals  # same duration source as above
         checks.append(Check(
             "visual_change_rate", rate <= 4.0, "warn",
-            f"one visual every {rate:.1f}s (want <=4.0s)"))
+            f"one visual every {rate:.1f}s across {visuals} visuals "
+            f"(want <=4.0s)"))
 
     engines = {b.voice_engine for b in beats if b.voice_engine}
     if engines:
