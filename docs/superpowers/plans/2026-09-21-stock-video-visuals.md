@@ -815,7 +815,7 @@ The filter graph emits one segment per clip rather than one per beat. Beats stay
 
 **Files:**
 - Modify: `engine/assembly/render.py:127-211` (`build_filter_graph`), `engine/assembly/render.py:212-259` (`build_command`)
-- Test: `tests/test_render.py`
+- Test: `tests/test_assembly.py` — the existing render tests live here, including the A/V sync ones. Do not create `tests/test_render.py`; the new tests must run beside the sync tests they could break. It already imports `pytest`, `build_filter_graph`, `segment_lengths` and `make_plan`.
 
 **Interfaces:**
 - Consumes: `Beat.clips` from Task 2; `segment_lengths(durations, transition_duration) -> (lengths, offsets, overlaps)` unchanged
@@ -823,7 +823,7 @@ The filter graph emits one segment per clip rather than one per beat. Beats stay
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `tests/test_render.py`:
+Add to `tests/test_assembly.py`:
 
 ```python
 from engine.assembly.render import build_filter_graph, plan_inputs
@@ -905,7 +905,7 @@ def test_a_beat_with_no_clips_still_renders_from_its_image():
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `python -m pytest tests/test_render.py -q -k "clip or xfade_count or zoompan or plan_inputs"`
+Run: `python -m pytest tests/test_assembly.py -q -k "clip or xfade_count or zoompan or plan_inputs"`
 Expected: FAIL with `ImportError: cannot import name 'plan_inputs'`
 
 - [ ] **Step 3: Add the input enumeration**
@@ -1043,7 +1043,7 @@ and change the audio offset from `len(beats)` to `len(inputs)` in both the `musi
 
 - [ ] **Step 6: Run the render tests**
 
-Run: `python -m pytest tests/test_render.py -q`
+Run: `python -m pytest tests/test_assembly.py -q`
 Expected: PASS, including the pre-existing A/V sync tests.
 
 - [ ] **Step 7: Run the whole suite**
@@ -1054,7 +1054,7 @@ Expected: all pass.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add engine/assembly/render.py tests/test_render.py
+git add engine/assembly/render.py tests/test_assembly.py
 git commit -m "feat: render one segment per clip, cutting hard inside a beat"
 ```
 
@@ -1160,7 +1160,32 @@ from engine.media.clips import generate_plan_clips, unavailable_reason
 from stock_agent import StockVideoMatcherAgent
 ```
 
-- [ ] **Step 5: Add the setting**
+- [ ] **Step 5: Rename the return key**
+
+`produce_stage` ends by returning `"image_providers": counts`. Task 8's
+panel and Task 9's verify script both read `providers`, so the key has to
+change here or both of them silently show nothing.
+
+At the end of `produce_stage`, change:
+
+```python
+            "image_providers": counts}
+```
+
+to:
+
+```python
+            "providers": counts}
+```
+
+Then find every other reader of the old key and update it in this same
+commit:
+
+```bash
+grep -rn "image_providers" --include=*.py --include=*.html .
+```
+
+- [ ] **Step 6: Add the setting**
 
 In `engine/config.py`, beside the other keys:
 
@@ -1169,12 +1194,12 @@ In `engine/config.py`, beside the other keys:
         default_factory=lambda: os.getenv("PEXELS_API_KEY", "").strip())
 ```
 
-- [ ] **Step 6: Run the tests**
+- [ ] **Step 7: Run the tests**
 
 Run: `python -m pytest -q`
 Expected: all pass. Any test referring to `Stage.IMAGES` or `image_providers` must be updated in the same commit, not deleted.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add engine/pipeline.py engine/config.py tests/test_pipeline.py
