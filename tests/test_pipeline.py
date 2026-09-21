@@ -15,3 +15,154 @@ def test_the_images_stage_is_gone():
 
 def test_produce_order_starts_with_voice():
     assert Stage.PRODUCE[0] == Stage.VOICE
+
+
+# --- the length gate: measure before spending -------------------------------
+# VOICE -> CLIPS -> CAPTIONS -> RENDER -> QC put every expensive stage before
+# the first check of how long the narration actually is. The failing run spent
+# 821 seconds -- roughly twelve minutes of it on clips and render -- to learn
+# that the script was 66.5s against a 38-52s window. Voice is where the true
+# duration becomes knowable, so that is where the question gets asked.
+
+import pytest
+
+from engine.config import Settings
+from engine.contract import Clip
+from engine.gates import qc
+from engine.pipeline import GateError, PipelineEvent, produce_stage
+from engine.store import Store
+from tests.factories import make_plan
+
+
+class _Clips:
+    """Stands in for generate_plan_clips and remembers whether it ran."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, plan, *args, **kwargs):
+        self.calls += 1
+        for beat in plan.script.beats:
+            beat.clips = [Clip(path="c.mp4", query="q", provider="pexels",
+                               duration=beat.seconds())]
+        return {"pexels": len(plan.script.beats)}
+
+
+def _harness(tmp_path, monkeypatch, *, seconds_per_beat):
+    """produce_stage with everything after voice stubbed out."""
+    settings = Settings()
+    settings.work_dir = tmp_path / "work"
+    settings.out_dir = tmp_path / "out"
+    settings.music_dir = tmp_path / "music"
+    settings.piper_models_dir = tmp_path / "models"
+
+    store = Store(tmp_path / "engine.db")
+    store.init()
+
+    def fake_synth(plan, work_dir, settings_, progress=None):
+        for beat in plan.script.beats:
+            beat.measured_seconds = seconds_per_beat
+            beat.voice_engine = "piper"
+            beat.audio_path = "a.mp3"
+
+    clips = _Clips()
+    monkeypatch.setattr("engine.pipeline.synth_plan", fake_synth)
+    monkeypatch.setattr("engine.pipeline.generate_plan_clips", clips)
+    monkeypatch.setattr("engine.pipeline.unavailable_reason", lambda s: None)
+    monkeypatch.setattr("engine.pipeline.StockVideoMatcherAgent",
+                        lambda **kwargs: object())
+    monkeypatch.setattr("engine.pipeline.write_ass",
+                        lambda *a, **k: str(tmp_path / "captions.ass"))
+    monkeypatch.setattr("engine.pipeline.render", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "engine.pipeline.probe_video",
+        lambda path, ffmpeg: {"duration": len(plan.script.beats)
+                              * seconds_per_beat, "bytes": 2048})
+
+    plan = make_plan(beats=13, measured=None)
+    events: list[PipelineEvent] = []
+    return plan, store, settings, clips, events
+
+
+def test_an_overlong_narration_stops_before_the_clip_stage(tmp_path,
+                                                           monkeypatch):
+    plan, store, settings, clips, events = _harness(
+        tmp_path, monkeypatch, seconds_per_beat=5.1)     # 13 x 5.1 = 66.3s
+
+    with pytest.raises(GateError) as caught:
+        produce_stage(plan, None, store, settings, emit=events.append)
+
+    assert clips.calls == 0, "the clip stage ran anyway"
+    detail = caught.value.detail
+    assert "66.3" in detail                  # what was measured
+    assert "38" in detail and "52" in detail  # the window it missed
+    assert "shorten" in detail.lower()        # what to do about it
+
+
+def test_the_length_gate_reports_itself_to_the_panel(tmp_path, monkeypatch):
+    plan, store, settings, clips, events = _harness(
+        tmp_path, monkeypatch, seconds_per_beat=5.1)
+
+    with pytest.raises(GateError):
+        produce_stage(plan, None, store, settings, emit=events.append)
+
+    failed = [e for e in events if e.status == "failed"]
+    assert [e.stage for e in failed] == [Stage.LENGTH]
+    assert "66.3" in failed[0].detail
+
+
+def test_a_short_narration_is_caught_by_the_same_gate(tmp_path, monkeypatch):
+    plan, store, settings, clips, events = _harness(
+        tmp_path, monkeypatch, seconds_per_beat=2.0)     # 26.0s
+
+    with pytest.raises(GateError) as caught:
+        produce_stage(plan, None, store, settings, emit=events.append)
+
+    assert clips.calls == 0
+    assert "26.0" in caught.value.detail
+    assert "lengthen" in caught.value.detail.lower()
+
+
+def test_a_plan_inside_the_window_passes_straight_through(tmp_path,
+                                                          monkeypatch):
+    plan, store, settings, clips, events = _harness(
+        tmp_path, monkeypatch, seconds_per_beat=3.5)     # 45.5s
+
+    result = produce_stage(plan, None, store, settings, emit=events.append)
+
+    assert clips.calls == 1
+    assert result["scorecard"]["passed"], result["scorecard"]["hard_failures"]
+    assert not [e for e in events if e.status == "failed"]
+
+
+def test_the_gate_uses_the_window_it_is_given_not_a_literal(tmp_path,
+                                                            monkeypatch):
+    """The same 66.3s narration passes once the configured window moves."""
+    plan, store, settings, clips, events = _harness(
+        tmp_path, monkeypatch, seconds_per_beat=5.1)
+    settings.duration_min, settings.duration_max = 60.0, 70.0
+
+    produce_stage(plan, None, store, settings, emit=events.append)
+
+    assert clips.calls == 1
+
+
+def test_the_gate_and_the_scorecard_cannot_drift_apart():
+    """One window, one definition. Two copies of 38/52 would separate the
+    first time either moved, and a pre-render gate that disagrees with the
+    check it fronts is worse than no gate at all."""
+    import inspect
+
+    defaults = inspect.signature(qc.run_qc).parameters
+    assert defaults["duration_min"].default == qc.DURATION_MIN
+    assert defaults["duration_max"].default == qc.DURATION_MAX
+
+    settings = Settings()
+    assert settings.duration_min == qc.DURATION_MIN
+    assert settings.duration_max == qc.DURATION_MAX
+
+
+def test_the_length_stage_runs_between_voice_and_clips():
+    order = list(Stage.ORDER)
+    assert order.index(Stage.VOICE) < order.index(Stage.LENGTH)
+    assert order.index(Stage.LENGTH) < order.index(Stage.CLIPS)

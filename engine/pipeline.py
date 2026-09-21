@@ -5,11 +5,14 @@ Split deliberately in two, either side of the human gate:
   ``plan_stage``    research -> hooks -> script -> metadata -> moderation ->
                     dedup. Cheap, text only, and stops before anything is
                     rendered.
-  ``produce_stage`` voice -> clips -> captions -> render -> QC. This is where
-                    time and credits go, so it only ever runs on a plan a
-                    human approved. Voice runs before clips because clip
-                    count is derived from ``beat.measured_seconds``, which
-                    synthesis is what writes.
+  ``produce_stage`` voice -> length -> clips -> captions -> render -> QC.
+                    This is where time and credits go, so it only ever runs
+                    on a plan a human approved. Voice runs before clips
+                    because clip count is derived from
+                    ``beat.measured_seconds``, which synthesis is what
+                    writes — and the length gate runs immediately after it,
+                    because that is the first moment the finished runtime is
+                    known and the last one before the expensive stages.
 
 No function here publishes anything, and nothing calls into
 ``engine.publish``. That is a constraint from the spec, not an oversight.
@@ -27,7 +30,7 @@ from engine.assembly.captions import write_ass
 from engine.assembly.render import probe_video, render
 from engine.contract import ReelPlan, Script, Topic
 from engine.gates import dedup
-from engine.gates.qc import run_qc
+from engine.gates.qc import duration_in_range, run_qc
 from engine.media.clips import generate_plan_clips, unavailable_reason
 from engine.media.voice import synth_plan
 from stock_agent import StockVideoMatcherAgent
@@ -42,14 +45,15 @@ class Stage:
     DEDUP = "dedup"
     CLIPS = "clips"
     VOICE = "voice"
+    LENGTH = "length"
     CAPTIONS = "captions"
     RENDER = "render"
     QC = "qc"
 
     ORDER = (RESEARCH, HOOKS, SCRIPT, METADATA, MODERATION, DEDUP,
-             VOICE, CLIPS, CAPTIONS, RENDER, QC)
+             VOICE, LENGTH, CLIPS, CAPTIONS, RENDER, QC)
     PLAN = (RESEARCH, HOOKS, SCRIPT, METADATA, MODERATION, DEDUP)
-    PRODUCE = (VOICE, CLIPS, CAPTIONS, RENDER, QC)
+    PRODUCE = (VOICE, LENGTH, CLIPS, CAPTIONS, RENDER, QC)
 
 
 @dataclass
@@ -239,6 +243,43 @@ def produce_stage(plan: ReelPlan, client, store, settings, *,
                    f"{i}/{n} {beat} {secs:.1f}s via {engine}")))
     emit(PipelineEvent(Stage.VOICE, "done",
                        f"{plan.duration():.1f}s measured"))
+
+    # --- length gate ------------------------------------------------------
+    #
+    # Synthesis is the first stage that knows how long the video will be, and
+    # the cheapest thing standing in front of the ones that do not care. On
+    # the first real run, voice took about a minute and clips plus render took
+    # the other twelve of 821 seconds — and QC then rejected the result for
+    # being 66.5s against a 38-52s window, which was decided the moment the
+    # script was written. Asking here costs nothing and saves the twelve
+    # minutes; no stage after this one can shorten a script.
+    #
+    # The window is ``duration_in_range`` from the QC module, given the same
+    # settings the scorecard below is given, so the gate cannot start
+    # refusing lengths that QC would have passed.
+    narration = plan.duration()
+    if not duration_in_range(narration, settings.duration_min,
+                             settings.duration_max):
+        direction = ("shorten" if narration > settings.duration_max
+                     else "lengthen")
+        detail = (
+            f"the narration runs {narration:.1f}s, outside the "
+            f"{settings.duration_min:.0f}-{settings.duration_max:.0f}s "
+            f"window QC scores against. Nothing downstream changes a "
+            f"script's length, so this stops here rather than spending the "
+            f"clip and render stages on it: {direction} the script "
+            f"(RAHASYA_WORDS_PER_SEC sets the budget it is written to) and "
+            f"run the plan again.")
+        emit(PipelineEvent(Stage.LENGTH, "failed", detail,
+                           {"narration_seconds": narration,
+                            "duration_min": settings.duration_min,
+                            "duration_max": settings.duration_max}))
+        store.save_plan(plan, status="rejected_length")
+        raise GateError("length", detail)
+    emit(PipelineEvent(Stage.LENGTH, "done",
+                       f"{narration:.1f}s, inside "
+                       f"{settings.duration_min:.0f}-"
+                       f"{settings.duration_max:.0f}s"))
 
     reason = unavailable_reason(settings)
     emit(PipelineEvent(Stage.CLIPS, "started",
