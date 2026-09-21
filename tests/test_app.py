@@ -281,3 +281,11 @@ def test_a_normal_length_topic_passes_the_check(client):
         "topic": "Kongka La pass par ITBP jawano ne kya dekha",
         "use_fake": True})
     assert response.status_code == 200
+
+
+def test_the_panel_reports_clip_providers(client):
+    """A run that fell back to stills must not look like a run that got
+    footage. The old strip only knew about image_provider."""
+    page = client.get("/").text
+    assert "clips" in page
+    assert "image_provider" not in page

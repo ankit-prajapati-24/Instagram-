@@ -505,19 +505,21 @@ function collectBeats() {
 }
 
 function renderStrip(plan) {
-  const beats = plan.script.beats.filter((b) => b.image_path);
+  const beats = plan.script.beats.filter((b) => b.clips && b.clips.length);
   if (!beats.length) return;
-  const placeholders = beats.filter(
-    (b) => b.image_provider === "placeholder").length;
-  $("images-note").textContent = placeholders
-    ? `${placeholders} of ${beats.length} are placeholders`
-    : `${beats.length} generated`;
+  const fellBack = beats.reduce((n, b) => n + b.clips.filter(
+    (c) => c.provider !== "pexels").length, 0);
+  const totalClips = beats.reduce((n, b) => n + b.clips.length, 0);
+  $("images-note").textContent = fellBack
+    ? `${fellBack} of ${totalClips} clips fell back to stills`
+    : `${totalClips} clips matched`;
   $("strip").innerHTML = beats.map((b) => `
     <figure>
       <img src="/api/frame/${plan.plan_id}/${b.beat_id}" alt="${b.beat_id}"
            loading="lazy">
-      <figcaption class="${b.image_provider === 'placeholder' ? 'ph' : ''}">
-        ${b.beat_id} ${b.image_provider === "placeholder" ? "placeholder" : ""}
+      <figcaption class="${b.clips.some((c) => c.provider !== 'pexels') ? 'ph' : ''}">
+        ${b.beat_id} ${b.clips.length} clip${b.clips.length === 1 ? '' : 's'}
+        ${b.clips.every((c) => c.provider === 'pexels') ? '' : '· fallback'}
       </figcaption>
     </figure>`).join("");
   show("s-images");
