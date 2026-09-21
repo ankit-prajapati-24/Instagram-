@@ -13,8 +13,10 @@ There is no publish route. Payload builders are exposed for copy-out only.
 from __future__ import annotations
 
 import json
+import os
 import queue
 import subprocess
+import tempfile
 import threading
 import time
 import traceback
@@ -47,23 +49,60 @@ def _poster_path(clip_path: Path) -> Path:
     return clip_path.with_name(clip_path.name + ".poster.jpg")
 
 
+def _under_roots(path: Path, roots: list[Path]) -> bool:
+    """Is ``path`` (resolved) inside one of ``roots``? Mirrors ``/media``'s
+    own containment check (``root not in target.parents``), generalised to
+    more than one allowed root: a beat's clip lives under ``work_dir`` and
+    its legacy still can live under either ``work_dir`` or ``out_dir``."""
+    resolved = path.resolve()
+    return any(root.resolve() in resolved.parents for root in roots)
+
+
 def _extract_poster(clip_path: Path, poster_path: Path,
                     settings: Settings) -> None:
     """Grab a single frame from ``clip_path`` and write it to ``poster_path``.
 
+    Extraction lands in a private temp file next to the cache path first and
+    is renamed onto ``poster_path`` only once ffmpeg exits 0 *and* the file
+    it wrote is non-empty. Without this, an ffmpeg that exits 0 but writes a
+    truncated/undecodable jpg (or that exits non-zero after already writing
+    a partial file, plausible with ``-y`` plus a mid-stream decode failure)
+    would leave something sitting at the cache path -- and because the route
+    only re-extracts when the cache path is *absent*, that corrupt leftover
+    would then be served, unchanged, to every request after the first.
+
     Same subprocess shape as ``engine.media.piper_voice``: run, check the
-    return code and the output file, and raise with ffmpeg's own stderr
-    rather than swallowing the failure.
+    return code and the output, and raise with ffmpeg's own stderr rather
+    than swallowing the failure.
     """
-    result = subprocess.run(
-        [settings.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-         "-i", str(clip_path), "-frames:v", "1", "-q:v", "3",
-         str(poster_path)],
-        capture_output=True)
-    if result.returncode != 0 or not poster_path.is_file():
-        detail = result.stderr.decode("utf-8", "replace")[-300:]
-        raise RuntimeError(
-            f"ffmpeg could not extract a frame from {clip_path}: {detail}")
+    poster_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw_tmp = tempfile.mkstemp(prefix=poster_path.name + ".",
+                                   suffix=".tmp",
+                                   dir=str(poster_path.parent))
+    os.close(fd)
+    tmp_path = Path(raw_tmp)
+    try:
+        result = subprocess.run(
+            [settings.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+             "-i", str(clip_path), "-frames:v", "1", "-q:v", "3",
+             # ffmpeg otherwise picks the muxer from the output filename's
+             # extension, and the temp file's real extension is ".tmp" (it
+             # ends in ".jpg.<random>.tmp", not ".jpg") -- explicit -f
+             # mjpeg makes that independent of the temp name's shape.
+             "-f", "mjpeg", str(tmp_path)],
+            capture_output=True)
+        if (result.returncode != 0 or not tmp_path.is_file()
+                or tmp_path.stat().st_size == 0):
+            detail = result.stderr.decode("utf-8", "replace")[-300:]
+            raise RuntimeError(
+                f"ffmpeg could not extract a frame from {clip_path}: "
+                f"{detail}")
+        os.replace(tmp_path, poster_path)
+    finally:
+        # A no-op once os.replace has moved it away; cleans up after a
+        # failure, which is exactly when something would otherwise be left
+        # behind at a path other than poster_path.
+        tmp_path.unlink(missing_ok=True)
 
 
 class PlanRequest(BaseModel):
@@ -428,9 +467,17 @@ def create_app(db_path: str | Path | None = None,
         A beat's visual is now ``beat.clips`` (Pexels footage, or a still
         wrapped as a Clip when sourcing fell back). A video clip can't be
         put in an <img> directly, so it gets a poster frame extracted with
-        ffmpeg and cached next to the clip. Beats saved before clips
-        existed have no ``clips`` at all, so those still fall back to the
-        legacy ``beat.image_path``.
+        ffmpeg and cached next to the clip, re-extracted if the clip file
+        has been overwritten more recently than the cached poster (a
+        re-produce of the same plan reuses the same filename in place).
+        Beats saved before clips existed have no ``clips`` at all, so those
+        still fall back to the legacy ``beat.image_path``.
+
+        Every path here is server-controlled today (deterministic filenames
+        under ``work_dir``, no API lets a caller set a beat's clip/image
+        path), but it is still keyed by URL input and read from disk, so it
+        gets the same containment check as ``/media``: nothing outside
+        ``work_dir``/``out_dir`` is ever served or written to.
         """
         plan = store.get_plan(plan_id)
         if plan is None:
@@ -440,14 +487,20 @@ def create_app(db_path: str | Path | None = None,
         if beat is None:
             raise HTTPException(404, f"no such beat: {beat_id}")
 
+        roots = [Path(settings.work_dir), Path(settings.out_dir)]
+
         for clip in beat.clips:
             clip_path = Path(clip.path)
-            if not clip_path.is_file():
+            if not clip_path.is_file() or not _under_roots(clip_path, roots):
                 continue
             if clip_path.suffix.lower() not in VIDEO_SUFFIXES:
                 return FileResponse(clip_path)
             poster_path = _poster_path(clip_path)
-            if not poster_path.is_file():
+            if not _under_roots(poster_path, roots):
+                continue
+            stale = (poster_path.is_file() and poster_path.stat().st_mtime
+                     < clip_path.stat().st_mtime)
+            if not poster_path.is_file() or stale:
                 try:
                     _extract_poster(clip_path, poster_path, settings)
                 except RuntimeError:
@@ -457,7 +510,7 @@ def create_app(db_path: str | Path | None = None,
 
         if beat.image_path:
             path = Path(beat.image_path)
-            if path.is_file():
+            if path.is_file() and _under_roots(path, roots):
                 return FileResponse(path)
 
         raise HTTPException(

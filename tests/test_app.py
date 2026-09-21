@@ -1,6 +1,7 @@
 import base64
 import inspect
 import io
+import os
 import subprocess
 from pathlib import Path
 
@@ -51,6 +52,20 @@ def _make_test_video(path: Path, ffmpeg: str) -> None:
          "yuv420p", "-y", str(path)], capture_output=True)
     assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
     assert path.is_file()
+
+
+def _under_work(client, name: str) -> Path:
+    """A path under this client's settings.work_dir.
+
+    The frame route only serves/writes files contained under work_dir or
+    out_dir (mirroring /media's containment check), so any file a test
+    wants the route to treat as legitimate has to live there rather than
+    at a bare tmp_path.
+    """
+    settings: Settings = client.app.state.settings
+    path = Path(settings.work_dir) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 @pytest.fixture()
@@ -346,8 +361,8 @@ def test_the_panel_reports_clip_providers(client):
 # -- frame route --------------------------------------------------------
 
 
-def test_frame_serves_an_image_clip_directly(client, tmp_path):
-    image = tmp_path / "still.png"
+def test_frame_serves_an_image_clip_directly(client):
+    image = _under_work(client, "still.png")
     image.write_bytes(PNG_1x1)
     _seed_with_visual(client, clips=[_clip(image)])
 
@@ -357,10 +372,10 @@ def test_frame_serves_an_image_clip_directly(client, tmp_path):
     assert response.content == PNG_1x1
 
 
-def test_frame_extracts_a_poster_from_a_video_clip(client, tmp_path):
+def test_frame_extracts_a_poster_from_a_video_clip(client):
     settings: Settings = client.app.state.settings
     _skip_without_ffmpeg(settings)
-    video = tmp_path / "clip.mp4"
+    video = _under_work(client, "clip.mp4")
     _make_test_video(video, settings.ffmpeg)
     _seed_with_visual(client, clips=[_clip(video)])
 
@@ -377,10 +392,10 @@ def test_frame_extracts_a_poster_from_a_video_clip(client, tmp_path):
 
 
 def test_frame_reuses_the_cached_poster_instead_of_re_extracting(
-        client, tmp_path, monkeypatch):
+        client, monkeypatch):
     settings: Settings = client.app.state.settings
     _skip_without_ffmpeg(settings)
-    video = tmp_path / "clip.mp4"
+    video = _under_work(client, "clip.mp4")
     _make_test_video(video, settings.ffmpeg)
     _seed_with_visual(client, clips=[_clip(video)])
 
@@ -398,9 +413,9 @@ def test_frame_reuses_the_cached_poster_instead_of_re_extracting(
     assert second.content == first.content
 
 
-def test_frame_falls_back_to_the_legacy_image_path(client, tmp_path):
+def test_frame_falls_back_to_the_legacy_image_path(client):
     """Plans stored before clips existed still show a thumbnail."""
-    image = tmp_path / "legacy.png"
+    image = _under_work(client, "legacy.png")
     image.write_bytes(PNG_1x1)
     _seed_with_visual(client, clips=[], image_path=str(image))
 
@@ -411,11 +426,11 @@ def test_frame_falls_back_to_the_legacy_image_path(client, tmp_path):
 
 
 def test_frame_prefers_an_existing_clip_over_stale_ones_and_the_legacy_image(
-        client, tmp_path):
-    missing = tmp_path / "gone.mp4"  # never written to disk
-    used = tmp_path / "second.png"
+        client):
+    missing = _under_work(client, "gone.mp4")  # never written to disk
+    used = _under_work(client, "second.png")
     used.write_bytes(PNG_1x1)
-    legacy = tmp_path / "legacy.jpg"
+    legacy = _under_work(client, "legacy.jpg")
     legacy.write_bytes(b"not the file that should be served")
     _seed_with_visual(client, clips=[_clip(missing), _clip(used)],
                       image_path=str(legacy))
@@ -435,3 +450,131 @@ def test_frame_404s_naming_which_case_it_hit(client):
     detail = response.json()["detail"].lower()
     assert "clip" in detail
     assert "image" in detail
+
+
+# -- frame route: cache poisoning (round-1 review finding (a)) ----------
+
+
+def test_frame_leaves_no_cache_file_and_retries_after_a_nonzero_ffmpeg_exit(
+        client, monkeypatch):
+    """ffmpeg exiting non-zero must not leave anything at the cache path,
+    or the next request would see "cache present" and serve a corrupt or
+    truncated leftover forever instead of retrying."""
+    video = _under_work(client, "clip.mp4")
+    video.write_bytes(b"stand-in bytes; the fake ffmpeg below never reads "
+                      b"them, only is_file() sees this clip exists")
+    _seed_with_visual(client, clips=[_clip(video)])
+    poster = video.with_name(video.name + ".poster.jpg")
+
+    calls = {"n": 0}
+
+    def _fails(cmd, **kwargs):
+        calls["n"] += 1
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout=b"",
+                                           stderr=b"decode error")
+    monkeypatch.setattr("engine.app.subprocess.run", _fails)
+
+    first = client.get("/api/frame/p1/b0")
+    assert first.status_code == 404
+    assert not poster.exists()
+    assert calls["n"] == 1
+
+    second = client.get("/api/frame/p1/b0")
+    assert second.status_code == 404
+    assert not poster.exists()
+    assert calls["n"] == 2, "a failed extraction must be retried, not cached"
+
+
+def test_frame_leaves_no_cache_file_and_retries_after_an_empty_ffmpeg_output(
+        client, monkeypatch):
+    """ffmpeg can exit 0 while writing a malformed/undecodable jpg (an empty
+    file stands in for that here). The size check must catch it, and -- like
+    the non-zero case -- nothing may be left at the cache path."""
+    video = _under_work(client, "clip.mp4")
+    video.write_bytes(b"stand-in bytes; existence is all is_file() checks")
+    _seed_with_visual(client, clips=[_clip(video)])
+    poster = video.with_name(video.name + ".poster.jpg")
+
+    calls = {"n": 0}
+
+    def _writes_empty(cmd, **kwargs):
+        calls["n"] += 1
+        # The output path is ffmpeg's last argument, a temp file the route
+        # created -- write it, but empty, the way an ffmpeg that "succeeded"
+        # without decoding a frame would.
+        Path(cmd[-1]).write_bytes(b"")
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=b"",
+                                           stderr=b"")
+    monkeypatch.setattr("engine.app.subprocess.run", _writes_empty)
+
+    first = client.get("/api/frame/p1/b0")
+    assert first.status_code == 404
+    assert not poster.exists()
+    assert calls["n"] == 1
+
+    second = client.get("/api/frame/p1/b0")
+    assert second.status_code == 404
+    assert not poster.exists()
+    assert calls["n"] == 2, "an empty extraction must be retried, not cached"
+
+
+# -- frame route: path containment (round-1 review finding (b)) ---------
+
+
+def test_frame_route_refuses_a_clip_outside_work_and_out_dirs(
+        client, tmp_path):
+    """Not reachable today (no API lets a caller set a beat's clip path),
+    but the route reads from disk keyed by URL input, so it gets the same
+    containment check /media has, mirroring test_media_route_refuses_path_
+    traversal."""
+    outside = tmp_path / "outside.png"  # sibling of settings.work_dir/out_dir
+    outside.write_bytes(PNG_1x1)
+    _seed_with_visual(client, clips=[_clip(outside)])
+
+    response = client.get("/api/frame/p1/b0")
+
+    assert response.status_code == 404
+
+
+def test_frame_route_refuses_a_legacy_image_path_outside_work_and_out_dirs(
+        client, tmp_path):
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(PNG_1x1)
+    _seed_with_visual(client, clips=[], image_path=str(outside))
+
+    response = client.get("/api/frame/p1/b0")
+
+    assert response.status_code == 404
+
+
+# -- frame route: stale poster after a re-produce (round-1 finding (c)) -
+
+
+def test_frame_re_extracts_when_the_clip_is_newer_than_the_cached_poster(
+        client):
+    """A re-produce of the same plan overwrites clip_00.mp4 in place with
+    a newer mtime (generate_plan_clips does mkdir(exist_ok=True), no
+    clearing, deterministic filenames). The stale poster next to it must
+    not be served forever -- it must be re-extracted."""
+    settings: Settings = client.app.state.settings
+    _skip_without_ffmpeg(settings)
+    video = _under_work(client, "clip.mp4")
+    _make_test_video(video, settings.ffmpeg)
+    _seed_with_visual(client, clips=[_clip(video)])
+
+    first = client.get("/api/frame/p1/b0")
+    assert first.status_code == 200
+    poster = video.with_name(video.name + ".poster.jpg")
+    assert poster.is_file()
+    stale_mtime = poster.stat().st_mtime
+
+    # Simulate the re-produce: the clip is overwritten in place and its
+    # mtime moves forward, while the cached poster is left where it was.
+    future = stale_mtime + 120
+    os.utime(video, (future, future))
+
+    second = client.get("/api/frame/p1/b0")
+
+    assert second.status_code == 200
+    assert poster.stat().st_mtime > stale_mtime, (
+        "the poster must be re-extracted when the clip is newer than it")
