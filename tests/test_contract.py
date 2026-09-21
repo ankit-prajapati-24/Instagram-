@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from engine.contract import Beat, Hook, ReelPlan, Script, Topic
+from engine.contract import Beat, Clip, Hook, ReelPlan, Script, Topic
 
 
 def test_topic_make_normalises_slug_and_hashes():
@@ -161,3 +161,36 @@ def test_truncation_is_deterministic_so_dedup_still_works():
 def test_a_short_topic_is_untouched():
     assert Topic.make("Kuldhara gaon khaali kyun hua").slug == \
         "kuldhara-gaon-khaali-kyun-hua"
+
+
+def test_clip_requires_only_the_four_render_critical_fields():
+    clip = Clip(path="c.mp4", query="dark forest fog", provider="pexels",
+                duration=2.5)
+    assert clip.source_url is None
+    assert clip.pexels_id is None
+    assert clip.licence is None
+
+
+def test_clip_coerces_a_string_duration():
+    """The agent's JSON round-trip can hand back "2.5s"."""
+    clip = Clip(path="c.mp4", query="q", provider="pexels", duration="2.5s")
+    assert clip.duration == 2.5
+
+
+def test_beat_starts_with_no_clips():
+    beat = Beat(beat_id="b1", role="hook", voice_text="क",
+                caption_text="k", target_seconds=3.0,
+                visual_prompt="p", motion="zoom_in", transition="fade")
+    assert beat.clips == []
+
+
+def test_beat_carries_clips():
+    beat = Beat(beat_id="b1", role="hook", voice_text="क",
+                caption_text="k", target_seconds=3.0,
+                visual_prompt="p", motion="zoom_in", transition="fade",
+                clips=[{"path": "a.mp4", "query": "q", "provider": "pexels",
+                        "duration": 1.5},
+                       {"path": "b.mp4", "query": "q2", "provider": "pexels",
+                        "duration": 1.5}])
+    assert len(beat.clips) == 2
+    assert beat.clips[0].path == "a.mp4"

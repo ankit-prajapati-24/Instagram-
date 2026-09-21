@@ -85,6 +85,24 @@ class WordTiming(BaseModel):
     end: float
 
 
+class Clip(Coercing):
+    """One stock-footage slot inside a beat.
+
+    ``duration`` is the slot this clip fills on the narration timeline, not
+    the length of the source file. Source footage is trimmed or looped to
+    match; its own length never moves the timeline.
+    """
+
+    path: str
+    query: str
+    provider: str
+    duration: float
+    source_url: str | None = None
+    pexels_id: int | None = None
+    author: str | None = None
+    licence: str | None = None
+
+
 class Topic(Coercing):
     raw: str
     slug: str
@@ -129,6 +147,9 @@ class Beat(Coercing):
     measured_seconds: float | None = None
     # Caption-aligned timings (Roman), not the Devanagari narration's.
     words: list[WordTiming] = Field(default_factory=list)
+    # Stock footage filling this beat's span. Empty means the render falls
+    # back to image_path for the whole beat.
+    clips: list[Clip] = Field(default_factory=list)
     # How many boundary spans the TTS service reported, for diagnostics.
     spoken_words: int | None = None
 
