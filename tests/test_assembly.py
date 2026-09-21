@@ -391,23 +391,55 @@ def test_total_runtime_still_equals_the_narration():
         sum(b.seconds() for b in plan.script.beats), abs=1e-6)
 
 
+def _segment_spans(graph, fps=30):
+    """Every segment's on-screen span, whichever branch encoded it.
+
+    A video slot carries its span in `trim=duration=`; a still carries it
+    as zoompan's `d=`, a whole number of output frames. Reading only one of
+    them makes a mis-scaled still invisible.
+    """
+    import re
+    spans = []
+    for part in graph.split(";"):
+        trimmed = re.search(r"trim=duration=([\d.]+)", part)
+        if trimmed:
+            spans.append(float(trimmed.group(1)))
+            continue
+        held = re.search(r":d=(\d+):", part)
+        if held:
+            spans.append(int(held.group(1)) / fps)
+    return spans
+
+
 def test_clip_spans_fill_their_beat_segment_exactly():
     """The clips of a beat must cover the padded segment, not the raw span.
 
     `lengths[i]` includes the half-overlap padding on each side that has a
     transition; laying the stored narration slots down directly would leave
     the picture short by exactly the drift segment_lengths exists to remove.
+
+    Beat 1 mixes footage with a fallback still on purpose. That is the
+    common production shape, not a corner case: generate_plan_clips fills
+    any slot Pexels could not supply with a `<beat_id>-<slot>.png` still,
+    so a still sits beside video in the same beat whenever the provider
+    under-delivers -- and the two branches encode their span differently.
     """
-    import re
     plan = _clipped(make_plan(beats=3), per_beat=2)
+    plan.script.beats[1].clips[0].path = "fallback.png"
+    plan.script.beats[1].clips[0].provider = "placeholder"
     lengths, _, _ = segment_lengths([b.seconds() for b in plan.script.beats],
                                     0.5)
     graph, _, _ = build_filter_graph(plan, audio_offset=len(plan_inputs(plan)))
-    spans = [float(v) for v in re.findall(r"trim=duration=([\d.]+)", graph)]
-    assert len(spans) == 6
+    assert graph.count("zoompan") == 1, "beat 1 slot 0 must take the still"
+
+    spans = _segment_spans(graph)
+    assert len(spans) == 6, "every clip contributes exactly one segment"
     for index, length in enumerate(lengths):
+        # A still's span is quantised to whole frames by zoompan, hence a
+        # frame of tolerance; either branch being handed the stored slot or
+        # the whole beat segment is off by far more than that.
         assert sum(spans[index * 2:index * 2 + 2]) == pytest.approx(
-            length, abs=2e-3)
+            length, abs=1.0 / 30)
 
 
 def test_a_clip_segment_is_handed_to_xfade_at_a_constant_rate():
@@ -435,17 +467,35 @@ def test_a_beat_with_no_clips_still_renders_from_its_image():
 
 
 def test_command_feeds_one_input_per_clip_and_offsets_the_audio():
-    """audio_offset is the total input count once beats hold several clips."""
+    """audio_offset and music_index count inputs, not beats.
+
+    Every other music test uses a plan with no clips, where one input per
+    beat makes the old `len(beats) * 2` accidentally right. Six clips and
+    three beats is where the two disagree.
+    """
+    import tempfile
     from pathlib import Path
     from engine.assembly.render import build_command
     from engine.config import Settings
-    plan = _clipped(_timed_plan(beats=3, measured=4.0), per_beat=2)
-    for i, beat in enumerate(plan.script.beats):
-        beat.audio_path = f"C:/tmp/a{i}.mp3"
-    command, _, _ = build_command(plan, Settings(), Path("C:/tmp/out.mp4"))
-    inputs = [command[i + 1] for i, arg in enumerate(command) if arg == "-i"]
-    assert len(inputs) == 9
-    assert [Path(p).name for p in inputs[6:]] == ["a0.mp3", "a1.mp3",
-                                                  "a2.mp3"]
-    graph = command[command.index("-filter_complex") + 1]
-    assert "[6:a][7:a][8:a]concat=n=3" in graph
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as handle:
+        handle.write(b"x")
+        music = handle.name
+    try:
+        plan = _clipped(_timed_plan(beats=3, measured=4.0), per_beat=2)
+        for i, beat in enumerate(plan.script.beats):
+            beat.audio_path = f"C:/tmp/a{i}.mp3"
+        command, _, _ = build_command(plan, Settings(),
+                                      Path("C:/tmp/out.mp4"),
+                                      music_path=music)
+        inputs = [command[i + 1] for i, arg in enumerate(command)
+                  if arg == "-i"]
+        assert len(inputs) == 10          # 6 clips + 3 narration + 1 music
+        assert [Path(p).name for p in inputs[6:9]] == ["a0.mp3", "a1.mp3",
+                                                       "a2.mp3"]
+        assert Path(inputs[9]).name == Path(music).name
+        graph = command[command.index("-filter_complex") + 1]
+        assert "[6:a][7:a][8:a]concat=n=3" in graph
+        # len(beats) * 2 would be input 6 -- the first narration stream.
+        assert "[9:a]volume=" in graph
+    finally:
+        Path(music).unlink()

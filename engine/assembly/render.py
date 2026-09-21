@@ -196,8 +196,9 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
     # Beats own the timeline; clips subdivide the span a beat already holds.
     # `lengths[i]` is the beat's segment *including* its half-overlap
     # padding, so the clip slots are scaled into it proportionally rather
-    # than using their stored durations directly — the stored values are the
-    # narration-timeline slots, which is what the invariant is asserted on.
+    # than used directly — the stored durations are the narration-timeline
+    # slots, which is what the timeline invariant is asserted on, and they
+    # must come back out of here untouched.
     inputs = plan_inputs(plan)
     beat_labels: list[str] = []
     cursor = 0
@@ -206,15 +207,28 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
               f"crop={width}:{height},setsar=1")
 
     for beat_index, beat in enumerate(beats):
-        slots = ([clip.duration for clip in beat.clips]
-                 if beat.clips else [durations[beat_index]])
+        slots = [clip.duration for clip in beat.clips]
         slot_total = sum(slots)
-        scale_factor = lengths[beat_index] / slot_total if slot_total else 1.0
+        if not slots:
+            # No clips: one segment, handed `lengths[i]` verbatim rather
+            # than through a scale factor that round-trips it. A one-ulp
+            # difference is a whole frame to zoompan, which rounds
+            # `span * fps`, whenever that product lands on a .5 tie — and
+            # it does at this repo's own defaults: a 4.4s beat with a 0.5s
+            # transition gives 4.65 * 30 = 139.5 exactly.
+            spans = [lengths[beat_index]]
+        elif slot_total:
+            spans = [slot * lengths[beat_index] / slot_total
+                     for slot in slots]
+        else:
+            # Degenerate: clips exist but no slot claims any time. Share
+            # the segment out evenly rather than emit zero-length
+            # segments, which are empty streams ffmpeg fails on obscurely.
+            spans = [lengths[beat_index] / len(slots)] * len(slots)
         clip_labels: list[str] = []
 
-        for slot in slots:
+        for span in spans:
             _path, is_video = inputs[cursor]
-            span = slot * scale_factor
             # A one-clip beat keeps the old label, so a plan with no clips
             # still comes out of here as v0, v1, ... exactly as before.
             label = f"v{cursor}"
