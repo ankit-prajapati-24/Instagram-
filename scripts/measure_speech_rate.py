@@ -23,6 +23,15 @@ from engine.config import Settings  # noqa: E402
 from engine.media.voice import probe_duration  # noqa: E402
 
 # Short, medium and long lines, so the rate is not measured on one shape.
+#
+# The second block is not decoration. This sample used to be clean
+# conversational Hindi only, and it measured 2.94 w/s while real scripts ran
+# at 2.29 -- so the configured rate was set 32% high and the script agent was
+# handed a budget a third larger than the window could hold. The difference
+# is entirely numerals, dates and acronyms: "१९६५" is one word that Piper
+# says as "unnees sau painsath", and every script about a real event is full
+# of them. Keep both blocks, and keep their proportions roughly like a real
+# script's, or this tool will overstate the voice again.
 SAMPLES = [
     "तीन साल पहले इसी जगह पर एक आदमी गायब हो गया।",
     "सीसीटीवी में वो अंदर जाता दिखता है लेकिन बाहर आता कभी नहीं।",
@@ -30,6 +39,12 @@ SAMPLES = [
     "और हर रात ठीक दो बजकर चौदह मिनट पर उस नंबर से एक मैसेज आता है "
     "जो कोई नहीं भेजता।",
     "तुम्हें क्या लगता है कौन भेज रहा है और क्यों।",
+    # Dates, figures and technical terms: slow per word, common in scripts.
+    "अक्टूबर १९६५। भयंकर बर्फीला तूफान आया।",
+    "१९४२ में एक फ़ॉरेस्ट रेंजर ने इन्हें पहली बार देखा।",
+    "समुद्र तल से १६,००० फुट ऊपर।",
+    "डीएनए सीक्वेंसिंग रिपोर्ट २००४ में आई।",
+    "सीबीआई ने केस नंबर ३४७ बंद कर दिया।",
 ]
 
 

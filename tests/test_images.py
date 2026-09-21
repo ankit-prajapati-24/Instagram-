@@ -297,17 +297,56 @@ def test_keyless_retries_on_a_network_error_too(monkeypatch):
     assert calls["n"] == 2
 
 
+# --- the word budget has to match the voice that speaks it -----------------
+# The first fully real run: 152 Devanagari words of script came out as 66.5s
+# of Piper audio -- 2.29 words/sec, against a configured 3.03. The budget is
+# target_seconds * words_per_second, so a rate set 32% high asks for a third
+# more words than the voice can say inside the window, and the over-length is
+# only discovered after the render.
+#
+# scripts/measure_speech_rate.py reports ~2.94 w/s, but its five sample lines
+# carry no numerals, no dates and no acronyms. "1965" is one word and eleven
+# syllables; real scripts are full of them, and the per-beat rates on the
+# failing run ran from 1.17 to 2.83 w/s. The production number is the honest
+# one.
+MEASURED_WORDS_PER_SEC = 2.29
+
+
+def test_the_word_budget_fits_the_window_at_the_measured_speech_rate():
+    from tests.factories import shipped_settings
+
+    settings = shipped_settings()
+    budget = settings.target_seconds * settings.words_per_second
+    spoken = budget / MEASURED_WORDS_PER_SEC
+    assert settings.duration_min <= spoken <= settings.duration_max, (
+        f"a {budget:.0f}-word budget speaks for {spoken:.1f}s at the "
+        f"measured {MEASURED_WORDS_PER_SEC} w/s")
+
+
+def test_the_budget_holds_at_both_ends_of_the_drift_tolerance():
+    """run_script accepts +/-15% around the budget, so both ends must land
+    inside the duration window too -- otherwise a script the agent passes is
+    a video QC rejects."""
+    from tests.factories import shipped_settings
+
+    settings = shipped_settings()
+    budget = settings.target_seconds * settings.words_per_second
+    for drift in (-0.15, 0.15):
+        spoken = budget * (1 + drift) / MEASURED_WORDS_PER_SEC
+        assert settings.duration_min <= spoken <= settings.duration_max, (
+            f"{drift:+.0%} off budget speaks for {spoken:.1f}s")
+
+
 # --- the sample script is a fixture the offline harness depends on ---------
 # It drifted out of range once: written for edge-tts's slower pace, it made a
 # 34.7s video once Piper became the engine, and verify_e2e.py failed on the
 # duration gate every run.
 
 def test_sample_script_hits_the_word_budget():
-    import statistics
-    from engine.config import Settings
     from engine.fake_client import SAMPLE_BEATS
+    from tests.factories import shipped_settings
 
-    settings = Settings()
+    settings = shipped_settings()
     budget = settings.target_seconds * settings.words_per_second
     words = sum(len(beat[1].split()) for beat in SAMPLE_BEATS)
 
@@ -318,10 +357,10 @@ def test_sample_script_hits_the_word_budget():
 
 
 def test_sample_script_predicts_a_duration_inside_the_qc_window():
-    from engine.config import Settings
     from engine.fake_client import SAMPLE_BEATS
+    from tests.factories import shipped_settings
 
-    settings = Settings()
+    settings = shipped_settings()
     words = sum(len(beat[1].split()) for beat in SAMPLE_BEATS)
     predicted = words / settings.words_per_second
     assert settings.duration_min <= predicted <= settings.duration_max

@@ -208,6 +208,13 @@ def test_prompts_declare_their_stage_marker():
 # A 176-word script against a 136 budget rendered at 99.7s and was rejected
 # by QC on duration - after a ten-minute render. One extra call here is far
 # cheaper than that.
+#
+# BUDGET is deliberately not the configured one. These tests are about the
+# +/-15% check firing and what it says, not about what the budget currently
+# is: they were pinned to 136, and re-measuring the voice broke every one of
+# them for no reason. The configured value has its own tests, in
+# tests/test_images.py, against the rate the voice was measured at.
+BUDGET = 120
 
 def _script_payload(beats_words):
     return {"script": {"total_seconds": 45.0, "chosen_hook": "h1", "beats": [
@@ -223,20 +230,22 @@ def test_an_overlong_script_is_sent_back_once_and_then_accepted():
     from engine.agents import run_script
     from engine.contract import Provenance, Topic
 
-    over = _script_payload([20] * 9)      # 180 words
-    good = _script_payload([12] * 11)     # 132 words
-    client = Replaying(over, good)
+    over_words, good_words = [20] * 9, [12] * 11   # 180 and 132
+    assert sum(over_words) > BUDGET * 1.15         # rejected
+    assert abs(sum(good_words) - BUDGET) < BUDGET * 0.15   # accepted
+    client = Replaying(_script_payload(over_words),
+                       _script_payload(good_words))
 
     script, _ = run_script(client, Topic.make("x"), Provenance(), None,
-                           word_target=136)
+                           word_target=BUDGET)
     words = sum(len(b.voice_text.split()) for b in script.beats)
-    assert words == 132
+    assert words == sum(good_words)
     assert len(client.seen) == 2
 
     repair = client.seen[1][-1]["content"]
     assert "too long" in repair
-    assert "180 spoken words" in repair
-    assert "136" in repair
+    assert f"{sum(over_words)} spoken words" in repair
+    assert str(BUDGET) in repair
 
 
 def test_a_short_script_is_told_to_lengthen():
@@ -244,8 +253,10 @@ def test_a_short_script_is_told_to_lengthen():
     from engine.contract import Provenance, Topic
 
     short = _script_payload([5] * 9)      # 45 words
+    assert sum([5] * 9) < BUDGET * 0.85
     client = Replaying(short, _script_payload([12] * 11))
-    run_script(client, Topic.make("x"), Provenance(), None, word_target=136)
+    run_script(client, Topic.make("x"), Provenance(), None,
+               word_target=BUDGET)
     repair = client.seen[1][-1]["content"]
     assert "too short" in repair
     assert "lengthen" in repair
@@ -255,8 +266,11 @@ def test_a_script_inside_the_tolerance_is_accepted_first_time():
     from engine.agents import run_script
     from engine.contract import Provenance, Topic
 
-    client = Replaying(_script_payload([12] * 12))   # 144, within 15%
-    run_script(client, Topic.make("x"), Provenance(), None, word_target=136)
+    inside = [11] * 11                               # 121, within 15%
+    assert abs(sum(inside) - BUDGET) < BUDGET * 0.15
+    client = Replaying(_script_payload(inside))
+    run_script(client, Topic.make("x"), Provenance(), None,
+               word_target=BUDGET)
     assert len(client.seen) == 1
 
 
@@ -268,4 +282,4 @@ def test_two_off_budget_scripts_in_a_row_still_raise():
     client = Replaying(over, over)
     with pytest.raises(AgentError):
         run_script(client, Topic.make("x"), Provenance(), None,
-                   word_target=136)
+                   word_target=BUDGET)

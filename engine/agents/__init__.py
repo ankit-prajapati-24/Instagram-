@@ -146,8 +146,13 @@ def run_hooks(client, topic: Topic, provenance: Provenance, *,
 
 def run_script(client, topic: Topic, provenance: Provenance,
                hook: Hook | None, *, model: str | None = None,
-               word_target: int = 136, beats: int = 12):
+               word_target: int = 103, beats: int = 12):
     """``word_target`` is derived from the voice engine's measured rate.
+
+    The default is only a floor for direct callers: ``plan_stage`` always
+    passes ``target_seconds * words_per_second``. It said 136 for a while
+    after that product became 103, which is the same stale-number problem
+    the budget exists to prevent.
 
     Duration follows from word count, so the prompt is told the budget
     rather than a beat range it can satisfy at any length.

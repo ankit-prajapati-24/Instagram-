@@ -13,6 +13,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from engine.gates.qc import DURATION_MAX, DURATION_MIN
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
@@ -135,17 +137,34 @@ class Settings:
     fps: int = 30
     transition_duration: float = 0.5
     target_seconds: float = 45.0
-    # Measured for Piper pratham at length_scale 1.12: 3.03 words/sec across
-    # 9-, 12- and 20-word Hindi lines. The script prompt is given a word
-    # budget derived from this, because word count is what actually decides
-    # runtime — asking for "9-13 beats" let the model write 54 words (18s) or
-    # 182 (60s) and still satisfy the instruction.
-    # Re-measure with scripts/measure_speech_rate.py if the engine changes.
+    # Measured on the first fully real run of this pipeline: 152 Devanagari
+    # words came out as 66.5s of Piper audio (pratham, length_scale 1.12),
+    # i.e. 2.29 words/sec. The script prompt is given a word budget derived
+    # from this, because word count is what actually decides runtime —
+    # asking for "9-13 beats" let the model write 54 words (18s) or 182
+    # (60s) and still satisfy the instruction.
+    #
+    # It was 3.03 before, which is what scripts/measure_speech_rate.py still
+    # reports (2.94 here) — and that script is why the number was wrong. Its
+    # five sample lines are clean conversational Hindi with no numerals, no
+    # dates and no acronyms. Piper says "1965" as "unnees sau painsath":
+    # one word, eleven syllables. A line like
+    # "अक्टूबर १९६५। भयंकर बर्फीला तूफान आया।" is six words in 5.1 seconds,
+    # 1.18 w/s, and real scripts about real events are full of them. The
+    # same measurement over the twelve-beat sample script gives 2.60 w/s and
+    # over numeral-carrying lines 1.83 w/s; 2.29 is where production landed
+    # between them.
+    #
+    # Re-measure with scripts/measure_speech_rate.py if the engine changes,
+    # but treat what it prints as a ceiling, not the answer.
     words_per_second: float = field(
         default_factory=lambda: float(
-            os.getenv("RAHASYA_WORDS_PER_SEC", "3.03")))
-    duration_min: float = 38.0
-    duration_max: float = 52.0
+            os.getenv("RAHASYA_WORDS_PER_SEC", "2.29")))
+    # The one duration window: QC scores the rendered file against it and
+    # the length gate scores the narration against it before the clip stage
+    # runs. Defined in engine.gates.qc so there is only ever one pair.
+    duration_min: float = DURATION_MIN
+    duration_max: float = DURATION_MAX
     # One grade over every frame, so twenty-odd Pexels clips from as many
     # different creators read as one video rather than a template. Mirrors
     # voice_process: on by default, off with RAHASYA_VIDEO_GRADE=0. Turning

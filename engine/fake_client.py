@@ -20,14 +20,16 @@ from engine.omniroute import ChatResult, CostRecord, ModerationResult
 # reversal, and a loop-closing final line.
 #
 # Two properties matter beyond the story:
-#   * it hits the word budget (~136 spoken words), because runtime follows
-#     word count and the offline harness checks the rendered duration;
+#   * it hits the word budget (~113 spoken words), because runtime follows
+#     word count and the offline harness checks the rendered duration. It was
+#     136 while words_per_second was set to 3.03; Piper actually speaks 2.29,
+#     so the same script was a 59s video against a 38-52s window;
 #   * sentence lengths vary hard, from three words to twenty. An even rhythm
 #     is the clearest AI tell there is, and the QC scorecard warns on it.
 SAMPLE_BEATS = [
     ("hook",
-     "पाँच सौ कंकाल, एक ही जमी हुई झील, और आज तक एक भी पक्का जवाब नहीं।",
-     "500 kankaal. Ek jami hui jheel. Aaj tak ek bhi pakka jawaab nahi.",
+     "पाँच सौ कंकाल, एक जमी हुई झील, और एक भी पक्का जवाब नहीं।",
+     "500 kankaal. Ek jami hui jheel. Ek bhi pakka jawaab nahi.",
      "500 KANKAAL",
      "frozen high-altitude lake at dawn, scattered pale bones under clear "
      "ice, himalayan peaks behind, mist"),
@@ -38,44 +40,40 @@ SAMPLE_BEATS = [
      "vast himalayan basin, tiny glacial lake far below, scale of emptiness, "
      "cold blue light"),
     ("setup",
-     "उन्नीस सौ बयालीस में एक फ़ॉरेस्ट रेंजर ने बर्फ़ पिघलने के बाद इन्हें "
-     "पहली बार देखा।",
-     "1942 mein ek forest ranger ne barf pighalne ke baad inhe pehli baar "
-     "dekha.",
+     "उन्नीस सौ बयालीस में एक फ़ॉरेस्ट रेंजर ने इन्हें पहली बार देखा।",
+     "1942 mein ek forest ranger ne inhe pehli baar dekha.",
      None,
      "1940s indian forest ranger silhouette at a lake edge, oil lamp, "
      "archival grain, back to camera"),
     ("escalation",
-     "पहला अंदाज़ा था कि ये जापानी सैनिक हैं।",
-     "Pehla andaaza tha ki ye Japanese sainik hain.",
+     "पहला अंदाज़ा था — जापानी सैनिक।",
+     "Pehla andaaza tha — Japanese sainik.",
      None,
      "wartime era rumour, faded map of the himalayas, pins and string, "
      "dim lamplight on paper"),
     ("escalation",
-     "वो अंदाज़ा ग़लत निकला।",
-     "Wo andaaza galat nikla.",
+     "अंदाज़ा ग़लत निकला।",
+     "Andaaza galat nikla.",
      None,
      "discarded papers on a desk, a single lamp, cold night through a "
      "window, abandoned investigation"),
     ("reveal",
-     "कार्बन डेटिंग ने बताया — ये हड्डियाँ आठ सौ साल पुरानी हैं। किसी भी "
-     "युद्ध से पहले की।",
-     "Carbon dating ne bataya — ye haddiyan 800 saal purani hain. Kisi bhi "
-     "yudh se pehle ki.",
+     "कार्बन डेटिंग ने बताया — ये हड्डियाँ आठ सौ साल पुरानी हैं।",
+     "Carbon dating ne bataya — ye haddiyan 800 saal purani hain.",
      "800 SAAL PURANE",
      "laboratory bone sample under cold clinical light, calipers, "
      "scientific instruments, sterile shadows"),
     ("reveal",
-     "और सबकी खोपड़ी पर चोट एक ही जगह थी। ऊपर से।",
-     "Aur sabki khopdi par chot ek hi jagah thi. Upar se.",
+     "सबकी खोपड़ी पर चोट एक ही जगह। ऊपर से।",
+     "Sabki khopdi par chot ek hi jagah. Upar se.",
      "UPAR SE",
      "hailstorm over a mountain lake at night, enormous hailstones frozen "
      "mid-air, violent sky"),
     ("twist",
-     "लेकिन दो हज़ार उन्नीस की डीएनए जाँच ने वो कहानी भी तोड़ दी। सारे कंकाल "
-     "एक जगह के थे ही नहीं।",
-     "Lekin 2019 ki DNA jaanch ne wo kahaani bhi tod di. Saare kankaal ek "
-     "jagah ke the hi nahi.",
+     "लेकिन दो हज़ार उन्नीस की डीएनए जाँच ने वो कहानी तोड़ दी। सारे कंकाल "
+     "एक जगह के नहीं थे।",
+     "Lekin 2019 ki DNA jaanch ne wo kahaani tod di. Saare kankaal ek "
+     "jagah ke nahi the.",
      None,
      "dna sequencing visualisation on a dark screen, cold green traces, "
      "researcher shadow"),
@@ -98,8 +96,8 @@ SAMPLE_BEATS = [
      "two conflicting documents side by side on dark wood, one official one "
      "scientific, harsh single light"),
     ("cta",
-     "और आठ सौ साल बाद भी, कोई नहीं जानता उस रात वहाँ हुआ क्या था।",
-     "Aur 800 saal baad bhi, koi nahi jaanta us raat wahan hua kya tha.",
+     "और आज तक कोई नहीं जानता, उस रात हुआ क्या था।",
+     "Aur aaj tak koi nahi jaanta, us raat hua kya tha.",
      None,
      "empty frozen lake at last light, single set of footprints leading in "
      "and not out, silence"),
