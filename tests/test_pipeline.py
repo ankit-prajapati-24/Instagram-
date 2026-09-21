@@ -162,6 +162,60 @@ def test_the_gate_and_the_scorecard_cannot_drift_apart():
     assert settings.duration_max == qc.DURATION_MAX
 
 
+def test_the_pre_render_band_is_derived_from_the_publishing_window():
+    """The gate is wider than QC on purpose, and derived from it anyway.
+
+    A second pair of literals would drift the first time either moved. A
+    margin applied to the same two constants cannot.
+    """
+    margin = qc.PRE_RENDER_MARGIN
+    assert 0 < margin <= 0.25, "an undocumented gate is not a gate"
+
+    low, high = qc.pre_render_range()
+    assert low == qc.DURATION_MIN * (1 - margin)
+    assert high == qc.DURATION_MAX * (1 + margin)
+    assert low < qc.DURATION_MIN and high > qc.DURATION_MAX
+
+    # It follows whatever window it is handed, so the two cannot separate.
+    assert qc.pre_render_range(60.0, 70.0) == (60.0 * (1 - margin),
+                                               70.0 * (1 + margin))
+
+
+def test_a_narration_just_outside_the_window_still_reaches_the_render(
+        tmp_path, monkeypatch):
+    """35.6s is a QC failure, not an obviously wrong script.
+
+    At the sample script's measured 2.47 w/s the shortest script the agent
+    accepts speaks for about this long. Refusing it here throws the run away
+    before anything exists to look at; letting it through costs twelve
+    minutes and hands a human a video and a scorecard.
+    """
+    plan, store, settings, clips, events = _harness(
+        tmp_path, monkeypatch, seconds_per_beat=2.74)   # 13 x 2.74 = 35.6s
+
+    result = produce_stage(plan, None, store, settings, emit=events.append)
+
+    assert clips.calls == 1
+    assert Stage.LENGTH not in [e.stage for e in events
+                                if e.status == "failed"]
+    # QC is where a near-miss is judged, on the finished file, by name.
+    assert result["scorecard"]["hard_failures"] == ["duration"]
+
+
+def test_the_gate_refusal_names_both_bands(tmp_path, monkeypatch):
+    """The reader needs the publishing window to know why 60s is the limit."""
+    plan, store, settings, clips, events = _harness(
+        tmp_path, monkeypatch, seconds_per_beat=5.1)    # 66.3s
+
+    with pytest.raises(GateError) as caught:
+        produce_stage(plan, None, store, settings, emit=events.append)
+
+    detail = caught.value.detail
+    assert "38" in detail and "52" in detail        # what QC publishes
+    assert "60" in detail                           # what the gate accepts
+    assert "15%" in detail                          # and the margin between
+
+
 def test_the_length_stage_runs_between_voice_and_clips():
     order = list(Stage.ORDER)
     assert order.index(Stage.VOICE) < order.index(Stage.LENGTH)

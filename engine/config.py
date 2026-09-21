@@ -157,12 +157,20 @@ class Settings:
     #
     # Re-measure with scripts/measure_speech_rate.py if the engine changes,
     # but treat what it prints as a ceiling, not the answer.
+    #
+    # Whatever it is set to, it is one number standing in for a spread: the
+    # rate belongs to the content, and the measured spread across this
+    # repo's evidence runs 1.83-2.94 w/s. That is why the pre-render gate
+    # carries a margin over the publishing window instead of sitting exactly
+    # on it — see engine.gates.qc.PRE_RENDER_MARGIN.
     words_per_second: float = field(
         default_factory=lambda: float(
             os.getenv("RAHASYA_WORDS_PER_SEC", "2.29")))
-    # The one duration window: QC scores the rendered file against it and
-    # the length gate scores the narration against it before the clip stage
-    # runs. Defined in engine.gates.qc so there is only ever one pair.
+    # The one duration window: QC scores the rendered file against it, and
+    # the pre-render length gate scores the narration against it widened by
+    # qc.PRE_RENDER_MARGIN — the gate refuses scripts that are obviously
+    # wrong, QC judges the ones that are merely off. Both are defined in
+    # engine.gates.qc so there is only ever one pair of numbers.
     duration_min: float = DURATION_MIN
     duration_max: float = DURATION_MAX
     # One grade over every frame, so twenty-odd Pexels clips from as many

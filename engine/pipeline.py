@@ -30,7 +30,8 @@ from engine.assembly.captions import write_ass
 from engine.assembly.render import probe_video, render
 from engine.contract import ReelPlan, Script, Topic
 from engine.gates import dedup
-from engine.gates.qc import duration_in_range, run_qc
+from engine.gates.qc import (PRE_RENDER_MARGIN, duration_in_range,
+                             pre_render_range, run_qc)
 from engine.media.clips import generate_plan_clips, unavailable_reason
 from engine.media.voice import synth_plan
 from stock_agent import StockVideoMatcherAgent
@@ -254,32 +255,45 @@ def produce_stage(plan: ReelPlan, client, store, settings, *,
     # script was written. Asking here costs nothing and saves the twelve
     # minutes; no stage after this one can shorten a script.
     #
-    # The window is ``duration_in_range`` from the QC module, given the same
-    # settings the scorecard below is given, so the gate cannot start
-    # refusing lengths that QC would have passed.
+    # The band comes from ``pre_render_range``, which is QC's own window plus
+    # a deliberate margin — see PRE_RENDER_MARGIN for why the two differ and
+    # why the difference is derived rather than written out a second time.
+    # Deliberately wider than QC: refusing a near-miss here destroys the run
+    # and produces nothing, where letting it through costs twelve minutes and
+    # hands a human a video and a scorecard. The gate is for scripts that are
+    # obviously wrong, not for the ones QC is there to judge.
     narration = plan.duration()
-    if not duration_in_range(narration, settings.duration_min,
-                             settings.duration_max):
-        direction = ("shorten" if narration > settings.duration_max
-                     else "lengthen")
+    gate_min, gate_max = pre_render_range(settings.duration_min,
+                                          settings.duration_max)
+    if not duration_in_range(narration, gate_min, gate_max):
+        direction = "shorten" if narration > gate_max else "lengthen"
         detail = (
             f"the narration runs {narration:.1f}s, outside the "
+            f"{gate_min:.0f}-{gate_max:.0f}s this gate accepts — QC's "
             f"{settings.duration_min:.0f}-{settings.duration_max:.0f}s "
-            f"window QC scores against. Nothing downstream changes a "
-            f"script's length, so this stops here rather than spending the "
-            f"clip and render stages on it: {direction} the script "
-            f"(RAHASYA_WORDS_PER_SEC sets the budget it is written to) and "
-            f"run the plan again.")
+            f"publishing window plus {PRE_RENDER_MARGIN:.0%} for how much "
+            f"the voice's rate varies with the words it is given. Nothing "
+            f"downstream changes a script's length, so this stops here "
+            f"rather than spending the clip and render stages on it: "
+            f"{direction} the script (RAHASYA_WORDS_PER_SEC sets the budget "
+            f"it is written to) and run the plan again.")
         emit(PipelineEvent(Stage.LENGTH, "failed", detail,
                            {"narration_seconds": narration,
+                            "gate_min": gate_min, "gate_max": gate_max,
                             "duration_min": settings.duration_min,
                             "duration_max": settings.duration_max}))
         store.save_plan(plan, status="rejected_length")
         raise GateError("length", detail)
     emit(PipelineEvent(Stage.LENGTH, "done",
                        f"{narration:.1f}s, inside "
-                       f"{settings.duration_min:.0f}-"
-                       f"{settings.duration_max:.0f}s"))
+                       f"{gate_min:.0f}-{gate_max:.0f}s"
+                       + ("" if duration_in_range(narration,
+                                                  settings.duration_min,
+                                                  settings.duration_max)
+                          else f" (but outside QC's "
+                               f"{settings.duration_min:.0f}-"
+                               f"{settings.duration_max:.0f}s — QC will fail "
+                               f"this on duration)")))
 
     reason = unavailable_reason(settings)
     emit(PipelineEvent(Stage.CLIPS, "started",

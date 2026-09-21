@@ -39,6 +39,49 @@ BANNED_PHRASES: tuple[str, ...] = (
 DURATION_MIN = 38.0
 DURATION_MAX = 52.0
 
+# How far outside that window the PRE-RENDER length gate still lets a plan
+# through, as a fraction of the bound it misses.
+#
+# The two checks have different jobs. QC judges a finished video against what
+# this channel publishes, and a 35s or a 56s Short is not publishable. The
+# length gate is only there to stop the pipeline spending twelve minutes on
+# clips and render for a script that is obviously wrong -- and "obviously
+# wrong" is a looser question than "publishable".
+#
+# It has to be looser, because the two ends of the system fit with nothing
+# between them. The word budget is ``target_seconds * words_per_second`` and
+# the script agent may drift +/-15% around it, which at the configured rate
+# maps to exactly 38.25-51.75s: a quarter of a second of slack at each end.
+# But the rate is a property of the content, not of the configuration. This
+# repo has measured 1.83 w/s on numeral- and acronym-heavy lines, 2.94 on
+# clean prose, and 2.47 on its own sample script. At 2.47 the shortest script
+# the agent accepts speaks for ~35.5s, and a gate set exactly at 38.0 would
+# refuse it after paying for voice -- destroying the run instead of handing a
+# human a video and a scorecard to judge.
+#
+# 15% is not a new number: it is the same drift ``run_script`` already allows
+# on word count, carried through to seconds. It means the gate passes the
+# agent's whole accepted band for any script the voice speaks between roughly
+# 1.98 and 2.71 w/s -- the configured 2.29 and the sample's 2.47 included --
+# and still refuses the 66.5s run it was built for, which was 28% over.
+#
+# Derived from the two constants above rather than written out again: a
+# second pair of literals would separate from the window the first time
+# either moved, which is the failure the single definition exists to prevent.
+PRE_RENDER_MARGIN = 0.15
+
+
+def pre_render_range(duration_min: float = DURATION_MIN,
+                     duration_max: float = DURATION_MAX) -> tuple[float,
+                                                                  float]:
+    """The window the pre-render length gate scores narration against.
+
+    Always the publishing window plus ``PRE_RENDER_MARGIN``, so widening or
+    moving one moves the other with it.
+    """
+    return (duration_min * (1 - PRE_RENDER_MARGIN),
+            duration_max * (1 + PRE_RENDER_MARGIN))
+
 
 @dataclass
 class Check:

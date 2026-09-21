@@ -323,18 +323,79 @@ def test_the_word_budget_fits_the_window_at_the_measured_speech_rate():
         f"measured {MEASURED_WORDS_PER_SEC} w/s")
 
 
-def test_the_budget_holds_at_both_ends_of_the_drift_tolerance():
-    """run_script accepts +/-15% around the budget, so both ends must land
-    inside the duration window too -- otherwise a script the agent passes is
-    a video QC rejects."""
+# Every per-script speech rate this repo has evidence for, slowest first.
+#
+#   1.83  numeral- and acronym-heavy lines (scripts/measure_speech_rate.py)
+#   2.29  the first fully real run: 152 words -> 66.5s of Piper audio
+#   2.47  the trimmed sample script in engine.fake_client
+#   2.60  the twelve-beat sample as it was measured in engine/config.py
+#   2.94  clean conversational Hindi with no numerals at all
+#
+# The rate is a property of the CONTENT, not of the configuration: it is what
+# the voice happens to do to the words a given script contains. Any test that
+# divides a budget by ``settings.words_per_second`` cancels the configured
+# rate out and proves nothing about the spread -- which is what the test that
+# used to live here did.
+OBSERVED_RATES = (1.83, 2.29, 2.47, 2.60, 2.94)
+SCRIPT_WORD_DRIFT = 0.15
+
+
+def test_the_pre_render_gate_holds_across_the_observed_rate_spread():
+    """Walk the measured rate spread, not the configured constant.
+
+    ``run_script`` accepts +/-15% around the word budget, so at each rate the
+    agent can hand back a narration anywhere in a band. The publishing window
+    is 38-52s and the pre-render gate is that window plus a documented
+    margin; this pins which rates the gate lets through and which it refuses.
+    """
+    from engine.gates.qc import duration_in_range, pre_render_range
     from tests.factories import shipped_settings
 
     settings = shipped_settings()
+    low, high = settings.duration_min, settings.duration_max
+    gate_low, gate_high = pre_render_range(low, high)
+
     budget = settings.target_seconds * settings.words_per_second
-    for drift in (-0.15, 0.15):
-        spoken = budget * (1 + drift) / MEASURED_WORDS_PER_SEC
-        assert settings.duration_min <= spoken <= settings.duration_max, (
-            f"{drift:+.0%} off budget speaks for {spoken:.1f}s")
+    few = budget * (1 - SCRIPT_WORD_DRIFT)      # the shortest script accepted
+    many = budget * (1 + SCRIPT_WORD_DRIFT)     # the longest script accepted
+
+    reaches_the_render = {}
+    for rate in OBSERVED_RATES:
+        quickest, slowest = few / rate, many / rate
+        # Whatever the rate, the agent can still write something shippable:
+        # the accepted band always overlaps the publishing window.
+        assert quickest <= high and slowest >= low, (
+            f"at {rate} w/s nothing inside +/-15% of the budget lands in "
+            f"{low:.0f}-{high:.0f}s")
+        reaches_the_render[rate] = (
+            duration_in_range(quickest, gate_low, gate_high)
+            and duration_in_range(slowest, gate_low, gate_high))
+
+    # Both ends of the spread are refused, and the middle -- which contains
+    # the configured rate and the trimmed sample's own 2.47 -- is not.
+    assert reaches_the_render == {1.83: False, 2.29: True, 2.47: True,
+                                  2.60: True, 2.94: False}
+
+    # The fast end: 88 words at 2.94 w/s is 21% under the publishing minimum,
+    # so refusing it is the gate agreeing with QC, not out-running it.
+    under = (low - few / 2.94) / low
+    over = (many / 1.83 - high) / high
+    assert under > SCRIPT_WORD_DRIFT and over > SCRIPT_WORD_DRIFT, (
+        f"{under:.0%} under / {over:.0%} over -- the ends of the spread are "
+        f"inside the gate's margin, so the gate is refusing near-misses")
+
+    # The regression this test exists for: at the sample script's own 2.47
+    # w/s the agent's accepted low end speaks for ~35.5s. QC would fail that
+    # video, but a human should get to see it rather than lose the run to a
+    # gate that fired before the clip stage.
+    near_miss = few / 2.47
+    assert not duration_in_range(near_miss, low, high)
+    assert duration_in_range(near_miss, gate_low, gate_high), (
+        f"{near_miss:.1f}s is refused before the clip stage")
+
+    # Stated as rates: the whole accepted band reaches the render for any
+    # script the voice speaks between these two.
+    assert few / gate_low > 2.6 and many / gate_high < 2.0
 
 
 # --- the sample script is a fixture the offline harness depends on ---------
