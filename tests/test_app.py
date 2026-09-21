@@ -264,6 +264,43 @@ def test_checklist_flags_mixed_pexels_and_fallback_beats():
     assert beats[0].beat_id not in placeholder_items[0]
 
 
+def test_checklist_flags_single_beat_with_mixed_providers():
+    """A single beat whose clips list contains both real and fallback visuals.
+    This is the production shape: roughly one clip per 2.5 seconds of narration,
+    each resolved independently, so one beat can have 2 Pexels clips and 1
+    placeholder or keyless still. The checklist must detect this within a single
+    beat, not just across beats."""
+    plan = make_plan()
+    beats = plan.script.beats
+    # Beat 0: pexels + placeholder in the same beat — worst case, should flag
+    # as placeholder
+    beats[0].clips = [
+        _clip("clip1.mp4", provider="pexels"),
+        _clip("still.png", provider="placeholder"),
+    ]
+    # Beat 1: pexels + keyless in the same beat — a milder fallback
+    beats[1].clips = [
+        _clip("clip1.mp4", provider="pexels"),
+        _clip("still.png", provider="keyless"),
+    ]
+    # Beat 2+: all pexels (control)
+    for beat in beats[2:]:
+        beat.clips = [_clip("clip.mp4", provider="pexels")]
+
+    items = payloads.publish_checklist(plan, "o.mp4")
+    placeholder_items = [i for i in items if "placeholder frames" in i]
+    stills_items = [i for i in items if "fell back to still images" in i]
+
+    # Beat 0 should be in both (placeholder is the worst case)
+    assert len(placeholder_items) == 1
+    assert beats[0].beat_id in placeholder_items[0]
+
+    # Beat 1 should be in stills_items but not placeholder_items
+    assert len(stills_items) == 1
+    assert beats[1].beat_id in stills_items[0]
+    assert beats[0].beat_id not in stills_items[0]
+
+
 def test_checklist_flags_legacy_image_provider_placeholder():
     """A plan stored before clips existed has no beat.clips at all — the
     legacy beat.image_provider field is the only signal, and must still be
