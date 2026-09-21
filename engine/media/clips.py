@@ -107,14 +107,21 @@ def beat_clips(agent, beat: Beat, target_dir: str | Path) -> list[Clip]:
 def _checksum(path: str | Path) -> str | None:
     """SHA-256 of ``path``'s bytes, or ``None`` if it can't be read.
 
-    Mirrors ``images._checksum``, but tolerant: unlike the image chain, a
-    clip's path can come from a matcher that reports a path without writing
-    it (surfaced by the test double), and a missing checksum must not fail
-    the asset record.
+    Mirrors ``images._checksum``, but tolerant, and deliberately so: this
+    call site runs in the main thread's ``as_completed`` loop in
+    ``generate_plan_clips``, *outside* the per-beat ``try/except`` in
+    ``make()``. A clip's path can come from a matcher that reports a path
+    without ever writing it there; raising on that here would crash the
+    whole stage rather than fail one beat, which breaks the "a missing clip
+    never fails a render" contract. Do not restore the raising version to
+    match ``images.py`` — that sibling's call site always reads a file it
+    just wrote, so it's never in this position.
     """
     try:
         return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:32]
-    except OSError:
+    except OSError as exc:
+        print(f"[clips] checksum skipped, unreadable: {path} ({exc})",
+              flush=True)
         return None
 
 

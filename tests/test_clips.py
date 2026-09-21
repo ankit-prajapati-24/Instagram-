@@ -1,3 +1,4 @@
+import hashlib
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -229,8 +230,16 @@ def test_an_unfilled_slot_falls_back_to_the_image_chain(tmp_path, monkeypatch):
 
 
 def test_every_clip_is_recorded_as_an_asset(tmp_path):
+    """The happy path: a clip whose file genuinely landed on disk gets a
+    real checksum recorded, not just a call to save_asset."""
+    clip_bytes = b"fake downloaded mp4 bytes"
+    clip_path = tmp_path / "clip.mp4"
+    clip_path.write_bytes(clip_bytes)
+    expected_checksum = hashlib.sha256(clip_bytes).hexdigest()[:32]
+
     agent = MagicMock()
-    agent.match.return_value = SimpleNamespace(matches=[_match(0)])
+    agent.match.return_value = SimpleNamespace(
+        matches=[_match(0, path=str(clip_path))])
     store = MagicMock()
     plan = make_plan()
     for beat in plan.script.beats:
@@ -242,6 +251,34 @@ def test_every_clip_is_recorded_as_an_asset(tmp_path):
     assert store.save_asset.call_count == len(plan.script.beats)
     kwargs = store.save_asset.call_args.kwargs
     assert kwargs["licence"] == "pexels"
+    assert kwargs["checksum"] == expected_checksum
+    assert len(kwargs["checksum"]) == 32
+    assert all(c in "0123456789abcdef" for c in kwargs["checksum"])
+
+
+def test_a_clip_whose_file_never_landed_is_recorded_with_no_checksum(
+        tmp_path):
+    """A matcher can report a download_path without the file actually
+    being there. That must not crash the stage (checksum runs outside the
+    per-beat try/except), and the asset record should say honestly that it
+    couldn't be hashed rather than fabricate one."""
+    missing_path = tmp_path / "never-landed.mp4"
+    assert not missing_path.exists()
+
+    agent = MagicMock()
+    agent.match.return_value = SimpleNamespace(
+        matches=[_match(0, path=str(missing_path))])
+    store = MagicMock()
+    plan = make_plan()
+    for beat in plan.script.beats:
+        beat.measured_seconds = 2.0
+
+    generate_plan_clips(plan, agent, client=None, work_dir=tmp_path,
+                        store=store, workers=2)
+
+    assert store.save_asset.call_count == len(plan.script.beats)
+    kwargs = store.save_asset.call_args.kwargs
+    assert kwargs["checksum"] is None
 
 
 def test_the_slot_sum_invariant_holds_after_fallback(tmp_path, monkeypatch):
