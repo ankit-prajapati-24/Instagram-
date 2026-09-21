@@ -1,8 +1,11 @@
 import math
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
-from engine.media.clips import clip_count, slot_durations
+from engine.contract import Beat
+from engine.media.clips import beat_clips, clip_count, slot_durations
 
 
 @pytest.mark.parametrize("seconds,expected", [
@@ -100,3 +103,80 @@ def test_tolerance_catches_coarse_implementations():
 def test_zero_count_is_rejected():
     with pytest.raises(ValueError):
         slot_durations(5.0, 0)
+
+
+def _beat(seconds=5.0):
+    beat = Beat(beat_id="b1", role="hook", voice_text="कुछ",
+                caption_text="kuch", target_seconds=seconds,
+                visual_prompt="p", motion="zoom_in", transition="fade")
+    beat.measured_seconds = seconds
+    return beat
+
+
+def _match(index, path="clip.mp4", error=None, video=True):
+    return SimpleNamespace(
+        clip_index=index,
+        query=SimpleNamespace(search_query=f"query {index}"),
+        video=SimpleNamespace(id=100 + index, url="https://pexels/x",
+                              user_name="Someone") if video else None,
+        download_path=path,
+        error=error)
+
+
+def test_beat_clips_returns_one_clip_per_slot(tmp_path):
+    agent = MagicMock()
+    agent.match.return_value = SimpleNamespace(
+        matches=[_match(0), _match(1)])
+    clips = beat_clips(agent, _beat(5.0), tmp_path)
+    assert len(clips) == 2
+    assert [c.provider for c in clips] == ["pexels", "pexels"]
+
+
+def test_beat_clip_durations_sum_to_the_measured_beat(tmp_path):
+    agent = MagicMock()
+    agent.match.return_value = SimpleNamespace(
+        matches=[_match(i) for i in range(3)])
+    beat = _beat(7.3)
+    clips = beat_clips(agent, beat, tmp_path)
+    assert sum(c.duration for c in clips) == pytest.approx(7.3, abs=1e-9)
+
+
+def test_beat_clips_uses_measured_seconds_not_target(tmp_path):
+    agent = MagicMock()
+    agent.match.return_value = SimpleNamespace(matches=[_match(0)])
+    beat = _beat(3.0)
+    beat.target_seconds = 99.0          # the model's guess, must be ignored
+    beat.measured_seconds = 2.0
+    beat_clips(agent, beat, tmp_path)
+    assert agent.match.call_args.kwargs["duration_seconds"] == 2.0
+
+
+def test_a_slot_the_agent_could_not_fill_is_marked_unfilled(tmp_path):
+    """The caller falls those back to the image chain; this function only
+    reports them honestly rather than dropping the slot."""
+    agent = MagicMock()
+    agent.match.return_value = SimpleNamespace(
+        matches=[_match(0), _match(1, path=None, video=False,
+                                   error="no results")])
+    clips = beat_clips(agent, _beat(5.0), tmp_path)
+    assert len(clips) == 2
+    assert clips[1].provider == "unfilled"
+    assert clips[1].path == ""
+
+
+def test_slot_count_wins_when_the_agent_returns_too_few(tmp_path):
+    """clip_count is the timeline's contract. If the agent under-delivers
+    the missing slots still exist, unfilled."""
+    agent = MagicMock()
+    agent.match.return_value = SimpleNamespace(matches=[_match(0)])
+    clips = beat_clips(agent, _beat(7.5), tmp_path)   # wants 3
+    assert len(clips) == 3
+    assert [c.provider for c in clips] == ["pexels", "unfilled", "unfilled"]
+
+
+def test_extra_matches_beyond_the_slot_count_are_discarded(tmp_path):
+    agent = MagicMock()
+    agent.match.return_value = SimpleNamespace(
+        matches=[_match(i) for i in range(6)])
+    clips = beat_clips(agent, _beat(2.4), tmp_path)   # wants 1
+    assert len(clips) == 1
