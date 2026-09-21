@@ -3,7 +3,8 @@ import pytest
 from engine.assembly.captions import ass_time, build_ass, escape_ass
 from engine.assembly.compile import to_generate_video_body
 from engine.assembly.render import (build_filter_graph, plan_inputs,
-                                    segment_lengths, zoompan_expr)
+                                    render, segment_lengths, zoompan_expr)
+from engine.contract import Clip
 from engine.media.voice import caption_timings
 from tests.factories import make_plan
 
@@ -162,6 +163,30 @@ def test_empty_plan_is_rejected():
     plan.script.beats = []
     with pytest.raises(ValueError):
         build_filter_graph(plan)
+
+
+# --- render()'s precondition: a beat needs SOME visual --------------------
+# Clips replaced images as the normal case. A beat with clips and no
+# image_path must still pass; only a beat with neither should be refused.
+
+def test_render_accepts_a_clips_only_beat():
+    """A clips-only beat (no image_path) must clear the visual precondition.
+
+    Audio is left unset on purpose, so the run still fails — but on the
+    audio check, which is the proof it got past the visual one instead of
+    being rejected for lacking an image_path it was never going to have.
+    """
+    plan = _timed_plan(beats=1)
+    plan.script.beats[0].clips = [
+        Clip(path="c0.mp4", query="q", provider="pexels", duration=4.0)]
+    with pytest.raises(ValueError, match="without audio"):
+        render(plan, None, "out.mp4")
+
+
+def test_render_rejects_a_beat_with_neither_clip_nor_image():
+    plan = _timed_plan(beats=1)
+    with pytest.raises(ValueError, match="clip or.*image"):
+        render(plan, None, "out.mp4")
 
 
 # --- legacy endpoint compiler ----------------------------------------------

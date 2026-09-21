@@ -368,9 +368,14 @@ def render(plan: ReelPlan, settings, out_path: str | Path, *,
            progress=None) -> str:
     """Produce the MP4. Returns the output path."""
     beats = plan.script.beats
-    missing = [b.beat_id for b in beats if not b.image_path]
+    # A beat needs some visual to render, but which kind no longer matters:
+    # clips are the normal case now and image_path is the fallback (see
+    # plan_inputs). Rejecting only a beat with neither catches an
+    # unrendered plan early, same as before, without also rejecting every
+    # clips-only plan that the clip stage was built to produce.
+    missing = [b.beat_id for b in beats if not b.image_path and not b.clips]
     if missing:
-        raise ValueError(f"beats without an image: {missing}")
+        raise ValueError(f"beats without a clip or an image: {missing}")
     missing_audio = [b.beat_id for b in beats if not b.audio_path]
     if missing_audio:
         raise ValueError(f"beats without audio: {missing_audio}")
