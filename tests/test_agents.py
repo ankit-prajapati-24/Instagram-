@@ -274,6 +274,65 @@ def test_a_script_inside_the_tolerance_is_accepted_first_time():
     assert len(client.seen) == 1
 
 
+# --- the default budget must not be a hand-copied number -------------------
+# The signature said 136 for a while after target_seconds * words_per_second
+# became 103, which is the same stale-number problem the budget exists to
+# prevent. Re-typing int(45 * 2.29) as 103 re-introduced it one rate change
+# later, so the default is resolved from Settings at call time instead.
+
+def test_the_word_target_default_is_resolved_from_configuration():
+    import inspect
+
+    from engine.agents import run_script
+
+    default = inspect.signature(run_script).parameters["word_target"].default
+    assert default is None, (
+        f"word_target defaults to the literal {default!r}; it goes stale the "
+        f"next time the speech rate is re-measured")
+
+
+def test_the_resolved_budget_follows_the_configured_rate(monkeypatch):
+    """Change the configuration, and the prompt the model sees changes."""
+    from engine.agents import run_script
+    from engine.config import settings
+    from engine.contract import Provenance, Topic
+
+    monkeypatch.setattr(settings, "target_seconds", 50.0)
+    monkeypatch.setattr(settings, "words_per_second", 2.0)
+    expected = int(50.0 * 2.0)
+
+    client = Replaying(_script_payload([expected]))
+    run_script(client, Topic.make("x"), Provenance(), None)
+
+    prompt = client.seen[0][0]["content"]
+    assert f"{expected}" in prompt
+    # and the +/-15% check ran against the resolved number, not a literal:
+    # a single beat of exactly `expected` words was accepted first time.
+    assert len(client.seen) == 1
+
+
+def test_the_resolved_budget_is_what_the_pipeline_would_have_passed():
+    """plan_stage computes the same product; the two must not disagree."""
+    from engine.agents import run_script
+    from engine.config import settings
+    from engine.contract import Provenance, Topic
+
+    expected = int(settings.target_seconds * settings.words_per_second)
+    client = Replaying(_script_payload([expected]))
+    run_script(client, Topic.make("x"), Provenance(), None)
+    assert f"{expected}" in client.seen[0][0]["content"]
+
+
+def test_the_budget_product_is_formed_in_one_place():
+    """Two copies of target_seconds * words_per_second is how it rotted."""
+    import engine.pipeline as pipeline
+    from engine.config import settings, word_budget
+
+    assert word_budget() == int(settings.target_seconds *
+                                settings.words_per_second)
+    assert pipeline.word_budget is word_budget
+
+
 def test_two_off_budget_scripts_in_a_row_still_raise():
     from engine.agents import AgentError, run_script
     from engine.contract import Provenance, Topic

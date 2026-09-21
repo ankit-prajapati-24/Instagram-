@@ -229,3 +229,16 @@ class Settings:
 
 
 settings = Settings()
+
+
+def word_budget(for_settings: Settings | None = None) -> int:
+    """The script agent's word budget, formed in exactly one place.
+
+    Word count is what decides runtime, so the budget is
+    ``target_seconds * words_per_second``. Both callers — ``plan_stage`` and
+    ``run_script``'s own default — come through here, because the last two
+    bugs in this area were both a copy of this product going stale against
+    the rate it was computed from.
+    """
+    active = for_settings or settings
+    return int(active.target_seconds * active.words_per_second)

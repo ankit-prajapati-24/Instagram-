@@ -146,17 +146,26 @@ def run_hooks(client, topic: Topic, provenance: Provenance, *,
 
 def run_script(client, topic: Topic, provenance: Provenance,
                hook: Hook | None, *, model: str | None = None,
-               word_target: int = 103, beats: int = 12):
+               word_target: int | None = None, beats: int = 12):
     """``word_target`` is derived from the voice engine's measured rate.
 
-    The default is only a floor for direct callers: ``plan_stage`` always
-    passes ``target_seconds * words_per_second``. It said 136 for a while
-    after that product became 103, which is the same stale-number problem
-    the budget exists to prevent.
+    Left unset it resolves to ``target_seconds * words_per_second`` from the
+    configuration, which is the same product ``plan_stage`` passes. It is
+    resolved here rather than written into the signature because a literal
+    default goes stale: it said 136 for a while after that product became
+    103, and re-typing the new product as a literal would only move the same
+    bug one rate change further out. Nothing to hand-copy, nothing to rot.
 
     Duration follows from word count, so the prompt is told the budget
     rather than a beat range it can satisfy at any length.
     """
+    if word_target is None:
+        # Imported here, not at module scope: engine.config constructs
+        # Settings at import time and reads .env, and the agents module is
+        # imported by tools that have no business doing either.
+        from engine.config import word_budget
+
+        word_target = word_budget()
     prompt = load_prompt("script").format(
         word_target=word_target,
         words_per_beat=max(round(word_target / beats), 4),
