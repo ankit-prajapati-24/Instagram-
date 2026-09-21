@@ -437,12 +437,17 @@ def test_a_normal_length_topic_passes_the_check(client):
 def test_every_pipeline_stage_has_a_row_in_the_panel(client):
     """markStage() drops an event whose stage has no row, silently. A gate
     that refuses the run and reports nothing to the panel is worse than the
-    stage order it protects."""
+    stage order it protects.
+
+    Matched as a STAGES entry, not as a bare quoted word: "hooks",
+    "captions", "metadata" and "dedup" all occur elsewhere in the page, so
+    the loose form passed for four stages with their rows deleted.
+    """
     from engine.pipeline import Stage
 
     page = client.get("/").text
     for stage in Stage.ORDER:
-        assert f'"{stage}"' in page, f"no panel row for {stage}"
+        assert f'["{stage}",' in page, f"no panel row for {stage}"
 
 
 def test_the_panel_reports_clip_providers(client):

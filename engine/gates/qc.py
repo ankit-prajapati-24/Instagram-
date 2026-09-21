@@ -141,10 +141,15 @@ def run_qc(plan: ReelPlan, *, similarity: float | None = None,
            expect_render: bool = False) -> Scorecard:
     """Score a plan. ``actual_duration`` is the probed length of the MP4.
 
-    Pass it whenever a render exists. The sum of beat lengths overstates the
-    finished video, because every xfade overlaps its two beats — nine joins at
-    0.5s each cut 4.5s off a ten-beat Reel. Checking the estimate would let a
-    53s plan pass while the file it produced is 48s, or the reverse.
+    Pass it whenever a render exists. Not because the beat sum runs long any
+    more — ``segment_lengths`` pads each segment by half an overlap on each
+    side precisely so the xfade chain comes out exactly as long as the
+    narration, and the pre-render length gate's whole justification is that
+    the narration IS the runtime. The reason is what the sum is made of: a
+    beat with no ``measured_seconds`` contributes its *target*, so before
+    synthesis the estimate is a plan rather than a measurement, and after it
+    the sum of per-beat probes is still not a probe of the finished
+    container. The file is what ships, so the file is what gets scored.
     """
     checks: list[Check] = []
     beats = plan.script.beats
