@@ -177,6 +177,81 @@ class TestPexelsFetcher:
         assert best_video.selected_file.is_portrait is True
         assert best_video.selected_file.link == "https://video.mp4/hd_portrait.mp4"
 
+    @staticmethod
+    def _video_with_files(video_id, files, quality="hd"):
+        """Build one Pexels-shaped video dict from a list of (width, height) tuples."""
+        return {
+            "id": video_id,
+            "url": f"https://pexels.com/video/{video_id}",
+            "duration": 15,
+            "video_files": [
+                {
+                    "id": idx + 1,
+                    "quality": quality,
+                    "file_type": "video/mp4",
+                    "width": width,
+                    "height": height,
+                    "fps": 30.0,
+                    "link": f"https://video.mp4/{video_id}_{width}x{height}.mp4",
+                }
+                for idx, (width, height) in enumerate(files)
+            ],
+        }
+
+    def test_select_best_video_prefers_smallest_covering_resolution(self, fetcher):
+        """Among files that all cover the 1080x1920 render target, the smallest
+        covering one (closest from above) should win, not the largest."""
+        candidate_videos = [
+            self._video_with_files(301, [(720, 1280), (1080, 1920), (2160, 3840)])
+        ]
+
+        best_video = fetcher._select_best_video(candidate_videos, target_portrait=True)
+        assert best_video is not None
+        assert best_video.selected_file is not None
+        assert (best_video.selected_file.width, best_video.selected_file.height) == (1080, 1920)
+
+    def test_select_best_video_prefers_smaller_of_two_covering_files(self, fetcher):
+        """Given only two oversized candidates, prefer the one closer to (but
+        still at/above) the render target rather than the larger one."""
+        candidate_videos = [
+            self._video_with_files(302, [(2160, 3840), (1440, 2560)])
+        ]
+
+        best_video = fetcher._select_best_video(candidate_videos, target_portrait=True)
+        assert best_video is not None
+        assert best_video.selected_file is not None
+        assert (best_video.selected_file.width, best_video.selected_file.height) == (1440, 2560)
+
+    def test_select_best_video_undersized_only_picks_largest(self, fetcher):
+        """When nothing covers the render target, fall back to the largest
+        undersized file available (least upscaling)."""
+        candidate_videos = [
+            self._video_with_files(303, [(480, 854), (720, 1280)])
+        ]
+
+        best_video = fetcher._select_best_video(candidate_videos, target_portrait=True)
+        assert best_video is not None
+        assert best_video.selected_file is not None
+        assert (best_video.selected_file.width, best_video.selected_file.height) == (720, 1280)
+
+    def test_select_best_video_orientation_beats_huge_wrong_orientation_file(self, fetcher):
+        """A correctly-oriented, undersized file must beat a huge file with the
+        wrong orientation. This pins the fix for the latent bug where the old
+        raw pixel-count resolution term (up to ~8.3M for a 2160x3840 file)
+        could exceed the 5,000,000 orientation bonus, letting a wrongly
+        oriented file win outright."""
+        candidate_videos = [
+            self._video_with_files(304, [(720, 1280)]),  # correct portrait, small
+            self._video_with_files(305, [(3840, 2160)]),  # wrong orientation, huge
+        ]
+
+        best_video = fetcher._select_best_video(candidate_videos, target_portrait=True)
+        assert best_video is not None
+        assert best_video.id == 304
+        assert best_video.selected_file is not None
+        assert (best_video.selected_file.width, best_video.selected_file.height) == (720, 1280)
+        assert best_video.selected_file.is_portrait is True
+
     def test_search_video_fallback_to_landscape(self, fetcher):
         """When portrait returns 0 results, fallback to landscape."""
         def mock_execute(query, orientation=None, per_page=5):

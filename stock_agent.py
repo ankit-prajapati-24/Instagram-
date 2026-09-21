@@ -435,6 +435,32 @@ CRITICAL RULES:
 # Pexels Video Fetcher & Re-ranker
 # ============================================================================
 
+# The renderer's output frame size, in pixels (1080x1920). This MUST match
+# engine/media rendering's actual output resolution: every downloaded clip is
+# scaled to this size before compositing, so picking a source file far above
+# it only burns bandwidth/disk/CPU on pixels that get thrown away, and picking
+# one below it forces an upscale that never looks as good as a downscale.
+RENDER_TARGET_WIDTH = 1080
+RENDER_TARGET_HEIGHT = 1920
+RENDER_TARGET_PIXELS = RENDER_TARGET_WIDTH * RENDER_TARGET_HEIGHT  # 2,073,600
+
+# _select_best_video scoring bands (see the resolution-scoring comment
+# there for the full rationale). The orientation bonus must stay the
+# dominant term: ORIENTATION_BONUS (5,000,000) is strictly greater than
+# _RESOLUTION_COVER_CEILING (4,000,000), the resolution term's maximum, so a
+# correctly-oriented file always outscores a wrongly-oriented one no matter
+# its resolution. Within the resolution term, the "covers the target" band
+# is [_RESOLUTION_COVER_FLOOR, _RESOLUTION_COVER_CEILING] = [2,000,000,
+# 4,000,000] and the "undersized" band is [0, _RESOLUTION_UNDERSIZED_CEILING)
+# = [0, 1,000,000) — the bands don't overlap, so every covering file
+# outscores every undersized one.
+ORIENTATION_BONUS = 5_000_000.0
+_RESOLUTION_COVER_CEILING = 4_000_000.0
+_RESOLUTION_COVER_FLOOR = 2_000_000.0
+_RESOLUTION_UNDERSIZED_CEILING = 1_000_000.0
+assert _RESOLUTION_COVER_CEILING < ORIENTATION_BONUS
+assert _RESOLUTION_UNDERSIZED_CEILING < _RESOLUTION_COVER_FLOOR < _RESOLUTION_COVER_CEILING
+
 
 class PexelsFetcher:
     """Queries Pexels Videos API with portrait filters, HD MP4 selection, and landscape fallback."""
@@ -594,13 +620,42 @@ class PexelsFetcher:
                 is_portrait = height >= width
                 score = 0.0
                 if target_portrait and is_portrait:
-                    score += 5000000.0
+                    score += ORIENTATION_BONUS
                 elif not target_portrait and not is_portrait:
-                    score += 5000000.0
+                    score += ORIENTATION_BONUS
 
-                # 2. Prefer HD vertical (1080x1920) or closest high-res
+                # 2. Prefer the smallest file that still covers the render
+                # target (1080x1920) over the largest one available: every
+                # pixel above the target is downloaded, decoded and then
+                # scaled away by the renderer, so "biggest wins" wastes
+                # bandwidth/disk/time for no visual benefit.
+                #
+                # - At/above target: closer to the target (from above) is
+                #   better. Score falls off monotonically as pixel_count
+                #   grows past the target, so a smaller covering file always
+                #   outscores a larger one, but the score is floored at
+                #   _RESOLUTION_COVER_FLOOR so it can never sink into (let
+                #   alone below) the undersized band.
+                # - Below target: acceptable only when nothing covers the
+                #   target; among those, bigger is better (less upscaling),
+                #   but the whole band is capped by _RESOLUTION_UNDERSIZED_CEILING,
+                #   which sits strictly below _RESOLUTION_COVER_FLOOR — so no
+                #   undersized file can ever outscore a covering one.
+                #
+                # The resolution term's maximum (_RESOLUTION_COVER_CEILING)
+                # is a fixed constant kept strictly below ORIENTATION_BONUS,
+                # so a correctly-oriented file always beats a wrongly-oriented
+                # one regardless of resolution.
                 pixel_count = width * height
-                score += pixel_count
+                if pixel_count >= RENDER_TARGET_PIXELS:
+                    coverage_ratio = RENDER_TARGET_PIXELS / pixel_count  # (0, 1], 1.0 = exact match
+                    resolution_score = _RESOLUTION_COVER_FLOOR + (
+                        _RESOLUTION_COVER_CEILING - _RESOLUTION_COVER_FLOOR
+                    ) * coverage_ratio
+                else:
+                    undersize_ratio = pixel_count / RENDER_TARGET_PIXELS  # [0, 1)
+                    resolution_score = _RESOLUTION_UNDERSIZED_CEILING * undersize_ratio
+                score += resolution_score
 
                 # 3. Quality flag bonus
                 if quality == "hd":
