@@ -2,8 +2,8 @@ import pytest
 
 from engine.assembly.captions import ass_time, build_ass, escape_ass
 from engine.assembly.compile import to_generate_video_body
-from engine.assembly.render import (build_filter_graph, segment_lengths,
-                                    zoompan_expr)
+from engine.assembly.render import (build_filter_graph, plan_inputs,
+                                    segment_lengths, zoompan_expr)
 from engine.media.voice import caption_timings
 from tests.factories import make_plan
 
@@ -318,3 +318,134 @@ def test_output_duration_matches_the_narration_total():
     command, total, _ = _command_for(beats=7, measured=4.4)
     assert total == pytest.approx(7 * 4.4)
     assert command[command.index("-t") + 1] == f"{7 * 4.4:.3f}"
+
+
+# --- clips: one segment per clip, beats still own the timeline -------------
+
+def _clipped(plan, per_beat=2):
+    """Give every beat `per_beat` video clips filling its measured span."""
+    from engine.contract import Clip
+    from engine.media.clips import slot_durations
+    for beat in plan.script.beats:
+        beat.measured_seconds = beat.measured_seconds or 4.0
+        for i, d in enumerate(slot_durations(beat.seconds(), per_beat)):
+            beat.clips.append(Clip(path=f"{beat.beat_id}-{i}.mp4", query="q",
+                                   provider="pexels", duration=d))
+    return plan
+
+
+def test_one_input_per_clip_not_per_beat():
+    plan = _clipped(make_plan(), per_beat=3)
+    inputs = plan_inputs(plan)
+    assert len(inputs) == 3 * len(plan.script.beats)
+    assert all(is_video for _, is_video in inputs)
+
+
+def test_a_still_fallback_input_is_flagged_as_not_video():
+    plan = _clipped(make_plan(), per_beat=2)
+    plan.script.beats[0].clips[0].path = "still.png"
+    plan.script.beats[0].clips[0].provider = "placeholder"
+    inputs = plan_inputs(plan)
+    assert inputs[0] == ("still.png", False)
+    assert inputs[1][1] is True
+
+
+def test_video_inputs_drop_their_audio():
+    plan = _clipped(make_plan(), per_beat=2)
+    inputs = plan_inputs(plan)
+    graph, _, _ = build_filter_graph(plan, audio_offset=len(inputs))
+    concats = [p for p in graph.split(";") if "concat=n=" in p]
+    building_audio = [p for p in concats if "a=1" in p]
+    assert len(building_audio) == 1, "only the narration concat builds audio"
+    assert all("a=0" in p for p in concats if p not in building_audio), \
+        "every per-beat concat must drop audio"
+    # No video input's audio stream is referenced anywhere in the graph.
+    assert all(f"[{i}:a]" not in graph for i in range(len(inputs)))
+
+
+def test_no_zoompan_on_a_video_clip():
+    plan = _clipped(make_plan(), per_beat=2)
+    graph, _, _ = build_filter_graph(plan, audio_offset=len(plan_inputs(plan)))
+    assert "zoompan" not in graph
+
+
+def test_zoompan_survives_on_a_still_fallback():
+    plan = _clipped(make_plan(), per_beat=2)
+    plan.script.beats[0].clips[0].path = "still.png"
+    plan.script.beats[0].clips[0].provider = "placeholder"
+    graph, _, _ = build_filter_graph(plan, audio_offset=len(plan_inputs(plan)))
+    assert graph.count("zoompan") == 1
+
+
+def test_xfade_count_matches_beat_joins_not_clip_joins():
+    """Hard cuts inside a beat; crossfade only where beats meet."""
+    plan = _clipped(make_plan(), per_beat=3)
+    graph, _, _ = build_filter_graph(plan, audio_offset=len(plan_inputs(plan)))
+    assert graph.count("xfade=") == len(plan.script.beats) - 1
+
+
+def test_total_runtime_still_equals_the_narration():
+    plan = _clipped(make_plan(), per_beat=4)
+    _, total, _ = build_filter_graph(plan, audio_offset=len(plan_inputs(plan)))
+    assert total == pytest.approx(
+        sum(b.seconds() for b in plan.script.beats), abs=1e-6)
+
+
+def test_clip_spans_fill_their_beat_segment_exactly():
+    """The clips of a beat must cover the padded segment, not the raw span.
+
+    `lengths[i]` includes the half-overlap padding on each side that has a
+    transition; laying the stored narration slots down directly would leave
+    the picture short by exactly the drift segment_lengths exists to remove.
+    """
+    import re
+    plan = _clipped(make_plan(beats=3), per_beat=2)
+    lengths, _, _ = segment_lengths([b.seconds() for b in plan.script.beats],
+                                    0.5)
+    graph, _, _ = build_filter_graph(plan, audio_offset=len(plan_inputs(plan)))
+    spans = [float(v) for v in re.findall(r"trim=duration=([\d.]+)", graph)]
+    assert len(spans) == 6
+    for index, length in enumerate(lengths):
+        assert sum(spans[index * 2:index * 2 + 2]) == pytest.approx(
+            length, abs=2e-3)
+
+
+def test_a_clip_segment_is_handed_to_xfade_at_a_constant_rate():
+    """setpts marks its output 1/0, and xfade refuses a variable rate.
+
+    Caught by a real render, not by a string: ffmpeg died at graph setup
+    with "The inputs needs to be a constant frame rate; current rate of 1/0
+    is invalid" before a single frame was written. The fps filter after
+    setpts is what re-declares the rate.
+    """
+    plan = _clipped(make_plan(beats=2), per_beat=2)
+    graph, _, _ = build_filter_graph(plan, audio_offset=len(plan_inputs(plan)))
+    assert graph.count("setpts=PTS-STARTPTS") == 4
+    assert graph.count("setpts=PTS-STARTPTS,fps=30") == 4
+
+
+def test_a_beat_with_no_clips_still_renders_from_its_image():
+    """Backwards compatibility: an older stored plan has image_path only."""
+    plan = make_plan()
+    for beat in plan.script.beats:
+        beat.image_path = f"{beat.beat_id}.png"
+    inputs = plan_inputs(plan)
+    assert len(inputs) == len(plan.script.beats)
+    assert all(is_video is False for _, is_video in inputs)
+
+
+def test_command_feeds_one_input_per_clip_and_offsets_the_audio():
+    """audio_offset is the total input count once beats hold several clips."""
+    from pathlib import Path
+    from engine.assembly.render import build_command
+    from engine.config import Settings
+    plan = _clipped(_timed_plan(beats=3, measured=4.0), per_beat=2)
+    for i, beat in enumerate(plan.script.beats):
+        beat.audio_path = f"C:/tmp/a{i}.mp3"
+    command, _, _ = build_command(plan, Settings(), Path("C:/tmp/out.mp4"))
+    inputs = [command[i + 1] for i, arg in enumerate(command) if arg == "-i"]
+    assert len(inputs) == 9
+    assert [Path(p).name for p in inputs[6:]] == ["a0.mp3", "a1.mp3",
+                                                  "a2.mp3"]
+    graph = command[command.index("-filter_complex") + 1]
+    assert "[6:a][7:a][8:a]concat=n=3" in graph

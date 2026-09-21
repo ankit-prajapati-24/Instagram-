@@ -78,6 +78,27 @@ def segment_lengths(durations: list[float],
     return lengths, offsets, overlaps
 
 
+VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".m4v"}
+
+
+def plan_inputs(plan: ReelPlan) -> list[tuple[str, bool]]:
+    """Every visual input in render order, as ``(path, is_video)``.
+
+    A beat with no clips falls back to its ``image_path``, so plans stored
+    before clips existed still render.
+    """
+    inputs: list[tuple[str, bool]] = []
+    for beat in plan.script.beats:
+        if beat.clips:
+            for clip in beat.clips:
+                inputs.append((clip.path,
+                               Path(clip.path).suffix.lower()
+                               in VIDEO_SUFFIXES))
+        else:
+            inputs.append((beat.image_path or "", False))
+    return inputs
+
+
 def zoompan_expr(motion: str, duration: float, fps: int = 30,
                  width: int = 1080, height: int = 1920) -> str:
     """One beat's Ken Burns move as a zoompan filter string.
@@ -113,6 +134,20 @@ def zoompan_expr(motion: str, duration: float, fps: int = 30,
             f"s={width}x{height}:fps={fps}")
 
 
+def _loop_frames(span: float, fps: int) -> int:
+    """How many frames ``loop`` must hold to fill a ``span``-second slot.
+
+    ``loop`` buffers this many frames and then stops reading the source, so
+    the cap is what bounds the filter's memory: a full-length Pexels clip
+    buffered at 1080x1920 is gigabytes, while one slot's worth is tens of
+    megabytes. It cannot shorten anything — the frames past the cap are the
+    ones ``trim`` was going to drop anyway, and a source that ends early is
+    looped from whatever it did supply. The spare frame absorbs the rounding
+    between a fractional span and a whole frame.
+    """
+    return max(int(round(span * fps)), 1) + 1
+
+
 def _xfade_name(transition: str) -> str:
     """Map our contract's transition names onto xfade's own vocabulary."""
     return {
@@ -139,10 +174,11 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
     is padded to land on it instead of compressing by one overlap per join.
 
     ``audio_offset`` is the input index where the narration streams begin. The
-    render command lists every image first and then every audio file, so
-    beat k's audio is input ``audio_offset + k`` — passed in explicitly rather
-    than rewritten afterwards, because a post-hoc regex would also catch the
-    music input's label.
+    render command lists every visual first — one input per clip, or one per
+    beat for a plan with no clips — and then every audio file, so beat k's
+    audio is input ``audio_offset + k``, passed in explicitly rather than
+    rewritten afterwards, because a post-hoc regex would also catch the music
+    input's label.
     """
     beats = plan.script.beats
     if not beats:
@@ -155,23 +191,76 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
     lengths, offsets, overlaps = segment_lengths(durations,
                                                  transition_duration)
 
-    # --- per-beat video segments -----------------------------------------
-    for index, beat in enumerate(beats):
-        parts.append(
-            f"[{index}:v]scale={width}:{height}:"
-            f"force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},setsar=1,"
-            f"{zoompan_expr(beat.motion, lengths[index], fps, width, height)},"
-            f"format=yuv420p[v{index}]")
+    # --- per-clip video segments, grouped by beat ------------------------
+    #
+    # Beats own the timeline; clips subdivide the span a beat already holds.
+    # `lengths[i]` is the beat's segment *including* its half-overlap
+    # padding, so the clip slots are scaled into it proportionally rather
+    # than using their stored durations directly — the stored values are the
+    # narration-timeline slots, which is what the invariant is asserted on.
+    inputs = plan_inputs(plan)
+    beat_labels: list[str] = []
+    cursor = 0
+    # Every segment is fitted to the canvas the same way, still or video.
+    common = (f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+              f"crop={width}:{height},setsar=1")
 
-    # --- chain them with xfade -------------------------------------------
+    for beat_index, beat in enumerate(beats):
+        slots = ([clip.duration for clip in beat.clips]
+                 if beat.clips else [durations[beat_index]])
+        slot_total = sum(slots)
+        scale_factor = lengths[beat_index] / slot_total if slot_total else 1.0
+        clip_labels: list[str] = []
+
+        for slot in slots:
+            _path, is_video = inputs[cursor]
+            span = slot * scale_factor
+            # A one-clip beat keeps the old label, so a plan with no clips
+            # still comes out of here as v0, v1, ... exactly as before.
+            label = f"v{cursor}"
+            if is_video:
+                # Fit the source to its slot: trim if longer, loop if
+                # shorter. The source's own length never moves the timeline.
+                #
+                # Both `fps` filters earn their place. The first normalises
+                # the source rate, so `size` below is a frame count we can
+                # work out exactly; it is deliberately absent from the still
+                # branch, where zoompan already emits at fps and one extra
+                # frame out of an fps filter would multiply the segment (see
+                # zoompan_expr). The second restores a constant frame rate
+                # after setpts, which marks its output 1/0 — xfade refuses
+                # to configure against that and the whole render dies at
+                # graph setup.
+                parts.append(
+                    f"[{cursor}:v]{common},fps={fps},"
+                    f"loop=loop=-1:size={_loop_frames(span, fps)}:start=0,"
+                    f"trim=duration={span:.3f},setpts=PTS-STARTPTS,"
+                    f"fps={fps},format=yuv420p[{label}]")
+            else:
+                parts.append(
+                    f"[{cursor}:v]{common},"
+                    f"{zoompan_expr(beat.motion, span, fps, width, height)},"
+                    f"format=yuv420p[{label}]")
+            clip_labels.append(label)
+            cursor += 1
+
+        # Hard cuts inside the beat: a plain concat, no overlap to pay for.
+        if len(clip_labels) == 1:
+            beat_labels.append(clip_labels[0])
+        else:
+            joined = "".join(f"[{c}]" for c in clip_labels)
+            parts.append(f"{joined}concat=n={len(clip_labels)}:v=1:a=0"
+                         f"[b{beat_index}]")
+            beat_labels.append(f"b{beat_index}")
+
+    # --- crossfade between beats -----------------------------------------
     if len(beats) == 1:
-        video_label = "v0"
+        video_label = beat_labels[0]
     else:
-        current = "v0"
+        current = beat_labels[0]
         for index in range(1, len(beats)):
             parts.append(
-                f"[{current}][v{index}]xfade="
+                f"[{current}][{beat_labels[index]}]xfade="
                 f"transition={_xfade_name(beats[index].transition)}:"
                 f"duration={overlaps[index - 1]:.3f}:"
                 f"offset={offsets[index - 1]:.3f}[x{index}]")
@@ -222,17 +311,20 @@ def build_command(plan: ReelPlan, settings, out_path: Path, *,
     beats = plan.script.beats
     command: list[str] = [settings.ffmpeg, "-hide_banner", "-y"]
 
-    # Each image is supplied as exactly ONE frame. zoompan's `d` counts output
-    # frames per input frame, so a looped input multiplies the segment length
-    # by the frame count. cwd moves below, so paths are absolute.
-    for beat in beats:
-        command += ["-i", str(Path(beat.image_path).resolve())]
+    # Both kinds are plain inputs. A still is still supplied as exactly one
+    # frame — no -loop — because zoompan's `d` counts output frames per
+    # input frame, so a looped still would multiply its segment length. Video
+    # is fitted to its slot inside the graph instead. cwd moves below, so
+    # paths are absolute.
+    inputs = plan_inputs(plan)
+    for path, _is_video in inputs:
+        command += ["-i", str(Path(path).resolve())]
     for beat in beats:
         command += ["-i", str(Path(beat.audio_path).resolve())]
 
     music_index = None
     if music_path and Path(music_path).exists():
-        music_index = len(beats) * 2
+        music_index = len(inputs) + len(beats)
         command += ["-stream_loop", "-1", "-i",
                     str(Path(music_path).resolve())]
 
@@ -242,7 +334,7 @@ def build_command(plan: ReelPlan, settings, out_path: Path, *,
     graph, total, video_label = build_filter_graph(
         plan, fps=settings.fps, width=settings.width, height=settings.height,
         transition_duration=settings.transition_duration, ass_path=ass_name,
-        audio_offset=len(beats), music_index=music_index)
+        audio_offset=len(inputs), music_index=music_index)
 
     command += [
         "-filter_complex", graph,
