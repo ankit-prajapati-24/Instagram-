@@ -205,6 +205,22 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
     # Every segment is fitted to the canvas the same way, still or video.
     common = (f"scale={width}:{height}:force_original_aspect_ratio=increase,"
               f"crop={width}:{height},setsar=1")
+    # ...and every segment declares its own timebase, rather than inheriting
+    # whichever one the last filter on its branch happens to emit. Three
+    # different branches feed the xfade chain and they do NOT agree: `fps`
+    # (video slots) and `zoompan` (stills) both emit 1/fps, while `concat`
+    # re-declares its output as 1/1000000. xfade refuses to configure when
+    # its two inputs disagree, so the first real run — which had one-clip
+    # beats and multi-clip beats in the same plan — died at graph setup with
+    #
+    #   [Parsed_xfade_247] First input link main timebase (1/1000000) do not
+    #   match the corresponding second input link xfade timebase (1/30)
+    #
+    # before a frame was written. `settb` rescales timestamps into the new
+    # base, so it changes no timing: it only fixes the units they are
+    # counted in. It is applied per clip segment *and* after each beat's
+    # concat, so every label handed onward is 1/fps whatever produced it.
+    timebase = f"settb=1/{fps}"
 
     for beat_index, beat in enumerate(beats):
         slots = [clip.duration for clip in beat.clips]
@@ -249,12 +265,12 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
                     f"[{cursor}:v]{common},fps={fps},"
                     f"loop=loop=-1:size={_loop_frames(span, fps)}:start=0,"
                     f"trim=duration={span:.3f},setpts=PTS-STARTPTS,"
-                    f"fps={fps},format=yuv420p[{label}]")
+                    f"fps={fps},format=yuv420p,{timebase}[{label}]")
             else:
                 parts.append(
                     f"[{cursor}:v]{common},"
                     f"{zoompan_expr(beat.motion, span, fps, width, height)},"
-                    f"format=yuv420p[{label}]")
+                    f"format=yuv420p,{timebase}[{label}]")
             clip_labels.append(label)
             cursor += 1
 
@@ -263,8 +279,10 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
             beat_labels.append(clip_labels[0])
         else:
             joined = "".join(f"[{c}]" for c in clip_labels)
-            parts.append(f"{joined}concat=n={len(clip_labels)}:v=1:a=0"
-                         f"[b{beat_index}]")
+            # concat resets the timebase to 1/1000000 regardless of what its
+            # inputs carried, so it is re-declared on the way out.
+            parts.append(f"{joined}concat=n={len(clip_labels)}:v=1:a=0,"
+                         f"{timebase}[b{beat_index}]")
             beat_labels.append(f"b{beat_index}")
 
     # --- crossfade between beats -----------------------------------------

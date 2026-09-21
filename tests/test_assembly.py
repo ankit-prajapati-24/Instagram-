@@ -524,3 +524,143 @@ def test_command_feeds_one_input_per_clip_and_offsets_the_audio():
         assert "[9:a]volume=" in graph
     finally:
         Path(music).unlink()
+
+
+# --- a real ffmpeg render, with beats of DIFFERENT clip counts -------------
+# Every test above asserts on the filtergraph *string*. A string cannot show
+# that two branches of the graph hand xfade incompatible frames, and that is
+# exactly what killed the first real end-to-end run:
+#
+#   [Parsed_xfade_247] First input link main timebase (1/1000000) do not
+#          match the corresponding second input link xfade timebase (1/30)
+#
+# A beat with one clip reaches the chain straight off `fps`/`zoompan`
+# (timebase 1/fps); a beat with two or more reaches it through `concat`,
+# which re-declares its output timebase as 1/1000000. Only a plan that mixes
+# the two shapes can show it, and only a real render can see it at all.
+
+def _render_settings(tmp_path):
+    """Real Settings, shrunk to something that renders in a second or two."""
+    from pathlib import Path
+
+    from engine.config import Settings
+    settings = Settings()
+    if not Path(settings.ffmpeg).exists():   # pragma: no cover - env guard
+        pytest.skip("ffmpeg is not available in this environment")
+    settings.width, settings.height, settings.fps = 160, 120, 30
+    settings.transition_duration = 0.4
+    settings.work_dir = tmp_path
+    settings.out_dir = tmp_path
+    return settings
+
+
+def _run_ffmpeg(ffmpeg, args):
+    import subprocess
+    subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *args],
+                   check=True, capture_output=True)
+
+
+def _source_clip(ffmpeg, path, seconds, rate=30):
+    """A tiny real mp4. Deliberately not the slot length: the graph loops a
+    short source and trims a long one, and both must survive the fix."""
+    _run_ffmpeg(ffmpeg, ["-f", "lavfi", "-i",
+                         f"testsrc=size=160x120:rate={rate}:"
+                         f"duration={seconds}",
+                         "-pix_fmt", "yuv420p", str(path)])
+
+
+def _source_still(ffmpeg, path):
+    _run_ffmpeg(ffmpeg, ["-f", "lavfi", "-i", "color=c=maroon:size=160x120",
+                         "-frames:v", "1", str(path)])
+
+
+def _source_audio(ffmpeg, path, seconds):
+    _run_ffmpeg(ffmpeg, ["-f", "lavfi", "-i",
+                         f"sine=frequency=220:duration={seconds}",
+                         "-ar", "48000", "-ac", "1", str(path)])
+
+
+def _mixed_clip_count_plan(tmp_path, ffmpeg, seconds=1.2):
+    """Four beats whose clip counts differ: 1, 3 (one a still), 2, and 0.
+
+    The last beat has no clips at all, so it falls back to `image_path` and
+    takes the third branch into the chain, `zoompan`.
+    """
+    from engine.contract import Clip
+    from engine.media.clips import slot_durations
+
+    plan = _timed_plan(beats=4, measured=seconds)
+    shapes = [1, 3, 2, 0]
+    source_lengths = [0.4, 3.0, 1.2]   # cycled: some looped, some trimmed
+    for index, (beat, count) in enumerate(zip(plan.script.beats, shapes)):
+        audio = tmp_path / f"{beat.beat_id}.wav"
+        _source_audio(ffmpeg, audio, seconds)
+        beat.audio_path = str(audio)
+        if count == 0:
+            still = tmp_path / f"{beat.beat_id}-image.png"
+            _source_still(ffmpeg, still)
+            beat.image_path = str(still)
+            continue
+        for slot, duration in enumerate(slot_durations(seconds, count)):
+            # Beat 1's middle slot is a still, the shape the clips stage
+            # produces whenever Pexels under-delivers: a zoompan segment
+            # inside a concat, beside real footage.
+            if index == 1 and slot == 1:
+                path = tmp_path / f"{beat.beat_id}-{slot}.png"
+                _source_still(ffmpeg, path)
+                provider = "placeholder"
+            else:
+                path = tmp_path / f"{beat.beat_id}-{slot}.mp4"
+                _source_clip(ffmpeg, path,
+                             source_lengths[slot % len(source_lengths)])
+                provider = "pexels"
+            beat.clips.append(Clip(path=str(path), query="q",
+                                   provider=provider, duration=duration))
+    return plan
+
+
+def test_real_render_survives_beats_with_different_clip_counts(tmp_path):
+    """The bug in one test: render a plan whose beats are not all alike.
+
+    One clip, three clips, two clips and a no-clip still fallback, all in
+    the same xfade chain. Before the fix ffmpeg refuses to configure the
+    chain and `render` raises; after it, the file exists and lands on the
+    narration total.
+    """
+    from engine.assembly.render import probe_video
+    settings = _render_settings(tmp_path)
+    plan = _mixed_clip_count_plan(tmp_path, settings.ffmpeg)
+    total = sum(beat.seconds() for beat in plan.script.beats)
+    out = tmp_path / "mixed.mp4"
+
+    render(plan, settings, out)
+
+    probe = probe_video(out, settings.ffmpeg)
+    assert probe["bytes"] > 0
+    # The property this pipeline cares about most: picture length == narration.
+    assert probe["duration"] == pytest.approx(total, abs=0.05)
+    assert (probe["width"], probe["height"]) == (settings.width,
+                                                 settings.height)
+    assert probe["has_audio"]
+
+
+def test_every_beat_label_declares_the_same_timebase(tmp_path):
+    """The string half of the same claim, so a regression names itself.
+
+    `concat` emits 1/1000000 while `fps` and `zoompan` emit 1/fps, so the
+    graph must declare the timebase itself rather than inherit whichever
+    filter happened to come last.
+    """
+    plan = _clipped(_timed_plan(beats=3, measured=4.0), per_beat=2)
+    plan.script.beats[1].clips = plan.script.beats[1].clips[:1]
+    plan.script.beats[2].clips = []
+    plan.script.beats[2].image_path = "still.png"
+    graph, _, _ = build_filter_graph(plan,
+                                     audio_offset=len(plan_inputs(plan)))
+    producers = [part for part in graph.split(";")
+                 if "concat=n=" in part and "a=0" in part
+                 or "zoompan=" in part
+                 or "trim=duration=" in part]
+    assert producers, "no video segment producers found"
+    for part in producers:
+        assert "settb=1/30" in part, f"segment without a timebase: {part}"
