@@ -67,6 +67,28 @@ def slot_durations(total: float, count: int) -> list[float]:
     return slots + [total - sum(slots)]
 
 
+def beat_output_dir(target_dir: str | Path, beat_id: str) -> Path:
+    """Where one beat's clips and fallback stills live.
+
+    ``target_dir`` is the whole plan's clips folder. Handing every beat
+    that same directory used to be safe because each beat's filenames were
+    assumed unique, but ``ClipDownloader.download_clip`` in
+    ``stock_agent.py`` names files ``clip_{clip_index:02d}.mp4``, and that
+    index only counts up *within one ``match()`` call* — i.e. within one
+    beat. Sharing a directory meant beat 2's ``clip_01.mp4`` silently
+    overwrote beat 1's, and since ``generate_plan_clips`` runs beats
+    concurrently, it was a write race too: one beat's file could be read
+    while another beat was still writing it.
+
+    A subdirectory per beat id removes the collision at its source,
+    without touching the downloader's naming (out of scope: it is not this
+    module's file) and without needing ``clip_index`` to stay unique across
+    the whole plan. Both real clips and their fallback stills use this same
+    helper so the two never drift apart.
+    """
+    return Path(target_dir) / beat_id
+
+
 def beat_clips(agent, beat: Beat, target_dir: str | Path) -> list[Clip]:
     """Match and download footage for one beat.
 
@@ -74,15 +96,21 @@ def beat_clips(agent, beat: Beat, target_dir: str | Path) -> list[Clip]:
     agent returns fewer matches than slots, the missing slots still exist and
     are marked ``unfilled`` for the caller to fall back. Dropping them would
     silently shorten the beat's picture.
+
+    ``target_dir`` is the plan-level clips folder; this beat's own files go
+    in ``beat_output_dir(target_dir, beat.beat_id)`` so that no other beat's
+    downloads can collide with or race this one's (see that function's
+    docstring for why the downloader's naming makes this necessary).
     """
     seconds = beat.seconds()
     count = clip_count(seconds)
     durations = slot_durations(seconds, count)
 
+    beat_dir = beat_output_dir(target_dir, beat.beat_id)
     result = agent.match(script_segment=beat.voice_text,
                          duration_seconds=seconds,
                          download=True,
-                         output_dir=str(target_dir))
+                         output_dir=str(beat_dir))
     matches = list(result.matches)[:count]
 
     clips: list[Clip] = []
@@ -174,7 +202,9 @@ def generate_plan_clips(plan: ReelPlan, agent, client, work_dir: str | Path,
         for slot, clip in enumerate(clips):
             if clip.provider != "unfilled":
                 continue
-            still = target_dir / f"{beat.beat_id}-{slot}.png"
+            beat_dir = beat_output_dir(target_dir, beat.beat_id)
+            beat_dir.mkdir(parents=True, exist_ok=True)
+            still = beat_dir / f"{slot}.png"
             path, provider = generate_beat_image(
                 client, beat, still, seed=index * 100 + slot, model=model,
                 use_keyless=use_keyless,

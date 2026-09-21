@@ -1,5 +1,6 @@
 import hashlib
 import math
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -114,6 +115,131 @@ def _beat(seconds=5.0):
                 visual_prompt="p", motion="zoom_in", transition="fade")
     beat.measured_seconds = seconds
     return beat
+
+
+def _beat_with_id(beat_id, seconds=5.0):
+    beat = Beat(beat_id=beat_id, role="hook", voice_text="कुछ",
+                caption_text="kuch", target_seconds=seconds,
+                visual_prompt="p", motion="zoom_in", transition="fade")
+    beat.measured_seconds = seconds
+    return beat
+
+
+class RealNamingAgent:
+    """A fake agent that reproduces stock_agent.ClipDownloader's actual
+    on-disk naming instead of hiding behind a mock.
+
+    Every other test in this file mocks ``agent.match`` and never writes a
+    real file, so none of them can see two beats collide on a filename.
+    The real ``ClipDownloader.download_clip`` writes
+    ``clip_{clip_index:02d}.mp4`` into ``output_dir``, and ``clip_index``
+    only counts up within a single ``match()`` call (one beat) — it is not
+    unique across beats. This fake writes files the same way, so a test
+    that calls it for two beats sharing a directory reproduces the exact
+    collision a real Pexels-backed run hit: beat 2's ``clip_01.mp4``
+    overwrites beat 1's.
+
+    ``delay`` sleeps between creating the output directory and writing each
+    file, widening the window for two beats' writes to interleave when run
+    concurrently — it makes a would-be race observable instead of leaving
+    it to timing luck.
+    """
+
+    def __init__(self, delay: float = 0.0):
+        self.output_dirs_used: list[str] = []
+        self.delay = delay
+
+    def match(self, script_segment, duration_seconds, download=True,
+              output_dir="output_clips"):
+        self.output_dirs_used.append(output_dir)
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        count = clip_count(duration_seconds)
+        matches = []
+        for i in range(1, count + 1):
+            if self.delay:
+                time.sleep(self.delay)
+            # Exactly stock_agent.ClipDownloader.download_clip's naming.
+            path = out / f"clip_{i:02d}.mp4"
+            path.write_bytes(f"{script_segment}-{i}".encode() * 20)
+            matches.append(SimpleNamespace(
+                clip_index=i,
+                query=SimpleNamespace(search_query=f"query {i}"),
+                video=SimpleNamespace(id=i, url="https://pexels/x",
+                                      user_name="Someone"),
+                download_path=str(path),
+                error=None))
+        return SimpleNamespace(matches=matches)
+
+
+def test_two_beats_do_not_collide_on_the_real_downloader_filenames(
+        tmp_path):
+    """Reproduces the bug proven from the first real run's database: two
+    beats sharing one clips directory both write clip_01.mp4/clip_02.mp4,
+    so the second beat's download silently clobbers the first's, and both
+    Beat.clips end up pointing at the same two files.
+
+    Uses RealNamingAgent, not a MagicMock, because a mocked agent.match
+    never writes a file and so can never exhibit this collision.
+    """
+    agent = RealNamingAgent()
+    target_dir = tmp_path / "p1" / "clips"   # the one dir the whole plan gets
+
+    beat1 = _beat_with_id("b1", seconds=5.0)   # 2 slots
+    beat2 = _beat_with_id("b2", seconds=5.0)   # 2 slots
+
+    clips1 = beat_clips(agent, beat1, target_dir)
+    clips2 = beat_clips(agent, beat2, target_dir)
+
+    paths1 = [c.path for c in clips1]
+    paths2 = [c.path for c in clips2]
+
+    assert set(paths1).isdisjoint(paths2), (
+        f"beat1 and beat2 point at the same clip file(s): "
+        f"{set(paths1) & set(paths2)}")
+
+    # Every file either beat's Clip claims to own must still exist and be
+    # non-empty after both beats have run — not overwritten by the other.
+    for beat_id, paths in (("b1", paths1), ("b2", paths2)):
+        for path in paths:
+            assert Path(path).exists(), (
+                f"{beat_id}'s clip {path} is missing after both beats ran")
+            assert Path(path).stat().st_size > 0
+
+
+def test_concurrent_beats_get_distinct_and_present_clip_files(tmp_path):
+    """The concurrency angle: generate_plan_clips runs beats through a
+    ThreadPoolExecutor with workers > 1, which turns a shared directory
+    from a plain naming collision into a write race — one beat's file can
+    be read by another beat's Clip while it is still being written.
+
+    A small delay in RealNamingAgent widens the interleaving window so
+    concurrent beats are genuinely overlapping rather than accidentally
+    serialized by the GIL.
+    """
+    agent = RealNamingAgent(delay=0.01)
+    plan = make_plan(beats=6)
+    for beat in plan.script.beats:
+        beat.measured_seconds = 5.0   # 2 clip slots per beat
+
+    generate_plan_clips(plan, agent, client=None, work_dir=tmp_path,
+                        workers=4)
+
+    all_paths: list[str] = []
+    for beat in plan.script.beats:
+        paths = [c.path for c in beat.clips if c.provider == "pexels"]
+        assert len(paths) == 2, f"{beat.beat_id} missing clips: {paths}"
+        for path in paths:
+            assert Path(path).exists(), (
+                f"{beat.beat_id}'s clip {path} missing after the run")
+            assert Path(path).stat().st_size > 0
+        all_paths.extend(paths)
+
+    duplicates = [p for p in set(all_paths) if all_paths.count(p) > 1]
+    assert not duplicates, (
+        f"beats ended up sharing clip file(s), so at least two beats would "
+        f"render the same footage: {duplicates}")
+    assert len(all_paths) == len(set(all_paths))
 
 
 def _match(index, path="clip.mp4", error=None, video=True):
