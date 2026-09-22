@@ -33,7 +33,14 @@ HINGLISH = [
 # own .env must not decide whether a test of the shipped defaults passes:
 # this repo's .env still pins the old speech rate, and reading it would have
 # hidden the very change that fixes it.
-TUNING_KEYS = ("RAHASYA_WORDS_PER_SEC",)
+TUNING_KEYS = (
+    "RAHASYA_WORDS_PER_SEC",
+    "RAHASYA_MODEL_STRONG",
+    "RAHASYA_MODEL_CHEAP",
+    "RAHASYA_MODEL_TRIM",
+    "RAHASYA_MODEL_IMAGE",
+    "RAHASYA_MODEL_EMBED",
+)
 
 
 def shipped_settings(**overrides):

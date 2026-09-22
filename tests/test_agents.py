@@ -497,8 +497,11 @@ def test_a_script_inside_the_tolerance_pays_for_no_trim_at_all():
     assert _count(script) == sum(inside)
 
 
-def test_the_trim_runs_on_the_cheap_model_not_the_strong_one():
+def test_the_trim_runs_on_the_cheap_model_not_the_strong_one(monkeypatch):
     from engine.config import settings, trim_model
+
+    # Ensure model_trim is unset, so the test is deterministic regardless of .env
+    monkeypatch.setattr(settings, "model_trim", "")
 
     client, _, _ = _run(_story_payload(OVER), _lines_payload(TRIMMED),
                         model="strong/one")
