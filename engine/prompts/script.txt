@@ -8,7 +8,7 @@ CHOSEN HOOK (this is beat 1, reuse it as written): {hook}
 VERIFIED CLAIMS — you may only assert what is here:
 {claims}
 
-Write 11 to 14 beats totalling {word_target} spoken Devanagari words
+Write {beats} beats totalling {word_target} spoken Devanagari words
 (count voice_text only). That word count is the single most important
 number here: it is what decides whether the finished video lands in range.
 Aim for {words_per_beat} words per beat on average.
@@ -16,15 +16,17 @@ Aim for {words_per_beat} words per beat on average.
 A beat of 4 words and a beat of 16 are both fine and the variety is wanted —
 but the TOTAL must come out near {word_target}.
 
-STRUCTURE (the retention spine — follow the order):
-  beat 1        role "hook"        reuse the chosen hook verbatim
-  beats 2-3     role "setup"       place it: where, when, who found it
-  beats 4-5     role "escalation"  the first explanation, and why it failed
-  beats 6-7     role "reveal"      what evidence actually showed
-  beat ~8       role "twist"       MUST begin with "लेकिन" (lekin) — this is
-                                   the pattern interrupt at the 60% mark
-  beat 9-12     role "cliffhanger" the part still unexplained
-  last beat     role "cta"         see LOOP CLOSE below
+STRUCTURE (the retention spine, scaled to {beats} beats — follow the order):
+  beat 1                role "hook"        reuse the chosen hook verbatim
+  next couple of beats  role "setup"       place it: where, when, who found it
+  next couple of beats  role "escalation"  the first explanation, and why it
+                                           failed
+  next beat or two      role "reveal"      what evidence actually showed
+  ~70% of the way in    role "twist"       MUST begin with "लेकिन" (lekin) —
+                                           the pattern interrupt, after the
+                                           reveal and before the closing run
+  following beats       role "cliffhanger" the part still unexplained
+  last beat             role "cta"         see LOOP CLOSE below
 
 HARD RULES:
 1. 4 to 18 spoken words per beat, averaging {words_per_beat}. Vary them

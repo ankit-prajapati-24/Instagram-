@@ -20,84 +20,78 @@ from engine.omniroute import ChatResult, CostRecord, ModerationResult
 # reversal, and a loop-closing final line.
 #
 # Two properties matter beyond the story:
-#   * it hits the word budget (~113 spoken words), because runtime follows
+#   * it hits the word budget (~100 spoken words), because runtime follows
 #     word count and the offline harness checks the rendered duration. It was
-#     136 while words_per_second was set to 3.03; Piper actually speaks 2.29,
-#     so the same script was a 59s video against a 38-52s window;
-#   * sentence lengths vary hard, from three words to twenty. An even rhythm
-#     is the clearest AI tell there is, and the QC scorecard warns on it.
+#     twelve beats until the 2026-09-21 beat-count fix: 12 beats against the
+#     103-word budget asked for 8.6 words/beat, which is below what the real
+#     script agent will write (it wrote 161 and failed twice). Ten beats
+#     keeps this sample, like the real prompt, at a words/beat ratio the
+#     model actually produces;
+#   * sentence lengths vary hard, from four words to eighteen. An even
+#     rhythm is the clearest AI tell there is, and the QC scorecard warns
+#     on it.
 SAMPLE_BEATS = [
     ("hook",
      "पाँच सौ कंकाल, एक जमी हुई झील, और एक भी पक्का जवाब नहीं।",
-     "500 kankaal. Ek jami hui jheel. Ek bhi pakka jawaab nahi.",
+     "500 kankaal, ek jami hui jheel, aur ek bhi pakka jawaab nahi.",
      "500 KANKAAL",
      "frozen high-altitude lake at dawn, scattered pale bones under clear "
      "ice, himalayan peaks behind, mist"),
     ("setup",
-     "उत्तराखंड। सोलह हज़ार फुट।",
-     "Uttarakhand. 16,000 foot.",
+     "उत्तराखंड। सोलह हज़ार फुट पर एक भूली हुई पुरानी झील।",
+     "Uttarakhand. 16,000 foot par ek bhuli hui purani jheel.",
      None,
      "vast himalayan basin, tiny glacial lake far below, scale of emptiness, "
      "cold blue light"),
     ("setup",
-     "उन्नीस सौ बयालीस में एक फ़ॉरेस्ट रेंजर ने इन्हें पहली बार देखा।",
-     "1942 mein ek forest ranger ne inhe pehli baar dekha.",
+     "उन्नीस सौ बयालीस में इसे पहली बार देखा।",
+     "1942 mein ise pehli baar dekha gaya.",
      None,
      "1940s indian forest ranger silhouette at a lake edge, oil lamp, "
      "archival grain, back to camera"),
     ("escalation",
-     "पहला अंदाज़ा था — जापानी सैनिक।",
-     "Pehla andaaza tha — Japanese sainik.",
+     "पहला अंदाज़ा था जापानी सैनिक, मगर वो अंदाज़ा ग़लत निकला।",
+     "Pehla andaaza tha Japani sainik, magar wo andaaza galat nikla.",
      None,
      "wartime era rumour, faded map of the himalayas, pins and string, "
      "dim lamplight on paper"),
     ("escalation",
-     "अंदाज़ा ग़लत निकला।",
-     "Andaaza galat nikla.",
+     "फिर तुरंत कार्बन डेटिंग करवाई गई।",
+     "Phir turant carbon dating karvai gayi.",
      None,
-     "discarded papers on a desk, a single lamp, cold night through a "
-     "window, abandoned investigation"),
-    ("reveal",
-     "कार्बन डेटिंग ने बताया — ये हड्डियाँ आठ सौ साल पुरानी हैं।",
-     "Carbon dating ne bataya — ye haddiyan 800 saal purani hain.",
-     "800 SAAL PURANE",
      "laboratory bone sample under cold clinical light, calipers, "
      "scientific instruments, sterile shadows"),
     ("reveal",
-     "सबकी खोपड़ी पर चोट एक ही जगह। ऊपर से।",
-     "Sabki khopdi par chot ek hi jagah. Upar se.",
-     "UPAR SE",
+     "सबकी खोपड़ी पर चोट एक ही जगह मिली।",
+     "Sabki khopdi par chot ek hi jagah mili.",
+     None,
      "hailstorm over a mountain lake at night, enormous hailstones frozen "
      "mid-air, violent sky"),
     ("twist",
-     "लेकिन दो हज़ार उन्नीस की डीएनए जाँच ने वो कहानी तोड़ दी। सारे कंकाल "
-     "एक जगह के नहीं थे।",
-     "Lekin 2019 ki DNA jaanch ne wo kahaani tod di. Saare kankaal ek "
+     "लेकिन दो हज़ार उन्नीस की डीएनए जाँच ने कहानी बदल दी — सारे कंकाल एक "
+     "जगह नहीं थे।",
+     "Lekin 2019 ki DNA jaanch ne kahaani badal di — saare kankaal ek "
      "jagah ke nahi the.",
-     None,
+     "SAB GALAT?",
      "dna sequencing visualisation on a dark screen, cold green traces, "
      "researcher shadow"),
     ("cliffhanger",
-     "कुछ लोग भूमध्य सागर के थे।",
-     "Kuch log Bhumadhya Saagar ke the.",
+     "कुछ लोग यूनान से।",
+     "Kuch log Greece se.",
      "GREECE SE?",
      "ancient mediterranean traveller's worn sandals on himalayan snow, "
      "impossible juxtaposition, cold dusk"),
     ("cliffhanger",
-     "वो हिमालय की इस झील तक पहुँचे कैसे।",
-     "Wo Himalaya ki is jheel tak pahunche kaise.",
+     "वो यहाँ तक पहुँचे कैसे आख़िर।",
+     "Wo yahaan tak pahunche kaise aakhir.",
      None,
      "a narrow frozen mountain pass at night, faint tracks in snow leading "
      "upward, no figures"),
     ("cta",
-     "रिपोर्ट कहती है तीर्थयात्री। डीएनए कहता है कुछ और।",
-     "Report kehti hai teerthyatri. DNA kehta hai kuch aur.",
-     None,
-     "two conflicting documents side by side on dark wood, one official one "
-     "scientific, harsh single light"),
-    ("cta",
-     "और आज तक कोई नहीं जानता, उस रात हुआ क्या था।",
-     "Aur aaj tak koi nahi jaanta, us raat hua kya tha.",
+     "रिपोर्ट कहती है तीर्थयात्री, डीएनए कहता है कुछ और, और आज तक किसी को "
+     "जवाब नहीं मिला।",
+     "Report kehti hai teerthyatri, DNA kehta hai kuch aur, aur aaj tak "
+     "kisi ko jawaab nahi mila.",
      None,
      "empty frozen lake at last light, single set of footprints leading in "
      "and not out, silence"),
@@ -105,8 +99,8 @@ SAMPLE_BEATS = [
 
 
 MOTIONS = ["zoom_in", "move_left", "zoom_out", "move_right"]
-TRANSITIONS = ["fade", "slide_left", "fade", "zoom", "fade", "blur",
-               "fade", "slide_right", "fade", "fade", "zoom", "fade"]
+TRANSITIONS = ["fade", "slide_left", "fade", "fade", "fade", "fade",
+               "blur", "fade", "zoom", "fade"]
 
 
 def _hooks() -> list[dict]:

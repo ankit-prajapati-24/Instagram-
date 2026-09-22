@@ -146,7 +146,7 @@ def run_hooks(client, topic: Topic, provenance: Provenance, *,
 
 def run_script(client, topic: Topic, provenance: Provenance,
                hook: Hook | None, *, model: str | None = None,
-               word_target: int | None = None, beats: int = 12):
+               word_target: int | None = None, beats: int | None = None):
     """``word_target`` is derived from the voice engine's measured rate.
 
     Left unset it resolves to ``target_seconds * words_per_second`` from the
@@ -155,6 +155,13 @@ def run_script(client, topic: Topic, provenance: Provenance,
     default goes stale: it said 136 for a while after that product became
     103, and re-typing the new product as a literal would only move the same
     bug one rate change further out. Nothing to hand-copy, nothing to rot.
+
+    ``beats`` is resolved the same way and for the same reason. It said 12
+    for a while after the word budget above became 103, which asked the
+    model for 8.6 words/beat -- it wrote 161 words instead and failed even
+    after the repair retry. ``beats`` and ``word_target`` are recalibrated
+    together from here on, because it is their ratio, not either number
+    alone, that the model can or cannot write.
 
     Duration follows from word count, so the prompt is told the budget
     rather than a beat range it can satisfy at any length.
@@ -166,8 +173,13 @@ def run_script(client, topic: Topic, provenance: Provenance,
         from engine.config import word_budget
 
         word_target = word_budget()
+    if beats is None:
+        from engine.config import beat_count
+
+        beats = beat_count()
     prompt = load_prompt("script").format(
         word_target=word_target,
+        beats=beats,
         words_per_beat=max(round(word_target / beats), 4),
         topic=topic.raw,
         hook=(f"{hook.voice_text}  /  {hook.caption_text}" if hook

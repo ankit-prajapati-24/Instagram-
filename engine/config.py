@@ -221,6 +221,20 @@ class Settings:
     entity_cooldown_days: int = 45
     beats_min: int = 9
     beats_max: int = 13
+    # The script agent's target beat count. A beat used to be the unit of
+    # visual change -- one beat, one still image -- so cutting the count
+    # meant a motionless video. It no longer is: the media stage fills each
+    # beat with several Pexels clips (a real run put 33 clips across 13
+    # beats, a new shot roughly every 2s), so pacing comes from the clip
+    # layer and this is free to track what word_budget() can actually fill.
+    #
+    # It was 12 against a 103-word budget once -- 8.6 words/beat -- and the
+    # model wrote 161 words instead, failing even after the repair retry.
+    # 10 keeps word_budget() / script_beats at ~10.3 words/beat, close to
+    # the 11.3 the model handled fine before this budget was recalibrated
+    # down from 136. See test_words_per_beat_stays_in_a_band_the_model_will_write
+    # in tests/test_agents.py for the band this is checked against.
+    script_beats: int = 10
 
     def ensure_dirs(self) -> None:
         for d in (self.work_dir, self.out_dir, self.music_dir,
@@ -242,3 +256,16 @@ def word_budget(for_settings: Settings | None = None) -> int:
     """
     active = for_settings or settings
     return int(active.target_seconds * active.words_per_second)
+
+
+def beat_count(for_settings: Settings | None = None) -> int:
+    """The script agent's beat count, formed in exactly one place.
+
+    Kept next to ``word_budget`` on purpose: the two numbers together are
+    what decide words-per-beat, and recalibrating one without the other is
+    the bug that shipped a script the model refused to write at 8.6
+    words/beat. Both ``plan_stage`` and ``run_script``'s own default come
+    through here so they can never drift apart again.
+    """
+    active = for_settings or settings
+    return active.script_beats

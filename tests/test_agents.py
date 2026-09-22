@@ -342,3 +342,87 @@ def test_two_off_budget_scripts_in_a_row_still_raise():
     with pytest.raises(AgentError):
         run_script(client, Topic.make("x"), Provenance(), None,
                    word_target=BUDGET)
+
+
+# --- the beat count must not be a hand-copied number either ----------------
+# 2026-09-21: pipeline.py passed beats=12 and run_script's own signature
+# defaulted to beats=12 -- two literal copies of the same number, which is
+# exactly the failure mode word_target above already had. A recalibration
+# from 136 to a 103-word budget left both untouched, so the model was asked
+# for 8.6 words/beat and wrote 161 words instead of 103, failing even after
+# the repair retry. These tests pin the fix the same way the word_target
+# ones do: resolved from configuration, in one place, at call time.
+
+def test_the_beats_default_is_resolved_from_configuration():
+    import inspect
+
+    from engine.agents import run_script
+
+    default = inspect.signature(run_script).parameters["beats"].default
+    assert default is None, (
+        f"beats defaults to the literal {default!r}; it goes stale the next "
+        f"time the word budget is recalibrated")
+
+
+def test_the_resolved_beats_follows_the_configured_count(monkeypatch):
+    from engine.agents import run_script
+    from engine.config import settings
+    from engine.contract import Provenance, Topic
+
+    monkeypatch.setattr(settings, "script_beats", 5)
+    expected_words_per_beat = max(round(BUDGET / 5), 4)
+
+    client = Replaying(_script_payload([expected_words_per_beat] * 5))
+    run_script(client, Topic.make("x"), Provenance(), None,
+              word_target=BUDGET)
+
+    prompt = client.seen[0][0]["content"]
+    assert f"{expected_words_per_beat}" in prompt
+
+
+def test_the_resolved_beats_is_what_the_pipeline_would_have_passed():
+    """plan_stage's beats= must not disagree with run_script's own default."""
+    from engine.agents import run_script
+    from engine.config import beat_count
+    from engine.contract import Provenance, Topic
+
+    expected = beat_count()
+    words_per_beat = max(round(BUDGET / expected), 4)
+    client = Replaying(_script_payload([words_per_beat] * expected))
+    run_script(client, Topic.make("x"), Provenance(), None,
+              word_target=BUDGET)
+    assert f"{words_per_beat}" in client.seen[0][0]["content"]
+
+
+def test_the_beat_count_is_formed_in_one_place():
+    """Two copies of the beat count is how word_target's default rotted."""
+    import engine.pipeline as pipeline
+    from engine.config import beat_count, settings
+
+    assert beat_count() == settings.script_beats
+    assert pipeline.beat_count is beat_count
+
+
+def test_words_per_beat_stays_in_a_band_the_model_will_write():
+    """The 2026-09-21 regression, pinned as an invariant.
+
+    12 beats against a 103-word budget asked for 8.6 words/beat, and the
+    model wrote 161 words instead -- 56% over, and it failed again after
+    the repair retry. The old world -- 12 beats x 11.3 words/beat, a
+    136-word budget -- is the last ratio known to work.
+
+    Bounds: 9.0 is set just above the 8.6 that failed; 14.0 leaves headroom
+    above the 11.3 that worked (and above 9 beats' 11.4) without being so
+    loose it would wave through another 8-point ratio. Both ends are drawn
+    from this evidence, not from taste.
+    """
+    from engine.config import beat_count, word_budget
+    from tests.factories import shipped_settings
+
+    settings = shipped_settings()
+    words_per_beat = word_budget(settings) / beat_count(settings)
+
+    assert 9.0 <= words_per_beat <= 14.0, (
+        f"{words_per_beat:.1f} words/beat ({word_budget(settings)} words "
+        f"over {beat_count(settings)} beats) is outside the band the "
+        f"model can actually write to")

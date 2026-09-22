@@ -28,7 +28,7 @@ from engine.agents import (AgentError, run_hooks, run_metadata, run_research,
                            run_script)
 from engine.assembly.captions import write_ass
 from engine.assembly.render import probe_video, render
-from engine.config import word_budget
+from engine.config import beat_count, word_budget
 from engine.contract import ReelPlan, Script, Topic
 from engine.gates import dedup
 from engine.gates.qc import (PRE_RENDER_MARGIN, duration_in_range,
@@ -161,7 +161,7 @@ def plan_stage(topic_raw: str, client, store, settings, *,
         script, cost = run_script(client, topic, provenance, hooks[0],
                                   model=settings.model_strong or None,
                                   word_target=word_budget(settings),
-                                  beats=12)
+                                  beats=beat_count(settings))
         store.record_cost(plan.plan_id, Stage.SCRIPT, cost)
         script.chosen_hook = hooks[0].variant_id
         plan.script = script
