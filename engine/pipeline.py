@@ -26,6 +26,7 @@ from typing import Callable
 
 from engine.agents import (AgentError, run_hooks, run_metadata, run_research,
                            run_script)
+from engine.assembly import audio
 from engine.assembly.captions import write_ass
 from engine.assembly.render import probe_video, render
 from engine.config import beat_count, word_budget
@@ -328,7 +329,17 @@ def produce_stage(plan: ReelPlan, client, store, settings, *,
         width=settings.width, height=settings.height)
     emit(PipelineEvent(Stage.CAPTIONS, "done", Path(ass_path).name))
 
-    emit(PipelineEvent(Stage.RENDER, "started"))
+    # The music bed. Nothing above this line knows about it and the caller
+    # normally passes nothing, so this is where a clean clone gets one:
+    # whatever is in `assets/music/`, preferring a real file over the
+    # generated placeholder (see engine/assembly/audio.py and
+    # scripts/make_audio_assets.py). Resolved here rather than inside
+    # `render` so that a direct render stays exactly as explicit as it was.
+    if music_path is None:
+        music_path = audio.find_music(settings)
+    emit(PipelineEvent(Stage.RENDER, "started",
+                       f"music: {Path(music_path).name}" if music_path
+                       else "music: none (assets/music/ is empty)"))
     out_path = Path(settings.out_dir) / f"{plan.topic.slug}-{plan.plan_id[:8]}.mp4"
     key = f"render:{plan.plan_id}:v1"
     try:

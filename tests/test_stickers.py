@@ -244,6 +244,11 @@ def test_sticker_inputs_land_after_the_music(tmp_path):
     settings = Settings()
     settings.work_dir = tmp_path
     settings.stickers = True
+    # The sound effects append after the stickers, for the same reason the
+    # stickers append after the music. Off here so that "every input past
+    # the music is a sticker" stays the exact claim this test makes; where
+    # the sounds land is pinned in tests/test_audio.py.
+    settings.sfx = False
     if not stk.prepare(plan, settings):          # pragma: no cover
         pytest.skip("no colour emoji font on this machine")
 

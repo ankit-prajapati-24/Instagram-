@@ -300,6 +300,9 @@ def _command_for(beats=3, measured=4.0, music=None):
     # asserted in tests/test_stickers.py. Off here, so these assertions stay
     # about the image/audio ordering they were written for.
     settings.stickers = False
+    # Same for the sound effects, which append after the stickers for the
+    # same reason; tests/test_audio.py pins where they land.
+    settings.sfx = False
     return build_command(plan, settings, Path("C:/tmp/out.mp4"),
                          music_path=music)
 
@@ -731,6 +734,7 @@ def test_command_feeds_one_input_per_clip_and_offsets_the_audio():
             beat.audio_path = f"C:/tmp/a{i}.mp3"
         settings = Settings()
         settings.stickers = False   # see _command_for
+        settings.sfx = False        # see _command_for
         command, _, _ = build_command(plan, settings,
                                       Path("C:/tmp/out.mp4"),
                                       music_path=music)
@@ -743,6 +747,26 @@ def test_command_feeds_one_input_per_clip_and_offsets_the_audio():
         graph = command[command.index("-filter_complex") + 1]
         assert "[6:a][7:a][8:a]concat=n=3" in graph
         # len(beats) * 2 would be input 6 -- the first narration stream.
+        assert "[9:a]volume=" in graph
+
+        # ...and the sound effects layer, which adds inputs of its own,
+        # must not move either number. It appends after the music and
+        # after the stickers precisely so it cannot: see the module
+        # docstring in engine/assembly/audio.py.
+        import tempfile as _tempfile
+        sfx_dir = Path(_tempfile.mkdtemp())
+        for kind in ("whoosh", "pop", "subdrop"):
+            (sfx_dir / f"placeholder-{kind}.wav").write_bytes(b"\x00")
+        settings.sfx, settings.sfx_dir = True, sfx_dir
+        command, _, _ = build_command(plan, settings,
+                                      Path("C:/tmp/out.mp4"),
+                                      music_path=music)
+        inputs = [command[i + 1] for i, arg in enumerate(command)
+                  if arg == "-i"]
+        assert len(inputs) > 10, "no sound effects were added at all"
+        assert Path(inputs[9]).name == Path(music).name
+        graph = command[command.index("-filter_complex") + 1]
+        assert "[6:a][7:a][8:a]concat=n=3" in graph
         assert "[9:a]volume=" in graph
     finally:
         Path(music).unlink()

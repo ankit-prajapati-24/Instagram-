@@ -44,6 +44,18 @@ Check it landed:
 python -c "import piper, imageio_ffmpeg, fastapi; print('ok')"
 ```
 
+Then generate the placeholder audio, once:
+
+```bash
+python scripts/make_audio_assets.py
+```
+
+That writes a music bed into `assets/music/` and three sound effects into
+`assets/sfx/`. They are synthesised by ffmpeg, they are gitignored, and
+**they sound cheap** — they are a stand-in for a sound designer, not one.
+Skip this step and the pipeline still runs; the video just comes out over
+silence the way it did before. See [Audio](#audio) for how to replace them.
+
 ---
 
 ## 2. Install OmniRoute
@@ -162,9 +174,94 @@ documents the defaults. The ones worth knowing:
 | `PEXELS_API_KEY` | _(none)_ | stock footage for scenes, the primary visual source; free to register, and without it every scene falls back to the still-image chain |
 | `RAHASYA_VIDEO_GRADE` | `1` | one colour grade + vignette over every frame, so 20-odd clips from different Pexels creators read as one video; `0` renders ungraded |
 | `RAHASYA_VIDEO_GRAIN` | `9` | film grain strength within the grade; this is the expensive part of the render (it wrecks inter-frame compression, not the CPU cost of the filter itself) — `0` keeps the colour work and vignette but skips the grain and most of the extra render time |
+| `RAHASYA_MUSIC` | `1` | background bed from `assets/music/`, auto-ducked under the voice; `0` renders over silence. See [Audio](#audio) |
+| `RAHASYA_MUSIC_LUFS` | `-25` | where the bed sits before ducking, as an absolute loudness; the voice is at `-15`, so this is 10 LU under it |
+| `RAHASYA_SFX` | `1` | whooshes on the cuts that mark a turn, a pop per sticker, one sub-bass hit on the hook; `0` removes the layer |
+| `RAHASYA_SFX_WHOOSH_MAX` | `3` | how many cut whooshes may fire in one video |
 
 **Provider API keys do not go in this file.** They belong to OmniRoute, in its
 own env file or dashboard.
+
+---
+
+## Audio
+
+Three tracks go into every render: the narration, a music bed ducked out of
+its way, and a thin layer of sound effects.
+
+### Replacing the placeholders
+
+There is no filename to configure and no code to change. Discovery prefers
+**any file that is not named `placeholder-`**, and the renderer measures
+whatever it finds and normalises it, so the level of the file you drop in
+does not matter either.
+
+| Put a file here | And it becomes |
+|---|---|
+| `assets/music/<anything>.mp3` (or `.wav`, `.m4a`, `.ogg`, `.opus`, `.flac`) | the background bed |
+| `assets/sfx/whoosh.wav` or `whoosh-<anything>.<ext>` | the cut whoosh |
+| `assets/sfx/pop.wav` or `pop-<anything>.<ext>` | the sticker pop |
+| `assets/sfx/subdrop.wav` or `subdrop-<anything>.<ext>` | the sub-bass hit on the hook |
+
+The rule in full: a file belongs to a sound kind when its name, with any
+leading `placeholder-` stripped, is the kind's name or starts with the
+kind's name and a hyphen. If two files match, the one that is not a
+placeholder wins; if both are real, alphabetical order decides. For the
+music bed, any audio file in `assets/music/` is a candidate and the same
+preference applies — so you can leave the placeholder in place while you
+audition a real track.
+
+You do not need to delete the placeholders, and
+`scripts/make_audio_assets.py` will not overwrite a file that already
+exists (pass `--force` if you want the placeholders regenerated).
+
+### What the placeholders actually are
+
+Four ffmpeg-synthesised tones, and they sound like it:
+
+* **the bed** — four low sines (55/82.5/110/165 Hz) a fifth and an octave
+  apart, under a 0.05 Hz tremolo, rolled off at 900 Hz with a long echo.
+  Sixty seconds, with every frequency an exact multiple of 1/60 Hz so the
+  loop seam is silent.
+* **the whoosh** — pink noise through a flanger with a swell in the middle.
+  ffmpeg cannot sweep a filter's cutoff over time, which is what a real
+  whoosh is, so the moving comb stands in for it.
+* **the pop** — two damped sines an octave apart, the upper decaying faster.
+* **the sub-drop** — one sine falling 90 Hz → 30 Hz over 1.2s.
+
+They exist so a clean clone renders a video you can *hear* the feature in.
+Do not ship them as a finished sound design.
+
+### Ducking
+
+The bed does not sit at a fixed level. `sidechaincompress` in the render
+graph is keyed on the narration itself, so the music drops while the voice
+speaks and comes back up in the gaps between beats — which is the whole
+point, and which a static gain cannot do.
+
+Measured against a real 49.5s Piper narration: 7.1 dB of gain reduction
+(median) while the voice is speaking, 9.2 dB at the 90th percentile, and
+**0.0 dB** — full recovery — in the real pauses between beats, while the
+50-150 ms gaps between words inside a sentence never recover, so it lifts
+between lines rather than pumping inside them. With the bed already sitting
+10 LU under the voice, that puts the music about 18 dB down under speech.
+
+`RAHASYA_MUSIC_LUFS` moves the bed up or down; `RAHASYA_MUSIC_DUCK=0` mixes
+it flat instead, if you want to hear the difference.
+
+### Sound effects, and why there are so few
+
+A whoosh only on cuts into a beat whose role is a turn in the story
+(`reveal`, `twist`) — the same beats the picture already pushes in on —
+capped at three and never within 4 s of each other. A pop on each emoji
+sticker, so at most three. One sub-bass hit under the hook. Seven sounds
+over fifty seconds, at the outside.
+
+That restraint is the feature, for the same reason `RAHASYA_STICKER_MAX` is
+three: ten beats is nine cuts, and a sound on every cut stops meaning
+"something changed" and becomes the texture of the video.
+`RAHASYA_SFX_WHOOSH_MAX` raises the cap if you disagree; `RAHASYA_SFX=0`
+removes the layer entirely.
 
 ---
 
@@ -214,11 +311,13 @@ the expected path.
 clips are tagged `licence='pexels'`, which records the source, not a verified
 commercial clearance. Check Pexels' terms before monetising.
 
-**There is no music or sound effects.** `engine/assembly/render.py` supports
-mixing in a music bed, but nothing supplies one and `assets/music/` is empty,
-so every video renders over silence. Short-form retention research weighs
-sound design heavily, so this is a real gap, not a nicety — it is the next
-thing worth fixing, not a footnote.
+**The audio is plumbed but the sounds are placeholders.** The music bed, the
+ducking and the SFX layer are built, wired and tested — a committed test
+renders with ffmpeg and measures the duck in decibels rather than asserting
+on the filtergraph string. What is *not* built is the sound design: the four
+files `scripts/make_audio_assets.py` synthesises are ffmpeg tones and they
+sound like it. Sourcing or commissioning a real bed and three real one-shots
+is the remaining work, and it needs no code — see [Audio](#audio).
 
 **Whether the grade actually makes 20-odd stock clips read as one video is
 still a judgement call, not a measurement.** The colour grade, vignette and

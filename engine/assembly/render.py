@@ -17,6 +17,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from engine.assembly import audio as audio_mod
 from engine.assembly import stickers as stickers_mod
 from engine.contract import ReelPlan
 
@@ -235,10 +236,13 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
                        audio_offset: int = 0,
                        music_index: int | None = None,
                        music_gain_db: float = -18.0,
+                       duck: bool = True,
                        grade: bool = True,
                        grain: float = GRAIN_DEFAULT,
                        stickers: list | None = None,
-                       sticker_offset: int = 0
+                       sticker_offset: int = 0,
+                       sfx: list | None = None,
+                       sfx_offset: int = 0
                        ) -> tuple[str, float, str]:
     """Build the filter_complex string, total duration and video out-label.
 
@@ -268,6 +272,18 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
     and *before* the caption burn, so a caption always draws over a sticker
     rather than under it. ``overlay`` copies its first input's timestamps
     through untouched, so none of this moves the narration invariant.
+
+    ``sfx`` are the sound effects (see ``engine.assembly.audio``), one extra
+    input each, starting at ``sfx_offset`` -- which is after the stickers,
+    so this new class of input cannot renumber ``audio_offset``,
+    ``music_index`` or ``sticker_offset``. ``duck`` keys a sidechain
+    compressor on the narration, so the bed drops under speech and rises in
+    the pauses; with it off the bed is mixed at a flat gain, which is what
+    this renderer did before and which cannot rise in a pause at all.
+
+    Nothing in the audio branch touches a video label, and the mix ends on
+    ``duration=first`` -- the narration -- so the picture-equals-narration
+    invariant ``segment_lengths`` maintains is untouched by any of it.
     """
     beats = plan.script.beats
     if not beats:
@@ -449,15 +465,57 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
                                for i in range(len(beats)))
     parts.append(f"{narration_inputs}concat=n={len(beats)}:v=0:a=1[narr]")
 
+    # The narration is always the FIRST input to the mix, because the mix
+    # ends on `duration=first` and the narration is the timeline.
+    mix_labels = ["narr"]
+
     if music_index is not None:
+        if duck:
+            # The narration has to reach two places: the mix, and the
+            # compressor's key input. `asplit` is how a label is consumed
+            # twice -- referencing [narr] from both would be a graph error,
+            # not a silent fallback, but the split is also what makes the
+            # routing legible.
+            parts.append("[narr]asplit=2[narrmix][duckkey]")
+            # [duckkey] goes into the compressor exactly as the narration
+            # concat emitted it, with no aformat in front of it. Putting
+            # one there to tidy up the channel layout measured 2.2 dB off
+            # the duck, because upmixing mono to stereo arrives ~3 dB
+            # quieter at the detector. See audio.MIX_FORMAT.
+            mix_labels = ["narrmix"]
+        # Ducked, the loaded bed is an intermediate the compressor reads;
+        # undicked it goes straight to the mix, so it takes the name the
+        # mix expects and there is no extra filter on the path at all.
+        loaded = "bed0" if duck else "bed"
         parts.append(
             f"[{music_index}:a]volume={music_gain_db}dB,"
-            f"aloop=loop=-1:size=2e9,atrim=0:{total:.3f}[bed]")
-        parts.append("[narr][bed]amix=inputs=2:duration=first:"
-                     "dropout_transition=0,loudnorm=I=-14:TP=-1.5:LRA=11"
-                     "[aout]")
-    else:
+            f"aloop=loop=-1:size=2e9,atrim=0:{total:.3f},"
+            f"{audio_mod.MIX_FORMAT}[{loaded}]")
+        if duck:
+            # See engine.assembly.audio for where these numbers came from.
+            # The bed is what gets compressed; the voice is what drives it.
+            parts.append(f"[bed0][duckkey]{audio_mod.duck_filter()}[bed]")
+        mix_labels.append("bed")
+
+    if sfx:
+        sfx_parts, sfx_labels = audio_mod.sfx_chain(sfx, sfx_offset)
+        parts.extend(sfx_parts)
+        mix_labels.extend(sfx_labels)
+
+    if len(mix_labels) == 1:
         parts.append("[narr]loudnorm=I=-14:TP=-1.5:LRA=11[aout]")
+    else:
+        joined = "".join(f"[{label}]" for label in mix_labels)
+        # `normalize=0` is not a detail. amix's default divides the sum by
+        # the number of inputs that are still running, so the moment a
+        # half-second whoosh ends every other track steps up -- an audible
+        # jump, on every sound effect, that no filtergraph string assertion
+        # would ever show. Off, the tracks are summed at the levels the
+        # gains already set, and `loudnorm` on the end is what brings the
+        # result back to -14 LUFS with a true peak under -1.5 dB.
+        parts.append(f"{joined}amix=inputs={len(mix_labels)}:duration=first:"
+                     f"dropout_transition=0:normalize=0,"
+                     f"loudnorm=I=-14:TP=-1.5:LRA=11[aout]")
 
     return ";".join(parts), total, video_label
 
@@ -487,10 +545,16 @@ def build_command(plan: ReelPlan, settings, out_path: Path, *,
         command += ["-i", str(Path(beat.audio_path).resolve())]
 
     music_index = None
+    music_gain = -18.0
     if music_path and Path(music_path).exists():
         music_index = len(inputs) + len(beats)
         command += ["-stream_loop", "-1", "-i",
                     str(Path(music_path).resolve())]
+        # Measured off the file itself, so a track dropped into
+        # assets/music/ at any mastering level lands in the same place in
+        # the mix without a knob being touched. Falls back to the flat
+        # -18dB this renderer used before if it cannot be read.
+        music_gain = audio_mod.music_gain_db(music_path, settings)
 
     # Sticker inputs go LAST, after the music. `audio_offset` and
     # `music_index` are positional into this argv, and appending here is
@@ -501,6 +565,17 @@ def build_command(plan: ReelPlan, settings, out_path: Path, *,
     if prepared:
         command += stickers_mod.sticker_inputs(prepared, settings.fps)
 
+    # ...and the sound effects go after the stickers, for exactly the same
+    # reason the stickers went after the music: every index above is a
+    # position in this argv computed from the counts before it, so the only
+    # place a new class of input can be added without renumbering a
+    # narration stream is the end. Get this wrong and beat k's voice comes
+    # out of beat k+1's slot -- silently, in a file nobody plays.
+    sfx_cues = audio_mod.plan_sfx(plan, settings, stickers=prepared)
+    sfx_offset = sticker_offset + len(prepared)
+    if sfx_cues:
+        command += audio_mod.sfx_inputs(sfx_cues)
+
     ass_name = Path(ass_path).name if ass_path else None
     run_cwd = str(Path(ass_path).parent) if ass_path else None
 
@@ -508,8 +583,11 @@ def build_command(plan: ReelPlan, settings, out_path: Path, *,
         plan, fps=settings.fps, width=settings.width, height=settings.height,
         transition_duration=settings.transition_duration, ass_path=ass_name,
         audio_offset=len(inputs), music_index=music_index,
+        music_gain_db=music_gain,
+        duck=bool(getattr(settings, "music_duck", True)),
         grade=settings.video_grade, grain=settings.video_grain,
-        stickers=prepared, sticker_offset=sticker_offset)
+        stickers=prepared, sticker_offset=sticker_offset,
+        sfx=sfx_cues, sfx_offset=sfx_offset)
 
     command += [
         "-filter_complex", graph,

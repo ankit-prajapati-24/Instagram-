@@ -223,6 +223,54 @@ class Settings:
         default_factory=lambda: float(
             os.getenv("RAHASYA_VIDEO_GRAIN", "9")))
 
+    # --- Music bed ---------------------------------------------------------
+    # A background bed under the narration, ducked out of its way by a
+    # sidechain compressor keyed on the voice. Mirrors video_grade: on by
+    # default, off with RAHASYA_MUSIC=0, and off is a complete off -- no
+    # input, no amix, the filtergraph the renderer had before it existed.
+    #
+    # There is nothing to configure to make it work: `assets/music/` ships a
+    # generated placeholder (scripts/make_audio_assets.py) and any file you
+    # drop in beside it wins. See engine/assembly/audio.py.
+    music: bool = field(
+        default_factory=lambda: os.getenv(
+            "RAHASYA_MUSIC", "1").strip().lower()
+        not in {"0", "false", "no", "off"})
+    # The ducking itself, separable from the bed: 0 keeps the music and
+    # mixes it at a flat gain, which is what this renderer did before. Only
+    # useful for hearing the difference -- a flat gain cannot rise in the
+    # pauses, which is the half of the feature that matters.
+    music_duck: bool = field(
+        default_factory=lambda: os.getenv(
+            "RAHASYA_MUSIC_DUCK", "1").strip().lower()
+        not in {"0", "false", "no", "off"})
+    # Where the bed sits before ducking, as an absolute integrated loudness.
+    # Every narration beat is loudnorm'd to I=-15 by piper_voice, so -25 is
+    # 10 LU under the voice; the duck takes another 7-9 dB off while the
+    # voice is speaking. Lower it if the bed is too present for you.
+    music_lufs: float = field(
+        default_factory=lambda: float(
+            os.getenv("RAHASYA_MUSIC_LUFS", "-25")))
+
+    # --- Sound effects -----------------------------------------------------
+    # Whooshes on the cuts that mark a turn, a pop on each emoji sticker,
+    # and one sub-bass hit under the hook. Same off switch shape as the
+    # rest: RAHASYA_SFX=0 and the graph goes back to what it was.
+    sfx: bool = field(
+        default_factory=lambda: os.getenv(
+            "RAHASYA_SFX", "1").strip().lower()
+        not in {"0", "false", "no", "off"})
+    # How many cut whooshes may fire. Three, for the same reason
+    # sticker_max is three: ten beats is nine cuts, and a sound on every one
+    # of them is exhausting rather than emphatic.
+    sfx_whoosh_max: int = field(
+        default_factory=lambda: int(
+            os.getenv("RAHASYA_SFX_WHOOSH_MAX", "3")))
+    # A trim in dB on top of the per-kind peak targets the renderer
+    # measures each file against. Negative is quieter.
+    sfx_gain_db: float = field(
+        default_factory=lambda: float(os.getenv("RAHASYA_SFX_GAIN", "0")))
+
     # --- Emoji stickers ----------------------------------------------------
     # A small emoji that pops onto the frame on the word that earns it.
     # Mirrors video_grade exactly: on by default, off with
@@ -272,9 +320,14 @@ class Settings:
     db_path: Path = field(
         default_factory=lambda: _env_path("RAHASYA_DB",
                                           BASE_DIR / "engine.db"))
+    # RAHASYA_MUSIC_DIR, not RAHASYA_MUSIC: the latter is the on/off switch
+    # above, and one env key cannot be both a boolean and a path.
     music_dir: Path = field(
-        default_factory=lambda: _env_path("RAHASYA_MUSIC",
+        default_factory=lambda: _env_path("RAHASYA_MUSIC_DIR",
                                           BASE_DIR / "assets" / "music"))
+    sfx_dir: Path = field(
+        default_factory=lambda: _env_path("RAHASYA_SFX_DIR",
+                                          BASE_DIR / "assets" / "sfx"))
 
     # --- Guardrails --------------------------------------------------------
     daily_usd_ceiling: float = field(
@@ -323,7 +376,7 @@ class Settings:
                 os.getenv("RAHASYA_DURATION_MAX", default_max))
 
     def ensure_dirs(self) -> None:
-        for d in (self.work_dir, self.out_dir, self.music_dir,
+        for d in (self.work_dir, self.out_dir, self.music_dir, self.sfx_dir,
                   self.piper_models_dir):
             d.mkdir(parents=True, exist_ok=True)
 
