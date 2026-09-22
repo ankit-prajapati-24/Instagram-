@@ -223,6 +223,35 @@ class Settings:
         default_factory=lambda: float(
             os.getenv("RAHASYA_VIDEO_GRAIN", "9")))
 
+    # --- Emoji stickers ----------------------------------------------------
+    # A small emoji that pops onto the frame on the word that earns it.
+    # Mirrors video_grade exactly: on by default, off with
+    # RAHASYA_STICKERS=0, and off is a complete off -- no inputs, no
+    # overlay, a filtergraph byte-identical to the one before this feature.
+    stickers: bool = field(
+        default_factory=lambda: os.getenv(
+            "RAHASYA_STICKERS", "1").strip().lower()
+        not in {"0", "false", "no", "off"})
+    # How many may fire in one video. Three, for the same reason
+    # engine/prompts/script.txt limits on_screen_text to "3-4 beats only, at
+    # the biggest moments": past that they stop being emphasis and become
+    # the texture of the video. Raise it if you want, but the failure mode
+    # of this feature is noise, not scarcity.
+    sticker_max: int = field(
+        default_factory=lambda: int(os.getenv("RAHASYA_STICKER_MAX", "3")))
+    # The colour emoji font the sticker PNGs are drawn from. Windows ships
+    # one; a Linux VPS wants something like
+    # /usr/share/fonts/truetype/noto/NotoColorEmoji.ttf. If it is missing
+    # the render still happens, without stickers.
+    sticker_font: str = field(
+        default_factory=lambda: os.getenv(
+            "RAHASYA_STICKER_FONT",
+            r"C:\Windows\Fonts\seguiemj.ttf"))
+    # Resting size as a fraction of frame width. 0.17 of 1080 is ~184px.
+    sticker_scale: float = field(
+        default_factory=lambda: float(
+            os.getenv("RAHASYA_STICKER_SCALE", "0.17")))
+
     # --- Captions ----------------------------------------------------------
     captions_source: str = field(
         default_factory=lambda: os.getenv("RAHASYA_CAPTIONS", "caption_text"))

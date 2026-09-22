@@ -17,6 +17,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from engine.assembly import stickers as stickers_mod
 from engine.contract import ReelPlan
 
 # Ken Burns strength. Deliberately gentle: a 45-second Reel with ten beats
@@ -235,7 +236,9 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
                        music_index: int | None = None,
                        music_gain_db: float = -18.0,
                        grade: bool = True,
-                       grain: float = GRAIN_DEFAULT
+                       grain: float = GRAIN_DEFAULT,
+                       stickers: list | None = None,
+                       sticker_offset: int = 0
                        ) -> tuple[str, float, str]:
     """Build the filter_complex string, total duration and video out-label.
 
@@ -257,6 +260,14 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
     three source branches have already merged, so there is no path into the
     xfade chain that can miss it. An ungraded fallback still would be the one
     shot in the video that stands out, which is the opposite of the point.
+
+    ``stickers`` are emoji pop-ups (see ``engine.assembly.stickers``), each
+    of which is one extra input -- a short PNG sequence holding its whole
+    animation -- starting at ``sticker_offset``. They are composited after
+    the xfade chain, so their times are absolute on the finished timeline,
+    and *before* the caption burn, so a caption always draws over a sticker
+    rather than under it. ``overlay`` copies its first input's timestamps
+    through untouched, so none of this moves the narration invariant.
     """
     beats = plan.script.beats
     if not beats:
@@ -404,6 +415,22 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
             current = f"x{index}"
         video_label = current
 
+    # --- emoji stickers ---------------------------------------------------
+    #
+    # After the xfade chain, so a sticker's `enable` window is measured on
+    # the finished timeline and lines up with the narration; before the
+    # caption burn, so libass draws over the sticker and not under it. The
+    # sticker is decoration, the caption is the information, and the
+    # placement (see engine.assembly.stickers) keeps them apart anyway.
+    #
+    # It also leaves `subtitles` as the last filter in the graph, which is
+    # what the bare-filename-plus-cwd arrangement depends on.
+    if stickers:
+        sticker_parts, video_label = stickers_mod.sticker_chain(
+            stickers, video_label, sticker_offset, fps=fps, width=width,
+            height=height)
+        parts.extend(sticker_parts)
+
     # --- captions --------------------------------------------------------
     if ass_path:
         # ``ass_path`` must be a bare filename here: ``render`` runs ffmpeg
@@ -465,6 +492,15 @@ def build_command(plan: ReelPlan, settings, out_path: Path, *,
         command += ["-stream_loop", "-1", "-i",
                     str(Path(music_path).resolve())]
 
+    # Sticker inputs go LAST, after the music. `audio_offset` and
+    # `music_index` are positional into this argv, and appending here is
+    # what keeps both of them the numbers they already were.
+    prepared = stickers_mod.prepare(plan, settings)
+    sticker_offset = (len(inputs) + len(beats)
+                      + (1 if music_index is not None else 0))
+    if prepared:
+        command += stickers_mod.sticker_inputs(prepared, settings.fps)
+
     ass_name = Path(ass_path).name if ass_path else None
     run_cwd = str(Path(ass_path).parent) if ass_path else None
 
@@ -472,7 +508,8 @@ def build_command(plan: ReelPlan, settings, out_path: Path, *,
         plan, fps=settings.fps, width=settings.width, height=settings.height,
         transition_duration=settings.transition_duration, ass_path=ass_name,
         audio_offset=len(inputs), music_index=music_index,
-        grade=settings.video_grade, grain=settings.video_grain)
+        grade=settings.video_grade, grain=settings.video_grain,
+        stickers=prepared, sticker_offset=sticker_offset)
 
     command += [
         "-filter_complex", graph,

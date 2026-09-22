@@ -1,0 +1,146 @@
+{
+  "_readme": [
+    "Emoji sticker trigger map. Data, not source: add a concept here and the",
+    "pipeline picks it up on the next render with no code change.",
+    "",
+    "Matching runs against Beat.caption_text tokens, because those are the",
+    "tokens Beat.words carries timings for -- the Devanagari voice_text has a",
+    "different word count and no timings at all. Devanagari aliases are still",
+    "listed, for captions that mix scripts and in case captions_source is ever",
+    "switched to voice_text.",
+    "",
+    "match:  aliases. A trailing * is a prefix match ('paisa*' hits paise,",
+    "        paison). Everything is lowercased and stripped of punctuation",
+    "        before comparison.",
+    "weight: how strong a moment this is. When the per-video cap bites, the",
+    "        highest weight wins. Keep the scale 1-10 and be stingy with 9s."
+  ],
+  "version": 1,
+  "triggers": [
+    {
+      "name": "death",
+      "emoji": "💀",
+      "weight": 10,
+      "match": ["maut", "mout", "kankaal*", "kankal*", "laash*", "lash",
+                "murda*", "shav", "death", "dead", "skeleton*", "corpse",
+                "mrityu", "kabra", "kabr", "qabr",
+                "मौत", "कंकाल", "लाश", "शव", "मृत्यु"]
+    },
+    {
+      "name": "shock",
+      "emoji": "😱",
+      "weight": 9,
+      "match": ["hairaan*", "hairan*", "hairat*", "shock*", "chaunk*",
+                "dehshat", "sihar*", "stunned", "unbelievable",
+                "हैरान", "हैरत", "दहशत"]
+    },
+    {
+      "name": "money",
+      "emoji": "💰",
+      "weight": 9,
+      "match": ["paisa*", "paise", "paison", "money", "crore*", "karod*",
+                "croron", "lakh", "lakhon", "arab", "rupay*", "rupee*",
+                "dollar*", "daulat", "khazana", "khazane", "cash",
+                "पैसा", "पैसे", "करोड़", "लाख", "रुपये", "दौलत", "खज़ाना"]
+    },
+    {
+      "name": "ghost",
+      "emoji": "👻",
+      "weight": 8,
+      "match": ["bhoot*", "bhut", "ghost*", "aatma*", "atma", "pret*",
+                "saaya", "saya", "haunted", "paranormal", "chudail*",
+                "भूत", "आत्मा", "प्रेत", "साया", "चुड़ैल"]
+    },
+    {
+      "name": "secret",
+      "emoji": "🤐",
+      "weight": 8,
+      "match": ["raaz", "raz", "rahasya*", "secret*", "classified",
+                "gupt*", "chhupa*", "chupa*", "hidden", "censored",
+                "राज़", "राज", "रहस्य", "गुप्त", "छुपा"]
+    },
+    {
+      "name": "fire",
+      "emoji": "🔥",
+      "weight": 8,
+      "match": ["aag", "fire", "jalta", "jalti", "jale", "jali", "jalkar",
+                "blast", "dhamaka*", "vispho*", "burning", "raakh",
+                "आग", "जलता", "जली", "धमाका", "राख"]
+    },
+    {
+      "name": "danger",
+      "emoji": "⚠️",
+      "weight": 8,
+      "match": ["khatra", "khatre", "khatarnak", "danger*", "warning",
+                "chetavani", "risky", "jaanleva", "janleva", "alert",
+                "खतरा", "खतरे", "खतरनाक", "चेतावनी"]
+    },
+    {
+      "name": "witness",
+      "emoji": "👀",
+      "weight": 6,
+      "match": ["dekha", "dekhi", "dekhte", "nazar", "najar", "gawah*",
+                "chashmadeed", "witness*", "dikha", "dikhi", "spotted",
+                "देखा", "देखी", "नज़र", "गवाह"]
+    },
+    {
+      "name": "question",
+      "emoji": "❓",
+      "weight": 6,
+      "match": ["sawaal*", "sawal*", "kyun", "kyu", "kyon", "question*",
+                "why", "anuttarit", "unanswered",
+                "सवाल", "क्यों", "क्यूं"]
+    },
+    {
+      "name": "science",
+      "emoji": "🧬",
+      "weight": 6,
+      "match": ["dna", "research*", "vigyan*", "science", "scientist*",
+                "vaigyanik*", "laboratory", "lab", "forensic*", "sample*",
+                "test", "experiment*", "genome",
+                "डीएनए", "विज्ञान", "वैज्ञानिक", "प्रयोग"]
+    },
+    {
+      "name": "night",
+      "emoji": "🌙",
+      "weight": 5,
+      "match": ["raat", "raaton", "raate", "night", "amavas*", "midnight",
+                "andhera", "andhere", "andheri",
+                "रात", "अमावस", "अंधेरा", "अंधेरी"]
+    },
+    {
+      "name": "water",
+      "emoji": "🌊",
+      "weight": 4,
+      "match": ["jheel", "jhil", "lake", "paani", "pani", "water",
+                "samudra*", "saagar", "sagar", "nadi", "river", "ocean",
+                "doobna", "doob", "flood", "baadh",
+                "झील", "पानी", "समुद्र", "सागर", "नदी", "बाढ़"]
+    },
+    {
+      "name": "mountain",
+      "emoji": "🏔️",
+      "weight": 4,
+      "match": ["pahad*", "pahaad*", "parvat*", "himalaya*", "mountain*",
+                "glacier*", "barf*", "chotee", "choti", "trek*", "summit",
+                "पहाड़", "पर्वत", "हिमालय", "बर्फ"]
+    },
+    {
+      "name": "location",
+      "emoji": "📍",
+      "weight": 4,
+      "match": ["jagah", "location", "sthaan", "sthan", "naksha", "nakshe",
+                "map", "coordinates", "ilaaka", "ilaake", "gaon", "village",
+                "जगह", "स्थान", "नक्शा", "इलाका", "गाँव"]
+    },
+    {
+      "name": "time",
+      "emoji": "🗓️",
+      "weight": 3,
+      "match": ["saal", "saalon", "saalo", "varsh*", "year", "years",
+                "sadi", "sadiyon", "century", "dashak*", "decade",
+                "arse", "barso", "barson",
+                "साल", "सदी", "वर्ष", "दशक"]
+    }
+  ]
+}

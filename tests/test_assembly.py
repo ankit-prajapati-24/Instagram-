@@ -293,7 +293,14 @@ def _command_for(beats=3, measured=4.0, music=None):
     for i, beat in enumerate(plan.script.beats):
         beat.image_path = f"C:/tmp/img{i}.png"
         beat.audio_path = f"C:/tmp/a{i}.mp3"
-    return build_command(plan, Settings(), Path("C:/tmp/out.mp4"),
+    settings = Settings()
+    # These tests pin the exact input list. Stickers append inputs of their
+    # own at the end -- deliberately, so `audio_offset` and `music_index`
+    # keep the values they already had -- and that they land there is
+    # asserted in tests/test_stickers.py. Off here, so these assertions stay
+    # about the image/audio ordering they were written for.
+    settings.stickers = False
+    return build_command(plan, settings, Path("C:/tmp/out.mp4"),
                          music_path=music)
 
 
@@ -722,7 +729,9 @@ def test_command_feeds_one_input_per_clip_and_offsets_the_audio():
         plan = _clipped(_timed_plan(beats=3, measured=4.0), per_beat=2)
         for i, beat in enumerate(plan.script.beats):
             beat.audio_path = f"C:/tmp/a{i}.mp3"
-        command, _, _ = build_command(plan, Settings(),
+        settings = Settings()
+        settings.stickers = False   # see _command_for
+        command, _, _ = build_command(plan, settings,
                                       Path("C:/tmp/out.mp4"),
                                       music_path=music)
         inputs = [command[i + 1] for i, arg in enumerate(command)
