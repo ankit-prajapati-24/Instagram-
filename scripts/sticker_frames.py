@@ -95,9 +95,21 @@ def build_plan(work: Path, settings: Settings, beats: int, seconds: float,
     return plan
 
 
-def grab(binary: str, video: Path, at: float, out: Path) -> None:
-    _ffmpeg(binary, ["-ss", f"{at:.3f}", "-i", str(video), "-frames:v", "1",
-                     str(out)])
+def grab(binary: str, video: Path, at: int, out: Path) -> None:
+    """Write frame number ``at`` of ``video`` to ``out``.
+
+    Selected by frame NUMBER, not by timestamp. The pop is seven frames long,
+    so its peak and the frame after it are 33ms apart, and neither form of
+    `-ss` is reliable at that granularity: input-side seeking snaps to a
+    nearby frame, and output-side seeking rounds forward across the frame
+    boundary. Both were measured here, and both returned the settled frame
+    when asked for the peak -- so the overshoot sample looked identical to
+    the settled one even though the render was correct. `select=eq(n,N)` is
+    exact, at the cost of decoding up to that point, which is nothing for
+    three stills.
+    """
+    _ffmpeg(binary, ["-i", str(video), "-vf", f"select='eq(n,{int(at)})'",
+                     "-vsync", "0", "-frames:v", "1", str(out)])
 
 
 def main() -> int:
@@ -174,11 +186,25 @@ def main() -> int:
     video = out_dir / "sample-stickers.mp4"
     for cue in cues:
         stem = f"{cue.beat_index:02d}-{cue.name}"
-        grab(settings.ffmpeg, video, max(cue.start - 0.10, 0.0),
+        # Frame numbers, counted from the cue's own first frame.
+        #
+        # The peak is the frame the pop was BAKED at, which is not
+        # PEAK_SECONDS. The animation is a PNG sequence sampled at
+        # `index / fps`, so the widest frame is whichever index maximises
+        # pop_scale: 4/30 = 0.133s at 30fps, a frame LATER than the 0.12s
+        # PEAK_SECONDS. Asking for 0.12s lands on the frame before the peak,
+        # which is barely over the resting size, and the sample then shows no
+        # visible overshoot even though the render is correct.
+        first = round(cue.start * settings.fps)
+        peak_index = max(range(stk.pop_frame_count(settings.fps)),
+                         key=lambda i: stk.pop_scale(i / settings.fps))
+        grab(settings.ffmpeg, video,
+             max(first - round(0.10 * settings.fps), 0),
              out_dir / f"{stem}-1-before.png")
-        grab(settings.ffmpeg, video, cue.start + stk.PEAK_SECONDS,
+        grab(settings.ffmpeg, video, first + peak_index,
              out_dir / f"{stem}-2-overshoot.png")
-        grab(settings.ffmpeg, video, cue.start + 0.45,
+        grab(settings.ffmpeg, video,
+             first + round(0.45 * settings.fps),
              out_dir / f"{stem}-3-settled.png")
         shutil.copy(cue.png, out_dir / f"{stem}-glyph.png")
 
