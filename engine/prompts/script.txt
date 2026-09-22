@@ -1,20 +1,29 @@
 STAGE:script
 
-You write 45-second Hindi scripts for a short-form mystery channel aimed at an
-Indian audience on Instagram Reels and YouTube Shorts.
+You write ~{total_seconds}-second Hindi scripts for a short-form mystery
+channel aimed at an Indian audience on Instagram Reels and YouTube Shorts.
 
 TOPIC: {topic}
 CHOSEN HOOK (this is beat 1, reuse it as written): {hook}
 VERIFIED CLAIMS — you may only assert what is here:
 {claims}
 
+THIS VOICE IS SLOW. The text-to-speech that reads your script runs at about
+{words_per_second} spoken words per second — well under natural conversational
+Hindi. Reckon every length in words at THAT rate, never by how long a line
+feels when you say it: {words_per_beat} words is about {seconds_per_beat}
+seconds here, and the whole {word_target}-word script is about
+{total_seconds} seconds. If you size a beat by ear you will write nearly
+twice the words it should have.
+
 Write {beats} beats totalling {word_target} spoken Devanagari words
 (count voice_text only). That word count is the single most important
 number here: it is what decides whether the finished video lands in range.
 Aim for {words_per_beat} words per beat on average.
 
-A beat of 4 words and a beat of 16 are both fine and the variety is wanted —
-but the TOTAL must come out near {word_target}.
+A beat of {beat_words_min} words and a beat of {beat_words_max} are both fine
+and the variety is wanted — but they must balance around {words_per_beat},
+and the TOTAL must come out near {word_target}.
 
 STRUCTURE (the retention spine, scaled to {beats} beats — follow the order):
   beat 1                role "hook"        reuse the chosen hook verbatim
@@ -29,10 +38,13 @@ STRUCTURE (the retention spine, scaled to {beats} beats — follow the order):
   last beat             role "cta"         see LOOP CLOSE below
 
 HARD RULES:
-1. 4 to 18 spoken words per beat, averaging {words_per_beat}. Vary them
-   deliberately; see rule 2.
-2. VARY sentence length deliberately. A three-word beat next to a
-   twelve-word beat. Flat, even rhythm is the clearest AI tell there is.
+1. {beat_words_min} to {beat_words_max} spoken words per beat, averaging
+   {words_per_beat}. The range is centred on {words_per_beat} deliberately:
+   for every beat you write above it, write one below it. Vary them; see
+   rule 2.
+2. VARY sentence length deliberately. A {beat_words_min}-word beat next to a
+   {beat_words_max}-word beat. Flat, even rhythm is the clearest AI tell
+   there is.
 3. Assert nothing outside VERIFIED CLAIMS. For legend, say so in the line
    itself: "locals kehte hain", "kahaani ye hai ki".
 4. BANNED PHRASES anywhere in the script:
@@ -42,6 +54,8 @@ HARD RULES:
    "the truth may shock you"
 5. NEVER ask for a like, follow, or subscribe. Engagement is the pinned
    comment's job, not the script's.
+6. Give NO per-beat duration. There is no seconds field on a beat: the
+   pipeline times the real audio after synthesis. Your job is the words.
 
 LOOP CLOSE (the final beat):
   The last line must make re-watching the hook feel necessary — it reframes
@@ -73,7 +87,7 @@ Return ONLY this JSON:
 
 {{
   "script": {{
-    "total_seconds": 44.0,
+    "total_seconds": {total_seconds},
     "chosen_hook": "{hook_id}",
     "beats": [
       {{"beat_id": "b1",
@@ -81,7 +95,6 @@ Return ONLY this JSON:
         "voice_text": "<Devanagari>",
         "caption_text": "<Roman Hinglish>",
         "on_screen_text": "<2-4 CAPS words or null>",
-        "target_seconds": 4.4,
         "visual_prompt": "<English image description>",
         "motion": "zoom_in",
         "transition": "fade"}}

@@ -146,7 +146,8 @@ def run_hooks(client, topic: Topic, provenance: Provenance, *,
 
 def run_script(client, topic: Topic, provenance: Provenance,
                hook: Hook | None, *, model: str | None = None,
-               word_target: int | None = None, beats: int | None = None):
+               word_target: int | None = None, beats: int | None = None,
+               words_per_second: float | None = None):
     """``word_target`` is derived from the voice engine's measured rate.
 
     Left unset it resolves to ``target_seconds * words_per_second`` from the
@@ -163,6 +164,13 @@ def run_script(client, topic: Topic, provenance: Provenance,
     together from here on, because it is their ratio, not either number
     alone, that the model can or cannot write.
 
+    ``words_per_second`` is the voice's measured rate, and it is in the
+    signature for the same reason the other two are: the prompt now states
+    it to the model. Every seconds figure in script.txt is a word count
+    converted at this rate, and the per-beat word range is derived from
+    ``word_target / beats`` — the three numbers the model can read cannot
+    disagree with each other because there is only one of each.
+
     Duration follows from word count, so the prompt is told the budget
     rather than a beat range it can satisfy at any length.
     """
@@ -177,10 +185,27 @@ def run_script(client, topic: Topic, provenance: Provenance,
         from engine.config import beat_count
 
         beats = beat_count()
+    if words_per_second is None:
+        from engine.config import speech_rate
+
+        words_per_second = speech_rate()
+
+    # Every number below is derived here, from those three. The bug this
+    # replaces was three literals in script.txt — "4 to 18", "4.4", "44.0" —
+    # that stayed still while the budget moved.
+    from engine.config import beat_word_range, words_per_beat as _per_beat
+
+    per_beat = _per_beat(word_target, beats)
+    beat_words_min, beat_words_max = beat_word_range(per_beat)
     prompt = load_prompt("script").format(
         word_target=word_target,
         beats=beats,
-        words_per_beat=max(round(word_target / beats), 4),
+        words_per_beat=per_beat,
+        beat_words_min=beat_words_min,
+        beat_words_max=beat_words_max,
+        words_per_second=f"{words_per_second:g}",
+        seconds_per_beat=round(per_beat / words_per_second, 1),
+        total_seconds=round(word_target / words_per_second, 1),
         topic=topic.raw,
         hook=(f"{hook.voice_text}  /  {hook.caption_text}" if hook
               else "(no hook chosen — write your own opening beat)"),
@@ -190,6 +215,21 @@ def run_script(client, topic: Topic, provenance: Provenance,
         raw = data.get("script") if isinstance(data, dict) else data
         if not isinstance(raw, dict):
             raise AgentError("script", "expected a 'script' object", data)
+
+        # target_seconds is no longer asked of the model. It is a hint that
+        # measured_seconds overrides everywhere downstream, and asking for
+        # it invited exactly the seconds-first sizing that overshot the
+        # budget: the model filled in 4.4s per beat, converted it at a
+        # conversational rate, and wrote 17 words. Derived from the words
+        # it actually wrote, at this voice's rate, it cannot disagree with
+        # them. A stale value in a hand-written payload is overwritten for
+        # the same reason.
+        for beat in raw.get("beats") or []:
+            if isinstance(beat, dict):
+                spoken = len(str(beat.get("voice_text") or "").split())
+                beat["target_seconds"] = round(
+                    max(spoken, 1) / words_per_second, 2)
+
         script = Script.model_validate(raw)
         if not script.beats:
             raise AgentError("script", "script contained no beats", data)

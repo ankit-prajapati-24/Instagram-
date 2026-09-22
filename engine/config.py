@@ -258,6 +258,75 @@ def word_budget(for_settings: Settings | None = None) -> int:
     return int(active.target_seconds * active.words_per_second)
 
 
+def speech_rate(for_settings: Settings | None = None) -> float:
+    """The voice's measured words-per-second, formed in exactly one place.
+
+    The script prompt has to state this out loud. Piper at
+    ``piper_length_scale`` 1.12 reads well under conversational Hindi
+    (~3.8 w/s), and a model given a duration and left to convert it itself
+    uses the conversational figure — which is how a 4.4-second beat became
+    17 words instead of 10. Every seconds figure the prompt shows is this
+    rate applied to a word count, never the other way round.
+    """
+    active = for_settings or settings
+    return active.words_per_second
+
+
+# The floor under the average. Below this the "vary the line lengths"
+# instruction has nothing left to vary.
+MIN_WORDS_PER_BEAT = 4
+# The narrowest a beat may get, whatever the average is.
+MIN_BEAT_WORDS = 3
+# Half-width of the per-beat range, as a fraction of the average. 0.6
+# reproduces the hand-calibrated "4 to 18" at the 11.3 words/beat it was
+# calibrated for, and tracks the average from there instead of standing
+# still while the budget moves under it.
+BEAT_WORD_SPREAD = 0.6
+
+
+def words_per_beat(word_target: int | None = None, beats: int | None = None,
+                   for_settings: Settings | None = None) -> int:
+    """The average the prompt asks for: ``word_budget / beat_count``.
+
+    Takes explicit overrides because ``run_script`` may be handed a budget
+    and a beat count that are not the configured ones, and the numbers in
+    the prompt must describe the pair actually in force.
+    """
+    active = for_settings or settings
+    target = word_budget(active) if word_target is None else word_target
+    count = beat_count(active) if beats is None else beats
+    return max(round(target / count), MIN_WORDS_PER_BEAT)
+
+
+def beat_word_range(average: int | None = None,
+                    for_settings: Settings | None = None) -> tuple[int, int]:
+    """The per-beat word range, symmetric around ``average``.
+
+    It used to be the literal "4 to 18" in engine/prompts/script.txt. That
+    was calibrated against 136 words over 12 beats — 11.3 a beat, which
+    4-18 straddles evenly. The budget then became 103 over 10 (10.3) and
+    the range did not move, so its top, 18, sat 75% above the average and
+    its midpoint, 11, quietly contradicted it. The model wrote to the top
+    of the range and overshot by 70%. Deriving the range keeps its midpoint
+    on the average, which is the only way the two numbers can agree.
+    """
+    avg = words_per_beat(for_settings=for_settings) if average is None \
+        else average
+    spread = max(1, round(BEAT_WORD_SPREAD * avg))
+    return max(MIN_BEAT_WORDS, avg - spread), avg + spread
+
+
+def spoken_seconds(words: float, for_settings: Settings | None = None
+                   ) -> float:
+    """How long ``words`` takes in this pipeline's voice, to a tenth.
+
+    The only sanctioned way to put a number of seconds in front of the
+    model: seconds are derived from words at ``speech_rate``, so they can
+    never imply a different word count than the budget does.
+    """
+    return round(words / speech_rate(for_settings), 1)
+
+
 def beat_count(for_settings: Settings | None = None) -> int:
     """The script agent's beat count, formed in exactly one place.
 

@@ -196,6 +196,18 @@ def test_the_script_prompt_carries_the_word_budget():
     assert {"word_target", "words_per_beat"} <= _placeholders("script")
 
 
+def test_every_budget_dependent_number_in_the_script_prompt_is_a_placeholder():
+    """"4 to 18", "4.4" and "44.0" were literals, and they went stale.
+
+    Anything in script.txt that moves when the budget, the beat count or
+    the speech rate moves has to be fed from Settings, or the next
+    recalibration leaves the model reading last month's arithmetic.
+    """
+    assert {"word_target", "beats", "words_per_beat", "beat_words_min",
+            "beat_words_max", "words_per_second", "seconds_per_beat",
+            "total_seconds"} <= _placeholders("script")
+
+
 def test_prompts_declare_their_stage_marker():
     """The fake client routes on STAGE: markers; a missing one silently
     returns the wrong payload."""
@@ -426,3 +438,88 @@ def test_words_per_beat_stays_in_a_band_the_model_will_write():
         f"{words_per_beat:.1f} words/beat ({word_budget(settings)} words "
         f"over {beat_count(settings)} beats) is outside the band the "
         f"model can actually write to")
+
+
+# --- the prompt must not contradict its own configuration ------------------
+# 2026-09-22: the budget was 103 words over 10 beats (10.3 a beat) while
+# HARD RULE 1 still read "4 to 18 spoken words per beat" and the JSON
+# example still showed total_seconds 44.0 / target_seconds 4.4. Those
+# literals were calibrated against 136 words over 12 beats and never moved.
+# 4.4 seconds at natural Hindi speech (~3.8 w/s) is 17 words, which is also
+# the top of the stated range, so every instinct the model had pointed at
+# ~17 words a beat -- and it wrote 17.5, twice, +56% and +70%. The word
+# target was the only thing saying otherwise and it lost.
+#
+# This test exercises no model. It asserts that the numbers in the rendered
+# prompt agree with word_budget / beat_count at the configured speech rate.
+
+def _rendered_script_prompt(config):
+    """The script prompt as ``config`` would render it."""
+    from engine.agents import run_script
+    from engine.config import beat_count, speech_rate, word_budget
+    from engine.contract import Provenance, Topic
+
+    target, beats = word_budget(config), beat_count(config)
+    per_beat = [target // beats] * beats
+    per_beat[0] += target - sum(per_beat)      # on budget, so no repair call
+    client = Replaying(_script_payload(per_beat))
+    run_script(client, Topic.make("x"), Provenance(), None,
+               word_target=target, beats=beats,
+               words_per_second=speech_rate(config))
+    return client.seen[0][0]["content"]
+
+
+def test_the_prompt_states_the_speech_rate_it_reckons_seconds_at():
+    """The model cannot know this voice is slower than conversational."""
+    from engine.config import speech_rate
+    from tests.factories import shipped_settings
+
+    config = shipped_settings()
+    prompt = _rendered_script_prompt(config)
+    assert f"{speech_rate(config):g}" in prompt, (
+        "the prompt never tells the model the words-per-second it must "
+        "reckon seconds at, so it will use a conversational rate")
+
+
+def test_no_number_in_the_script_prompt_contradicts_the_budget():
+    import re
+
+    from engine.config import beat_count, speech_rate, word_budget
+    from tests.factories import shipped_settings
+
+    config = shipped_settings()
+    budget, beats = word_budget(config), beat_count(config)
+    average, rate = budget / beats, speech_rate(config)
+    prompt = _rendered_script_prompt(config)
+
+    bands = re.findall(r"(\d+) to (\d+) spoken words per beat", prompt)
+    assert bands, "the prompt no longer states a per-beat word range"
+    for low, high in ((int(a), int(b)) for a, b in bands):
+        assert low <= average <= high, (
+            f"the per-beat range {low}-{high} does not even contain the "
+            f"{average:.1f} words/beat the budget implies")
+        midpoint = (low + high) / 2
+        assert abs(midpoint - average) <= 0.6, (
+            f"the per-beat range {low}-{high} is centred on {midpoint}, not "
+            f"on the {average:.1f} words/beat the budget implies; a model "
+            f"writing to the middle of the range misses the budget")
+        assert high <= 1.65 * average, (
+            f"the per-beat range tops out at {high}, {high / average:.2f}x "
+            f"the {average:.1f} words/beat the budget implies; a model "
+            f"drifting to the top of the range overshoots by "
+            f"{(high / average - 1) * 100:.0f}%")
+
+    # Every seconds figure must be a word count at THIS voice's rate --
+    # either one beat's worth or the whole script's. A figure that only
+    # works at a conversational rate is the contradiction that shipped.
+    figures = {float(s) for s in
+               re.findall(r"(\d+(?:\.\d+)?)[\s-]*second", prompt)}
+    figures |= {float(s) for s in re.findall(
+        r'"(?:target|total)_seconds"\s*:\s*(\d+(?:\.\d+)?)', prompt)}
+    for value in figures:
+        words = value * rate
+        assert (abs(words - average) <= 1.0
+                or abs(words - budget) <= 1.5), (
+            f"{value} seconds is {words:.0f} words at {rate:g} w/s, which is "
+            f"neither the {average:.1f} words/beat nor the {budget}-word "
+            f"budget the configuration implies")
