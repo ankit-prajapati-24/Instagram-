@@ -63,11 +63,21 @@ LOOP CLOSE (the final beat):
   not on a conclusion. No "to ye thi kahaani".
 
 DUAL TEXT — every beat needs both:
-  voice_text   : Devanagari, fed to Hindi TTS. Spelling drives pronunciation.
-                 Write numbers as digits. No English words in Latin script —
-                 transliterate them (DNA -> डीएनए, report -> रिपोर्ट).
-  caption_text : Roman Hinglish, burned on screen. Keep well-known English
-                 words in Latin (DNA, report, carbon dating).
+  voice_text   : Devanagari, fed to Hindi TTS. Spelling drives pronunciation —
+                 the voice reads whatever script it is given, correctly or
+                 not, so a Latin word is spoken with mangled pronunciation,
+                 not skipped. Write numbers as digits. NEVER write an
+                 English word in Latin (Roman) letters here, not even one
+                 letter of one word — transliterate every one of them into
+                 Devanagari (DNA -> डीएनए, report -> रिपोर्ट, confirm ->
+                 कन्फर्म, magnetic anomaly -> मैग्नेटिक एनॉमली). This applies
+                 beat by beat: getting it right in most beats and leaving
+                 Latin script in even one is still a failure. Before you
+                 return your answer, re-read every voice_text line and check
+                 it contains no A-Z or a-z letters at all.
+  caption_text : Roman Hinglish, burned on screen. This is the ONLY place
+                 English words stay in Latin script — keep well-known
+                 English words in Latin here (DNA, report, carbon dating).
 
 on_screen_text : OPTIONAL, use on 3-4 beats only, at the biggest moments.
                  2-4 words, SHOUTING CAPS, Roman only. null otherwise.

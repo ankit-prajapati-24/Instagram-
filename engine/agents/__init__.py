@@ -12,6 +12,7 @@ ones that can be checked mechanically.
 from __future__ import annotations
 
 import json
+import re
 import statistics
 import time
 from pathlib import Path
@@ -116,6 +117,145 @@ def _explain(exc: ValidationError) -> str:
         lines.append(f"- {where}: {error['msg']} "
                      f"(got {error.get('input')!r})")
     return "\n".join(lines)
+
+
+# --- voice_text must be pure Devanagari -------------------------------------
+# script.txt already says it: "No English words in Latin script -- translit-
+# erate them (DNA -> डीएनए, report -> रिपोर्ट)." A real run broke that rule
+# inconsistently within one script -- "fog" and "magnetic anomaly" left in
+# Latin in beats 1 and 8, the identical words correctly transliterated to
+# Devanagari in beat 7 of the same script. Piper does not skip the Latin
+# text or fail on it; it speaks it, badly: synthesising both forms produced
+# durations within 2% of each other (3.62s vs 3.55s), and a person compared
+# the audio and confirmed the transliterated version is the correct one.
+# Phonemizing both forms directly (see this fix's report) shows the same
+# thing at the phoneme level -- "confirm" and "कन्फर्म" come out as two
+# different sequences under this voice's espeak-ng frontend.
+#
+# The rule existed only as prose, and nothing enforced it -- a deterministic,
+# cheaply checkable property left entirely to the model's goodwill. This is
+# that enforcement.
+#
+# What counts as a violation, decided against the evidence above rather than
+# assumed:
+#   * Any Latin letter (A-Za-z) anywhere in voice_text, including a single
+#     stray letter inside an otherwise-Devanagari word. Piper does not
+#     partially mispronounce a word -- there is no quantity of Latin script
+#     that is safe to let through, so the check does not special-case whole
+#     "words" vs. fragments.
+#   * ASCII digits are NOT a violation. script.txt asks for them ("write
+#     numbers as digits"), and phonemizing "1965" against the Devanagari-
+#     digit spelling "१९६५" under this voice's frontend produced identical
+#     phoneme sequences -- the digit's script does not change how it is
+#     read. Digits are 0-9, never A-Za-z, so the regex below already leaves
+#     them alone without a special case.
+#   * Punctuation, the en dash, and the Devanagari abbreviation sign (॰,
+#     U+0970 -- beat 4 of the reported run used "ई॰पी॰ गी") are not a
+#     violation either. None of them are Latin letters, so, like digits,
+#     they simply never match [A-Za-z] and need no special case.
+#   * caption_text is NEVER checked here. It is Roman Hinglish on purpose --
+#     script.txt: "Keep well-known English words in Latin (DNA, report,
+#     carbon dating)" -- and running this check on it would fail every
+#     clean script.
+LATIN_LETTERS_RE = re.compile(r"[A-Za-z]+")
+
+
+def _latin_words(text) -> list[str]:
+    """Latin-script runs inside ``text``, in order, duplicates kept."""
+    return LATIN_LETTERS_RE.findall(str(text or ""))
+
+
+def _latin_violations(script: Script) -> list[tuple[str, list[str]]]:
+    """``(beat_id, latin_words)`` for every beat whose voice_text still has
+    Latin script. Only voice_text is inspected -- see the module note above
+    for why caption_text never is."""
+    out = []
+    for beat in script.beats:
+        words = _latin_words(beat.voice_text)
+        if words:
+            out.append((beat.beat_id, words))
+    return out
+
+
+def _latin_repair_message(script: Script, violations) -> str:
+    """Tell the model plainly which beats and which words, in the same
+    vocabulary script.txt already uses for the rule.
+
+    Deliberately not routed through ``_ask``'s repair path: that message is
+    written for a pydantic ``ValidationError`` -- "That did not match the
+    required schema" -- and a model told its JSON *types* were wrong when
+    the actual problem is spelling just returns the same content again. This
+    is the same lesson the word-budget fix already learned; see
+    ``_fit_to_budget`` below.
+    """
+    by_id = {b.beat_id: b for b in script.beats}
+    rows = "\n".join(
+        f'{beat_id}: "{by_id[beat_id].voice_text}"\n'
+        "  Latin-script words that must be transliterated: "
+        + ", ".join(sorted(set(words)))
+        for beat_id, words in violations)
+    return (
+        "voice_text is fed directly to the Hindi text-to-speech engine, and "
+        "spelling drives its pronunciation. The lines below still have "
+        "English words written in Latin script, and the voice speaks them "
+        "wrong because of it. This is not a JSON problem; the shape is "
+        "fine.\n\n"
+        f"{rows}\n\n"
+        "Rewrite ONLY these beats' voice_text with every Latin-script word "
+        "transliterated into Devanagari (English -> इंग्लिश, confirm -> "
+        "कन्फर्म, DNA -> डीएनए). Keep the meaning and every other word "
+        "unchanged. Do not touch caption_text -- it stays Roman Hinglish on "
+        "purpose. ASCII digits are fine exactly as they are.\n\n"
+        "Return ONLY this JSON, one entry per beat listed above:\n"
+        '{"lines": [{"beat_id": "...", "voice_text": "<Devanagari only>"}]}')
+
+
+def _fix_latin_script(client, script: Script, *, model,
+                      words_per_second: float, stage: str = "script"):
+    """One repair round for Latin script surviving in voice_text.
+
+    Checked here, after the script already parsed, for the same reason the
+    word budget is: a semantic miss is not a shape mismatch, and routing it
+    through the generic repair told the model the wrong thing entirely (see
+    ``_latin_repair_message``). Exactly one repair attempt is made, matching
+    the one-retry convention ``_ask`` itself uses for schema mismatches --
+    a script still carrying Latin script after being told precisely which
+    beats and which words is a real failure, not something to paper over
+    with another round.
+    """
+    violations = _latin_violations(script)
+    if not violations:
+        return None
+
+    print(f"[AGENT] {stage} voice_text has Latin script in "
+          f"{len(violations)} beat(s); starting repair attempt", flush=True)
+    message = _latin_repair_message(script, violations)
+    result = client.chat([{"role": "user", "content": message}],
+                         model=model, want_json=True, temperature=0.3)
+
+    rows = result.data.get("lines") if isinstance(result.data, dict) else None
+    by_id = {b.beat_id: b for b in script.beats}
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            beat = by_id.get(str(row.get("beat_id") or ""))
+            voice = str(row.get("voice_text") or "").strip()
+            if beat is not None and voice:
+                beat.voice_text = voice
+                _sync_seconds(beat, words_per_second)
+
+    remaining = _latin_violations(script)
+    if remaining:
+        detail = "; ".join(
+            f"{beat_id}: {', '.join(sorted(set(words)))}"
+            for beat_id, words in remaining)
+        raise AgentError(
+            stage,
+            "voice_text still has Latin script after one repair attempt "
+            f"({detail}) -- these words were never transliterated to "
+            "Devanagari", result.data)
+    return result.cost
 
 
 # --- the trim pass ---------------------------------------------------------
@@ -581,12 +721,15 @@ def run_script(client, topic: Topic, provenance: Provenance,
 
     result, script = _ask(client, "script", prompt, model=model,
                           temperature=0.9, parse=parse)
+    latin_cost = _fix_latin_script(client, script, model=model,
+                                   words_per_second=words_per_second)
     trim_costs = _fit_to_budget(client, script, word_target,
                                 model=trim_model,
                                 fallback_model=model,
                                 words_per_second=words_per_second,
                                 max_rounds=trim_rounds)
-    return script, _merge_costs(result.cost, trim_costs)
+    extra_costs = ([latin_cost] if latin_cost is not None else []) + trim_costs
+    return script, _merge_costs(result.cost, extra_costs)
 
 
 def run_metadata(client, topic: Topic, script: Script,

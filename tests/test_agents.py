@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 
@@ -195,9 +197,11 @@ def test_every_prompt_placeholder_is_supplied_by_its_agent():
          "style": "question"}]}), topic, provenance)
     # word_target matches this one-word payload, so the budget check does
     # not fire; this test is about the prompt formatting, not the budget.
+    # voice_text is Devanagari ("व") on purpose -- this test is not about
+    # the Latin-script check either, and a Latin placeholder would trip it.
     run_script(Replaying({"script": {
         "total_seconds": 45.0, "chosen_hook": "h1", "beats": [
-            {"beat_id": "b1", "role": "hook", "voice_text": "v",
+            {"beat_id": "b1", "role": "hook", "voice_text": "व",
              "caption_text": "c", "target_seconds": 4.0,
              "visual_prompt": "p", "motion": "zoom_in",
              "transition": "fade"}]}}), topic, provenance, None,
@@ -884,3 +888,186 @@ def test_no_number_in_the_script_prompt_contradicts_the_budget():
             f"{value} seconds is {words:.0f} words at {rate:g} w/s, which is "
             f"neither the {average:.1f} words/beat nor the {budget}-word "
             f"budget the configuration implies")
+
+
+# --- Latin script must not reach the Hindi TTS ------------------------------
+# A user listened to a rendered video and heard mispronounced words. Cause:
+# script.txt already says "No English words in Latin script -- transliterate
+# them", and the model broke the rule inconsistently within one script --
+# "fog" and "magnetic anomaly" left in Latin in beats 1 and 8, the very same
+# words correctly transliterated to Devanagari in beat 7. Piper does not
+# skip Latin text, it speaks it -- measured durations for both forms were
+# within 2% of each other -- so this is a spelling bug, not a dropped beat,
+# and the user confirmed by ear that the transliterated version is correct.
+#
+# The rule was prose only, nothing enforced it, and that is the actual
+# defect: a deterministic, cheaply checkable property left to the model's
+# goodwill. These tests pin the fix the same way the word-budget one was
+# pinned above: caught after the shape check succeeds (never inside
+# ``parse``, for the same reason the budget check was moved out of it -- see
+# that section), and repaired with a message that says plainly which beats
+# and which words, not that the JSON was malformed.
+
+def _script_with_voice(rows):
+    """rows: iterable of (beat_id, role, voice_text, caption_text)."""
+    return {"script": {"total_seconds": 45.0, "chosen_hook": "h1", "beats": [
+        {"beat_id": beat_id, "role": role, "voice_text": voice,
+         "caption_text": caption, "target_seconds": 4.0,
+         "visual_prompt": "p", "motion": "zoom_in", "transition": "fade"}
+        for beat_id, role, voice, caption in rows]}}
+
+
+def test_latin_script_in_voice_text_is_caught_and_repaired():
+    from engine.agents import run_script
+    from engine.contract import Provenance, Topic
+
+    dirty = _script_with_voice([
+        ("b1", "hook",
+         "Scientists कहते हैं fog, कहते हैं magnetic anomaly",
+         "Scientists kehte hain fog, kehte hain magnetic anomaly"),
+        ("b2", "cta",
+         "लेकिन कोई एक थ्योरी आज तक confirm नहीं हुई",
+         "lekin koi ek theory aaj tak confirm nahi hui"),
+    ])
+    fixed = {"lines": [
+        {"beat_id": "b1",
+         "voice_text": "वैज्ञानिक कहते हैं फॉग, कहते हैं मैग्नेटिक एनॉमली"},
+        {"beat_id": "b2",
+         "voice_text": "लेकिन कोई एक थ्योरी आज तक कन्फर्म नहीं हुई"},
+    ]}
+    # word_target set to the exact post-repair count so the trim pass never
+    # fires -- these tests are about the Latin-script fix, not the budget.
+    target = 8 + 9
+
+    client = Replaying(dirty, fixed)
+    script, _ = run_script(client, Topic.make("x"), Provenance(), None,
+                           word_target=target)
+
+    assert len(client.seen) == 2, "one script call, one Latin-script repair"
+    for beat in script.beats:
+        assert not re.search(r"[A-Za-z]", beat.voice_text), (
+            f"{beat.beat_id} still has Latin script: {beat.voice_text!r}")
+
+    # caption_text is Roman Hinglish on purpose and must not be touched
+    assert script.beats[0].caption_text == (
+        "Scientists kehte hain fog, kehte hain magnetic anomaly")
+
+    repair = client.prompts[1]
+    assert "did not match the required schema" not in repair
+    assert "quoted string" not in repair
+    for needle in ("b1", "b2", "fog", "magnetic", "confirm", "Devanagari"):
+        assert needle in repair, f"{needle!r} missing from the repair prompt"
+
+
+def test_a_clean_devanagari_script_makes_no_latin_repair_call():
+    from engine.agents import run_script
+    from engine.contract import Provenance, Topic
+
+    clean = _script_with_voice([
+        ("b1", "hook", "वैज्ञानिक कहते हैं फॉग", "Scientists kehte hain fog"),
+        ("b2", "cta", "लेकिन कोई थ्योरी कन्फर्म नहीं हुई",
+         "lekin koi theory confirm nahi hui"),
+    ])
+    client = Replaying(clean)
+    script, _ = run_script(client, Topic.make("x"), Provenance(), None,
+                           word_target=4 + 6)
+
+    assert len(client.seen) == 1, "a clean script must not trigger a repair"
+    assert script.beats[0].voice_text == "वैज्ञानिक कहते हैं फॉग"
+    assert script.beats[1].voice_text == "लेकिन कोई थ्योरी कन्फर्म नहीं हुई"
+
+
+def test_caption_text_in_roman_hinglish_never_triggers_the_latin_check():
+    """caption_text is Roman Hinglish by design (script.txt: 'Keep
+    well-known English words in Latin') -- only voice_text feeds the TTS."""
+    from engine.agents import run_script
+    from engine.contract import Provenance, Topic
+
+    clean_voice_english_caption = _script_with_voice([
+        ("b1", "hook", "वैज्ञानिक कहते हैं फॉग",
+         "DNA test confirms the fog theory was wrong"),
+    ])
+    client = Replaying(clean_voice_english_caption)
+    script, _ = run_script(client, Topic.make("x"), Provenance(), None,
+                           word_target=4)
+
+    assert len(client.seen) == 1, (
+        "English in caption_text must never trigger the Latin-script check")
+    assert script.beats[0].caption_text == (
+        "DNA test confirms the fog theory was wrong")
+
+
+def test_ascii_digits_in_voice_text_are_not_a_latin_script_violation():
+    """script.txt asks for numbers as digits; phonemizing '1965' against the
+    Devanagari-digit form produces identical phonemes under this voice's
+    espeak frontend (see the fix report) -- the digit's script does not
+    change how it is read, so ASCII digits must never trip this check."""
+    from engine.agents import run_script
+    from engine.contract import Provenance, Topic
+
+    payload = _script_with_voice([
+        ("b1", "hook", "अक्टूबर 1965 में तूफान आया", "october 1965 mein toofan aaya"),
+    ])
+    client = Replaying(payload)
+    script, _ = run_script(client, Topic.make("x"), Provenance(), None,
+                           word_target=5)
+
+    assert len(client.seen) == 1, "ASCII digits must not trigger a repair"
+    assert script.beats[0].voice_text == "अक्टूबर 1965 में तूफान आया"
+
+
+def test_devanagari_punctuation_and_en_dash_are_not_latin_script_violations():
+    """The en dash and the Devanagari abbreviation sign (॰, U+0970 -- beat 4
+    of the reported run used 'ई॰पी॰ गी') are not Latin letters and must not
+    trip this check."""
+    from engine.agents import run_script
+    from engine.contract import Provenance, Topic
+
+    text = "ई॰पी॰ गी – यह घटना 1965 में हुई।"
+    payload = _script_with_voice([("b1", "hook", text, "caption")])
+    client = Replaying(payload)
+    script, _ = run_script(client, Topic.make("x"), Provenance(), None,
+                           word_target=len(text.split()))
+
+    assert len(client.seen) == 1
+    assert script.beats[0].voice_text == text
+
+
+def test_latin_script_still_present_after_one_repair_attempt_raises():
+    """One repair attempt, matching the schema-repair convention elsewhere
+    in this module. A script still mispronouncing words after being told
+    exactly which ones is a real failure, not something to ship."""
+    from engine.agents import AgentError, run_script
+    from engine.contract import Provenance, Topic
+
+    dirty = _script_with_voice([
+        ("b1", "hook", "कहते हैं fog", "kehte hain fog"),
+    ])
+    # The model answers the repair with the same Latin word still in place.
+    still_dirty = {"lines": [{"beat_id": "b1", "voice_text": "कहते हैं fog"}]}
+
+    client = Replaying(dirty, still_dirty)
+    with pytest.raises(AgentError) as exc:
+        run_script(client, Topic.make("x"), Provenance(), None,
+                   word_target=3)
+
+    assert exc.value.stage == "script"
+    assert "b1" in exc.value.detail and "fog" in exc.value.detail
+    assert len(client.seen) == 2, "exactly one repair attempt, not more"
+
+
+def test_a_stray_latin_letter_inside_a_devanagari_word_is_caught():
+    """Any Latin letter is a violation, even one character inside an
+    otherwise-Devanagari word -- Piper does not partially mispronounce a
+    word, and there is no safe amount of Latin script to allow."""
+    from engine.agents import run_script
+    from engine.contract import Provenance, Topic
+
+    dirty = _script_with_voice([("b1", "hook", "मैग्नेटिकA एनॉमली", "caption")])
+    fixed = {"lines": [{"beat_id": "b1", "voice_text": "मैग्नेटिक एनॉमली"}]}
+    client = Replaying(dirty, fixed)
+    script, _ = run_script(client, Topic.make("x"), Provenance(), None,
+                           word_target=2)
+
+    assert len(client.seen) == 2
+    assert not re.search(r"[A-Za-z]", script.beats[0].voice_text)
