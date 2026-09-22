@@ -65,6 +65,19 @@ class Settings:
     model_cheap: str = field(
         default_factory=lambda: os.getenv(
             "RAHASYA_MODEL_CHEAP", "antigravity/gemini-3.1-flash-lite"))
+    # The trim pass's editor. It defaults to model_cheap -- shortening ten
+    # lines that already exist is not work the strong model is needed for --
+    # but it is separately settable, because this one call has a harder
+    # requirement than research or metadata do: it must come back as strict
+    # JSON. Measured on this gateway, agy/gemini-3.7-flash-medium leaks its
+    # reasoning into the message content on roughly one round in three
+    # ("Wait, what about रोशनी? ... Tokens: 1. अमावस") and the answer is
+    # then unparseable; the same model behind the gateway's "no-think/"
+    # alias returned clean JSON on every probe. run_script escalates to the
+    # strong model after an unusable round either way, so this setting is
+    # how you stop paying for that escalation, not how you avoid a failure.
+    model_trim: str = field(
+        default_factory=lambda: os.getenv("RAHASYA_MODEL_TRIM", "").strip())
     model_image: str = field(
         default_factory=lambda: os.getenv(
             "RAHASYA_MODEL_IMAGE", "antigravity/gemini-3.1-flash-image"))
@@ -257,6 +270,14 @@ class Settings:
     # down from 136. See test_words_per_beat_stays_in_a_band_the_model_will_write
     # in tests/test_agents.py for the band this is checked against.
     script_beats: int = 10
+    # How many times the trim pass may edit an off-budget script before the
+    # stage fails. One pass moves the count reliably; landing it sometimes
+    # takes a second. Three is a cap, not a plan -- past it the numbers are
+    # raised rather than a wrong-length script accepted, because every round
+    # is another cheap-model call and an unbounded loop here would burn the
+    # daily ceiling on one video.
+    trim_rounds: int = field(
+        default_factory=lambda: int(os.getenv("RAHASYA_TRIM_ROUNDS", "3")))
 
     def __post_init__(self) -> None:
         # duration_min/duration_max default to the publishing window this
@@ -361,6 +382,28 @@ def spoken_seconds(words: float, for_settings: Settings | None = None
     never imply a different word count than the budget does.
     """
     return round(words / speech_rate(for_settings), 1)
+
+
+def trim_model(for_settings: Settings | None = None) -> str:
+    """Which model edits an off-budget script, formed in one place.
+
+    ``model_trim`` when it is set, ``model_cheap`` otherwise. Two copies of
+    that fallback is how the other numbers in this module went stale.
+    """
+    active = for_settings or settings
+    return active.model_trim or active.model_cheap
+
+
+def trim_round_cap(for_settings: Settings | None = None) -> int:
+    """How many trim rounds the script stage may spend, in one place.
+
+    Lives next to ``word_budget`` and ``beat_count`` for the same reason
+    they live next to each other: it is read by ``run_script``'s default and
+    by anything that wants to reason about the stage's worst-case cost, and
+    two copies of it would drift.
+    """
+    active = for_settings or settings
+    return max(1, active.trim_rounds)
 
 
 def beat_count(for_settings: Settings | None = None) -> int:

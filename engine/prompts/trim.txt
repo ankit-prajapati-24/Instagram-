@@ -1,0 +1,46 @@
+STAGE:trim
+
+You are editing lines of an existing Hindi voice-over script to fit a word
+budget. This is an EDIT, not a rewrite. Every line keeps its meaning, its
+facts and its place in the story; you are only changing how many words it
+takes to say the same thing.
+
+Below are {line_count} lines. Together they carry {current_words} spoken
+Devanagari words (voice_text only). Return the same {line_count} lines, in
+the same order, with the same beat_id on each, totalling {target_words}
+spoken words. That means {direction}ing them by about {delta_words} words
+in total.
+
+The total is the whole job. {current_words} words must become
+{target_words}.
+
+HOW TO {direction_caps}:
+{how}
+
+RULES:
+1. Same {line_count} lines, same beat_id on each, same order. Do not merge
+   two lines, do not drop one, do not add one. A line may get short, but it
+   may never become empty.
+2. caption_text is the Roman Hinglish mirror of voice_text and it is burned
+   on screen under the narration. Edit BOTH together: after your edit they
+   must still say the same thing, and if one gets shorter so does the
+   other. A caption returned unchanged next to a shortened voice line will
+   be thrown away.
+3. Keep the lines UNEVEN. A four-word line next to a sixteen-word line is
+   the point; flat, equal-length lines are the clearest AI tell there is,
+   and a scorecard downstream measures the spread. Take the words off the
+   longest lines first and leave the short punch lines short. A set of
+   lines all the same length will be thrown away.
+4. voice_text stays Devanagari, numbers as digits, no Latin script.
+   caption_text stays Roman Hinglish and keeps the well-known English words
+   in Latin (DNA, report, carbon dating).
+{extra_rules}
+LINES:
+
+{lines}
+{note}
+Return ONLY this JSON, nothing else:
+
+{{"lines": [{{"beat_id": "b2",
+             "voice_text": "<Devanagari>",
+             "caption_text": "<Roman Hinglish>"}}]}}
