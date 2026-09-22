@@ -323,6 +323,30 @@ def test_the_word_budget_fits_the_window_at_the_measured_speech_rate():
         f"measured {MEASURED_WORDS_PER_SEC} w/s")
 
 
+# --- the QC window has to move when the target does -------------------------
+# DURATION_MIN/DURATION_MAX used to be fixed at 38.0/52.0 no matter what
+# target_seconds was configured to. Move the target to 60 and the budget
+# becomes 137 words, ~59.8s at 2.29 w/s -- outside a window that never
+# moved, so QC rejected every video. duration_min/duration_max must instead
+# be derived from target_seconds, at any plausible target, so a script
+# written exactly to budget always lands inside the window QC judges it by.
+PLAUSIBLE_TARGETS = (45.0, 50.0, 60.0)
+
+
+def test_the_duration_window_tracks_whatever_target_seconds_is_set_to():
+    from engine.config import speech_rate, word_budget
+    from tests.factories import shipped_settings
+
+    for target in PLAUSIBLE_TARGETS:
+        settings = shipped_settings(target_seconds=target)
+        predicted = word_budget(settings) / speech_rate(settings)
+        assert settings.duration_min <= predicted <= settings.duration_max, (
+            f"at target_seconds={target}, a {word_budget(settings)}-word "
+            f"budget speaks for {predicted:.1f}s, outside "
+            f"{settings.duration_min:.1f}-{settings.duration_max:.1f}s -- "
+            "the window did not move with the target")
+
+
 # Every per-script speech rate this repo has evidence for, slowest first.
 #
 #   1.83  numeral- and acronym-heavy lines (scripts/measure_speech_rate.py)

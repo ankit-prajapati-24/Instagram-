@@ -1,6 +1,6 @@
 # Rahasya Engine
 
-One Hinglish mystery topic in, one QC-passed 45-second vertical MP4 out, with a
+One Hinglish mystery topic in, one QC-passed 50-second vertical MP4 out, with a
 local panel to run and inspect every stage.
 
 Built for Instagram Reels first and YouTube Shorts second, because on a

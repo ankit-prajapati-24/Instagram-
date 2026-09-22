@@ -30,14 +30,42 @@ BANNED_PHRASES: tuple[str, ...] = (
 )
 
 
-# The finished-video duration window, in seconds. Named, because more than
-# one stage scores against it: ``run_qc`` below, and the pre-render length
-# gate in ``engine.pipeline`` that refuses a script before the clip stage
-# spends twelve minutes on it. Two copies of these numbers would separate the
-# first time either moved, and a gate that disagrees with the check it fronts
-# is worse than no gate.
-DURATION_MIN = 38.0
-DURATION_MAX = 52.0
+# The tolerance the publishing window allows around a target duration, as a
+# fraction of the target. Not a new number: it is the same +/-15% run_script
+# already allows around the word budget, carried through to seconds by
+# duration_window() below -- expressing it once here is what lets the window
+# track target_seconds instead of standing still under it.
+DURATION_TOLERANCE = 0.15
+
+
+def duration_window(target_seconds: float,
+                    tolerance: float = DURATION_TOLERANCE
+                    ) -> tuple[float, float]:
+    """The publishing window for a given target: target +/- tolerance.
+
+    ``engine.config.Settings.duration_min``/``duration_max`` call this with
+    the live ``target_seconds``, so the window a finished video is judged
+    against moves when the target does. Before this function existed,
+    DURATION_MIN/DURATION_MAX were the literals 38.0/52.0 -- exactly what
+    45 +/-15% works out to -- and nothing recomputed them when the target
+    changed: move the target to 60 and the 137-word budget it implies speaks
+    for ~59.8s, outside a window that never moved.
+    """
+    return (target_seconds * (1 - tolerance), target_seconds * (1 + tolerance))
+
+
+# This module's own default window, for callers -- mostly this file's own
+# tests -- that score a plan without a Settings object to hand it. Anchored
+# at 45.0, the target this pipeline shipped with before
+# engine.config.Settings.target_seconds moved to 50, so this file's fixtures
+# keep meaning what they were written to mean.
+#
+# Production code does not read these two names for the window it actually
+# enforces: engine.config.Settings.duration_min/duration_max call
+# duration_window() directly with the live target_seconds, so the window a
+# real run is judged against always tracks the configured target, not this
+# module's fixed anchor.
+DURATION_MIN, DURATION_MAX = duration_window(45.0)
 
 # How far outside that window the PRE-RENDER length gate still lets a plan
 # through, as a fraction of the bound it misses.
@@ -55,9 +83,9 @@ DURATION_MAX = 52.0
 # But the rate is a property of the content, not of the configuration. This
 # repo has measured 1.83 w/s on numeral- and acronym-heavy lines, 2.94 on
 # clean prose, and 2.47 on its own sample script. At 2.47 the shortest script
-# the agent accepts speaks for ~35.5s, and a gate set exactly at 38.0 would
-# refuse it after paying for voice -- destroying the run instead of handing a
-# human a video and a scorecard to judge.
+# the agent accepts speaks for ~35.5s, and a gate set exactly at DURATION_MIN
+# (38.25) would refuse it after paying for voice -- destroying the run
+# instead of handing a human a video and a scorecard to judge.
 #
 # 15% is not a new number: it is the same drift ``run_script`` already allows
 # on word count, carried through to seconds. It means the gate passes the

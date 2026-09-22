@@ -36,13 +36,20 @@ HINGLISH = [
 TUNING_KEYS = ("RAHASYA_WORDS_PER_SEC",)
 
 
-def shipped_settings():
-    """``Settings`` as the repo ships it, ignoring the local .env."""
+def shipped_settings(**overrides):
+    """``Settings`` as the repo ships it, ignoring the local .env.
+
+    ``overrides`` are passed straight through to the constructor -- e.g.
+    ``shipped_settings(target_seconds=60.0)`` -- so a test can ask what the
+    shipped defaults would be at a target other than the configured one,
+    without hand-rolling a second ``Settings()`` that silently picks up
+    whatever the local .env pins.
+    """
     from engine.config import Settings
 
     saved = {k: os.environ.pop(k, None) for k in TUNING_KEYS}
     try:
-        return Settings()
+        return Settings(**overrides)
     finally:
         for key, value in saved.items():
             if value is not None:

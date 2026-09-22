@@ -95,7 +95,7 @@ def test_an_overlong_narration_stops_before_the_clip_stage(tmp_path,
     assert clips.calls == 0, "the clip stage ran anyway"
     detail = caught.value.detail
     assert "66.3" in detail                  # what was measured
-    assert "38" in detail and "52" in detail  # the window it missed
+    assert "42" in detail and "57" in detail  # the window it missed
     assert "shorten" in detail.lower()        # what to do about it
 
 
@@ -148,9 +148,19 @@ def test_the_gate_uses_the_window_it_is_given_not_a_literal(tmp_path,
 
 
 def test_the_gate_and_the_scorecard_cannot_drift_apart():
-    """One window, one definition. Two copies of 38/52 would separate the
-    first time either moved, and a pre-render gate that disagrees with the
-    check it fronts is worse than no gate at all."""
+    """One formula, one definition. Two copies of the window's arithmetic
+    would separate the first time the target moved, and a pre-render gate
+    that disagrees with the check it fronts is worse than no gate at all.
+
+    ``qc.DURATION_MIN``/``qc.DURATION_MAX`` are this module's own default
+    window -- for callers that score a plan with no ``Settings`` to hand
+    it -- anchored at the 45s target this pipeline shipped with before
+    ``target_seconds`` moved to 50. Production's window lives on
+    ``Settings.duration_min``/``duration_max``, computed by the very same
+    ``duration_window()`` at whatever ``target_seconds`` is actually
+    configured, so it moves with the target instead of standing still
+    under it.
+    """
     import inspect
 
     defaults = inspect.signature(qc.run_qc).parameters
@@ -158,8 +168,8 @@ def test_the_gate_and_the_scorecard_cannot_drift_apart():
     assert defaults["duration_max"].default == qc.DURATION_MAX
 
     settings = Settings()
-    assert settings.duration_min == qc.DURATION_MIN
-    assert settings.duration_max == qc.DURATION_MAX
+    assert (settings.duration_min, settings.duration_max) == \
+        qc.duration_window(settings.target_seconds)
 
 
 def test_the_pre_render_band_is_derived_from_the_publishing_window():
@@ -181,9 +191,22 @@ def test_the_pre_render_band_is_derived_from_the_publishing_window():
                                                70.0 * (1 + margin))
 
 
+def test_the_pre_render_gate_stays_wider_at_every_target():
+    """The gate must widen whatever window ``duration_window()`` hands it,
+    at any plausible target -- not just the one qc.py's own module-level
+    defaults happen to be anchored at."""
+    for target in (45.0, 50.0, 60.0):
+        low, high = qc.duration_window(target)
+        gate_low, gate_high = qc.pre_render_range(low, high)
+        assert gate_low < low < high < gate_high, (
+            f"at target={target}, the pre-render gate ({gate_low:.1f}-"
+            f"{gate_high:.1f}) is not wider than QC's own window "
+            f"({low:.1f}-{high:.1f})")
+
+
 def test_a_narration_just_outside_the_window_still_reaches_the_render(
         tmp_path, monkeypatch):
-    """35.6s is a QC failure, not an obviously wrong script.
+    """39.0s is a QC failure, not an obviously wrong script.
 
     At the sample script's measured 2.47 w/s the shortest script the agent
     accepts speaks for about this long. Refusing it here throws the run away
@@ -191,7 +214,7 @@ def test_a_narration_just_outside_the_window_still_reaches_the_render(
     minutes and hands a human a video and a scorecard.
     """
     plan, store, settings, clips, events = _harness(
-        tmp_path, monkeypatch, seconds_per_beat=2.74)   # 13 x 2.74 = 35.6s
+        tmp_path, monkeypatch, seconds_per_beat=3.0)    # 13 x 3.0 = 39.0s
 
     result = produce_stage(plan, None, store, settings, emit=events.append)
 
@@ -211,8 +234,8 @@ def test_the_gate_refusal_names_both_bands(tmp_path, monkeypatch):
         produce_stage(plan, None, store, settings, emit=events.append)
 
     detail = caught.value.detail
-    assert "38" in detail and "52" in detail        # what QC publishes
-    assert "60" in detail                           # what the gate accepts
+    assert "42" in detail and "57" in detail        # what QC publishes
+    assert "66" in detail                           # what the gate accepts
     assert "15%" in detail                          # and the margin between
 
 

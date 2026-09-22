@@ -13,7 +13,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from engine.gates.qc import DURATION_MAX, DURATION_MIN
+from engine.gates.qc import duration_window
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
@@ -136,7 +136,16 @@ class Settings:
     height: int = 1920
     fps: int = 30
     transition_duration: float = 0.5
-    target_seconds: float = 45.0
+    target_seconds: float = 50.0
+    # Was 45.0. Real runs of the script agent write closer to 122 words for
+    # a 10-beat mystery script -- 53.3s at Piper's 2.29 w/s. At a 45-second
+    # target the +/-15% word-budget band is 87-118 words, and 122 falls
+    # outside it, so real scripts kept failing the script gate before ever
+    # reaching synthesis. At 50 the band is 96-131 words and 122 lands
+    # inside it. 53s is well inside both platforms' limits -- YouTube
+    # Shorts allows minutes, Instagram Reels 90s -- so 45 was this
+    # pipeline's own constraint, not theirs.
+    #
     # Measured on the first fully real run of this pipeline: 152 Devanagari
     # words came out as 66.5s of Piper audio (pratham, length_scale 1.12),
     # i.e. 2.29 words/sec. The script prompt is given a word budget derived
@@ -169,10 +178,23 @@ class Settings:
     # The one duration window: QC scores the rendered file against it, and
     # the pre-render length gate scores the narration against it widened by
     # qc.PRE_RENDER_MARGIN — the gate refuses scripts that are obviously
-    # wrong, QC judges the ones that are merely off. Both are defined in
-    # engine.gates.qc so there is only ever one pair of numbers.
-    duration_min: float = DURATION_MIN
-    duration_max: float = DURATION_MAX
+    # wrong, QC judges the ones that are merely off.
+    #
+    # Derived from target_seconds and qc.DURATION_TOLERANCE — the same
+    # +/-15% run_script already allows on word count, carried through to
+    # seconds — in __post_init__ below, not restated as a literal here. A
+    # fixed 38.0-52.0 was exactly what 45 +/-15% worked out to, and it did
+    # not move the day target_seconds did: move the target to 60 and the
+    # 137-word budget it implies speaks for ~59.8s, outside a window a
+    # literal default would never have widened.
+    #
+    # RAHASYA_DURATION_MIN/RAHASYA_DURATION_MAX still widen (or narrow) the
+    # window independently of the target, for whoever wants that; leave
+    # them unset to let it track target_seconds instead. None here is a
+    # sentinel resolved in __post_init__, where target_seconds is known —
+    # a plain dataclass default can't see a sibling field's value.
+    duration_min: float | None = None
+    duration_max: float | None = None
     # One grade over every frame, so twenty-odd Pexels clips from as many
     # different creators read as one video rather than a template. Mirrors
     # voice_process: on by default, off with RAHASYA_VIDEO_GRADE=0. Turning
@@ -235,6 +257,20 @@ class Settings:
     # down from 136. See test_words_per_beat_stays_in_a_band_the_model_will_write
     # in tests/test_agents.py for the band this is checked against.
     script_beats: int = 10
+
+    def __post_init__(self) -> None:
+        # duration_min/duration_max default to the publishing window this
+        # target_seconds implies, not a value copied at class-definition
+        # time — a dataclass field default can't read a sibling field, so
+        # the derivation has to happen here, once target_seconds is known.
+        # RAHASYA_DURATION_MIN/RAHASYA_DURATION_MAX, if set, win either way.
+        default_min, default_max = duration_window(self.target_seconds)
+        if self.duration_min is None:
+            self.duration_min = float(
+                os.getenv("RAHASYA_DURATION_MIN", default_min))
+        if self.duration_max is None:
+            self.duration_max = float(
+                os.getenv("RAHASYA_DURATION_MAX", default_max))
 
     def ensure_dirs(self) -> None:
         for d in (self.work_dir, self.out_dir, self.music_dir,
