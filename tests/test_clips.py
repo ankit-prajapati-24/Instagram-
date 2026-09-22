@@ -151,7 +151,11 @@ class RealNamingAgent:
         self.delay = delay
 
     def match(self, script_segment, duration_seconds, download=True,
-              output_dir="output_clips"):
+              output_dir="output_clips", used_video_ids=None):
+        # ``used_video_ids`` is accepted and ignored on purpose: this fake
+        # exists to reproduce the downloader's *filename* mechanism, and it
+        # hands back ids 1..n per beat. Deduplication is exercised against
+        # the real agent further down, not here.
         self.output_dirs_used.append(output_dir)
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
@@ -548,11 +552,12 @@ class MockModeAdapter:
         self.agent = agent
 
     def match(self, script_segment, duration_seconds, download=True,
-              output_dir="output_clips"):
+              output_dir="output_clips", used_video_ids=None):
         return self.agent.match(script_segment=script_segment,
                                 duration_seconds=duration_seconds,
                                 download=download,
                                 output_dir=output_dir,
+                                used_video_ids=used_video_ids,
                                 mock=True)
 
 
@@ -665,3 +670,103 @@ def test_ordinary_beat_ids_are_left_alone():
     already safe and are what every stored plan on disk uses."""
     for beat_id in ("b0", "b12", "hook-1", "beat_3", "a.b"):
         assert safe_beat_id(beat_id) == beat_id
+
+
+# ---------------------------------------------------------------------------
+# One Pexels video, one slot: no clip repeats inside a plan
+# ---------------------------------------------------------------------------
+
+from stock_agent import UsedVideoIds
+
+
+def test_no_pexels_video_is_used_by_two_slots_in_one_plan(tmp_path):
+    """The duplicate proven from the last real run's asset table: 24 clips,
+    23 distinct sources — one video carried both beat 3 and beat 9.
+
+    Driven through a **real** ``StockVideoMatcherAgent`` in mock mode at
+    ``workers=4``, because the defect is a property of the shared agent
+    under concurrency: a per-beat ``match()`` call cannot see what another
+    beat already took, and ``used_video_ids`` is shared mutable state
+    written from four threads. A mocked agent would simply hand back
+    whatever ids the test told it to and prove nothing.
+    """
+    agent = StockVideoMatcherAgent()
+    _slow_query_generation(agent, 0.05)
+
+    plan = make_plan(beats=6)
+    for beat in plan.script.beats:
+        beat.measured_seconds = 5.0   # 2 clip slots per beat -> 12 slots
+
+    generate_plan_clips(plan, MockModeAdapter(agent), client=None,
+                        work_dir=tmp_path, workers=4)
+
+    owners: dict[int, list[str]] = {}
+    filled = 0
+    for beat in plan.script.beats:
+        for clip in beat.clips:
+            if clip.provider != "pexels":
+                continue
+            filled += 1
+            assert clip.pexels_id is not None
+            owners.setdefault(clip.pexels_id, []).append(beat.beat_id)
+
+    assert filled == 12, f"expected 12 stock slots, got {filled}"
+    repeated = {vid: who for vid, who in owners.items() if len(who) > 1}
+    assert not repeated, (
+        f"the same Pexels video fills more than one slot: {repeated}")
+
+
+def test_a_used_top_result_is_substituted_not_dropped(tmp_path):
+    """Exclusion must reach the *selection*, not merely veto the slot.
+
+    A caller that can only reject a duplicate produces a fallback still —
+    strictly worse than a different clip. So: run one beat, mark everything
+    it took as used, then run a second beat whose queries are identical.
+    Every slot must still come back ``pexels`` with a *different* video id.
+    """
+    agent = StockVideoMatcherAgent()
+    used = UsedVideoIds()
+
+    beat1 = _beat_with_id("b1", seconds=5.0)
+    first = beat_clips(MockModeAdapter(agent), beat1, tmp_path / "clips",
+                       used_video_ids=used)
+    taken = {c.pexels_id for c in first if c.provider == "pexels"}
+    assert len(taken) == 2
+
+    # Same visual_prompt, so generate_mock_queries produces the same
+    # queries and the same top result for every slot.
+    beat2 = _beat_with_id("b2", seconds=5.0)
+    second = beat_clips(MockModeAdapter(agent), beat2, tmp_path / "clips",
+                        used_video_ids=used)
+
+    assert [c.provider for c in second] == ["pexels", "pexels"], (
+        f"the duplicate was rejected into a fallback instead of being "
+        f"substituted: {[c.provider for c in second]}")
+    again = {c.pexels_id for c in second}
+    assert again.isdisjoint(taken), (
+        f"beat2 re-used beat1's footage: {again & taken}")
+    for clip in second:
+        assert Path(clip.path).exists() and Path(clip.path).stat().st_size
+
+
+def test_the_exclusion_is_per_plan_not_per_process(tmp_path):
+    """Two different videos must be free to use the same footage: the
+    registry is created inside ``generate_plan_clips``, so nothing carries
+    over from a previous plan."""
+    agent = StockVideoMatcherAgent()
+
+    def ids_of(plan):
+        return {c.pexels_id for beat in plan.script.beats
+                for c in beat.clips if c.provider == "pexels"}
+
+    plan_a = make_plan(beats=3)
+    plan_b = make_plan(beats=3)
+    for plan in (plan_a, plan_b):
+        for beat in plan.script.beats:
+            beat.measured_seconds = 5.0
+        generate_plan_clips(plan, MockModeAdapter(agent), client=None,
+                            work_dir=tmp_path, workers=4)
+
+    assert ids_of(plan_a) == ids_of(plan_b), (
+        "a second plan was denied footage the first plan used, so the "
+        "exclusion leaked across plans")

@@ -21,6 +21,7 @@ import math
 import os
 import re
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -209,6 +210,76 @@ class StockMatcherResult:
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent)
+
+
+# ============================================================================
+# Used-video registry (shared across concurrent match() calls)
+# ============================================================================
+
+
+class UsedVideoIds:
+    """The Pexels video ids already committed to one plan.
+
+    Why a class and not a bare ``set``: ``engine/media/clips.py`` runs beats
+    through a 4-worker ``ThreadPoolExecutor`` sharing one
+    ``StockVideoMatcherAgent``, so this is shared mutable state written from
+    four threads. ``if vid not in used: used.add(vid)`` is two operations
+    with a window between them, and two threads can both pass the ``not in``
+    before either ``add`` -- which is exactly how the same clip lands in two
+    beats. ``reserve`` closes that window by doing the test and the set
+    together under one lock, and returning whether *this* caller is the one
+    that got it.
+
+    The lock lives on the registry rather than on the agent, so the thing
+    being guarded and the thing doing the guarding cannot drift apart: there
+    is no path to the id set that does not go through it.
+
+    One registry is one plan (see ``generate_plan_clips``). Two different
+    videos are free to use the same footage; only one video may not repeat
+    itself.
+    """
+
+    __slots__ = ("_ids", "_lock")
+
+    def __init__(self, ids: Optional[Any] = None) -> None:
+        self._lock = threading.Lock()
+        self._ids: set = set(ids or ())
+
+    def reserve(self, video_id: int) -> bool:
+        """Claim ``video_id``; return True only for the caller that got it.
+
+        Atomic test-and-set. Callers reserve *before* downloading, so an id
+        is spoken for from the instant it is selected -- a download that
+        later fails does not release it, because handing a known-bad
+        candidate back to another beat only costs a second failure.
+        """
+        with self._lock:
+            if video_id in self._ids:
+                return False
+            self._ids.add(video_id)
+            return True
+
+    def snapshot(self) -> set:
+        """A copy of the ids claimed so far, safe to read without the lock.
+
+        It is a copy, not a view: the caller hands it to a network search
+        that takes seconds, during which other threads keep reserving. A
+        stale snapshot can only cause a *redundant* selection, which
+        ``reserve`` then rejects; it can never cause a duplicate.
+        """
+        with self._lock:
+            return set(self._ids)
+
+    def __contains__(self, video_id: object) -> bool:
+        with self._lock:
+            return video_id in self._ids
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._ids)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"UsedVideoIds({sorted(self.snapshot())})"
 
 
 # ============================================================================
@@ -496,61 +567,117 @@ class PexelsFetcher:
             )
         return {"Authorization": self.api_key}
 
+    # A search that has to avoid ids already spent on this plan needs more
+    # than one candidate to choose between. per_page=5 hands the ranker five
+    # videos; once some of them are used, "the best remaining" is easily
+    # "none", and a slot that could have carried different footage falls
+    # back to a still instead. Asking for a bigger page is the cheapest way
+    # to substitute rather than fall back: the same request, more rows, and
+    # only when an exclusion is actually in play.
+    EXCLUDED_PER_PAGE = 15
+
     def search_video(
         self,
         query: str,
         orientation: str = "portrait",
         per_page: int = 5,
+        exclude_ids: Optional[Any] = None,
     ) -> Tuple[Optional[PexelsVideo], bool]:
         """Search Pexels for a query with portrait priority and landscape fallback.
+
+        ``exclude_ids`` is an iterable of Pexels video ids already used
+        elsewhere in this plan. It reaches all the way into the ranker
+        (``_select_best_video``) rather than filtering the winner
+        afterwards, and that is the whole point: this method returns exactly
+        one video, so a caller that only saw the winner could reject a
+        duplicate but never replace it -- and a rejected slot is a fallback
+        still, strictly worse than different footage.
+
+        A tier whose every candidate is excluded is treated like a tier that
+        returned nothing, so the existing fallback chain (portrait ->
+        landscape -> unfiltered -> simplified query) doubles as the
+        broadening strategy when a query's best results are already spent.
 
         Returns:
             Tuple of (PexelsVideo or None, was_fallback_boolean)
         """
-        # Step 1: Search preferred orientation (portrait)
-        videos, was_fallback = self._execute_search(query, orientation=orientation, per_page=per_page)
-        
-        # Step 2: Fallback to landscape if 0 results
-        if not videos and orientation == "portrait":
-            videos, _ = self._execute_search(query, orientation="landscape", per_page=per_page)
-            was_fallback = True
+        excluded = set(exclude_ids or ())
+        page_size = max(per_page, self.EXCLUDED_PER_PAGE) if excluded else per_page
 
-        # Step 3: Fallback to no orientation filter if still 0 results
-        if not videos:
-            videos, _ = self._execute_search(query, orientation=None, per_page=per_page)
-            was_fallback = True
+        # (query, orientation, counts_as_fallback), best first.
+        tiers: List[Tuple[str, Optional[str], bool]] = [(query, orientation, False)]
+        if orientation == "portrait":
+            tiers.append((query, "landscape", True))
+        tiers.append((query, None, True))
+        simplified_query = " ".join(query.split()[:2])
+        if simplified_query and simplified_query != query:
+            tiers.append((simplified_query, None, True))
 
-        # Step 4: Fallback to simplified query (first 2 words) if still 0
-        if not videos:
-            simplified_query = " ".join(query.split()[:2])
-            if simplified_query and simplified_query != query:
-                videos, _ = self._execute_search(simplified_query, orientation=None, per_page=per_page)
+        was_fallback = False
+        for tier_query, tier_orientation, counts_as_fallback in tiers:
+            videos, _ = self._execute_search(
+                tier_query, orientation=tier_orientation, per_page=page_size
+            )
+            if counts_as_fallback:
                 was_fallback = True
+            if not videos:
+                continue
 
-        if not videos:
-            return None, was_fallback
+            # Re-rank and extract the best MP4 file from the matching videos
+            best_video = self._select_best_video(
+                videos,
+                target_portrait=(orientation == "portrait"),
+                exclude_ids=excluded,
+            )
+            if best_video:
+                best_video.was_fallback = was_fallback
+                return best_video, was_fallback
 
-        # Re-rank and extract the best MP4 file from the top matching video
-        best_video = self._select_best_video(videos, target_portrait=(orientation == "portrait"))
-        if best_video:
-            best_video.was_fallback = was_fallback
+        return None, was_fallback
 
-        return best_video, was_fallback
+    # How many alternative ids the mock catalogue offers past the one a clip
+    # index asks for. Far more than any plan has slots (a 60s reel is ~24),
+    # so the offline path exercises substitution rather than starvation --
+    # but bounded, so exhaustion is still reachable and still reported the
+    # way a real exhausted search reports it.
+    MOCK_ALTERNATIVES = 256
 
-    def mock_video(self, query: str, clip_index: int = 1) -> Tuple[PexelsVideo, bool]:
-        """Return simulated portrait HD video result for offline testing."""
+    def mock_video(
+        self,
+        query: str,
+        clip_index: int = 1,
+        exclude_ids: Optional[Any] = None,
+    ) -> Tuple[Optional[PexelsVideo], bool]:
+        """Return simulated portrait HD video result for offline testing.
+
+        ``exclude_ids`` mirrors ``search_video``: the mock walks forward to
+        the first id it has not already handed out. Without it the offline
+        path returns id 2000+clip_index to *every* beat, which is the
+        duplication this module exists to prevent -- an offline test of
+        deduplication would then be testing nothing.
+        """
+        excluded = set(exclude_ids or ())
+        offset = clip_index
+        ceiling = clip_index + self.MOCK_ALTERNATIVES
+        while 2000 + offset in excluded and offset < ceiling:
+            offset += 1
+        if 2000 + offset in excluded:
+            # Catalogue exhausted. Same shape as a real search that found
+            # nothing unused, so the caller handles the two identically.
+            return None, False
+
         sample_file = VideoFileCandidate(
-            id=1000 + clip_index,
+            id=1000 + offset,
             quality="hd",
             file_type="video/mp4",
             width=1080,
             height=1920,
             fps=30.0,
-            link=f"https://static.pexels.com/mock/clip_{clip_index:02d}_1080x1920.mp4",
+            link=f"https://static.pexels.com/mock/clip_{offset:02d}_1080x1920.mp4",
         )
         video = PexelsVideo(
-            id=2000 + clip_index,
-            url=f"https://www.pexels.com/video/{2000 + clip_index}/",
+            id=2000 + offset,
+            url=f"https://www.pexels.com/video/{2000 + offset}/",
             duration=15,
             tags=query.split(),
             user_name="StockCinematographer",
@@ -590,13 +717,23 @@ class PexelsFetcher:
         self,
         videos: List[Dict[str, Any]],
         target_portrait: bool = True,
+        exclude_ids: Optional[Any] = None,
     ) -> Optional[PexelsVideo]:
-        """Select the highest resolution MP4 matching target orientation from candidate videos."""
+        """Select the highest resolution MP4 matching target orientation from candidate videos.
+
+        ``exclude_ids`` drops videos already used elsewhere in the plan out
+        of the competition entirely. Filtering here rather than at the caller
+        is what turns "this slot is a duplicate" into "this slot gets the
+        next best video".
+        """
+        excluded = set(exclude_ids or ())
         best_video_obj: Optional[PexelsVideo] = None
         highest_score = -1.0
 
         for vid in videos:
             video_id = vid.get("id", 0)
+            if video_id in excluded:
+                continue
             url = vid.get("url", "")
             duration = int(vid.get("duration", 0))
             tags = [t.get("name", "") if isinstance(t, dict) else str(t) for t in vid.get("tags", [])]
@@ -792,6 +929,73 @@ class StockVideoMatcherAgent:
         self.pexels_fetcher = PexelsFetcher(api_key=pexels_api_key)
         self.downloader = ClipDownloader()
 
+    # How many times one query may re-select after losing a reservation
+    # race. Every loss means another thread reserved that exact id, so the
+    # next snapshot excludes it and the retry makes progress -- the cap only
+    # bounds a pathological pile-up. The pool is four workers, so three
+    # consecutive losses is already the realistic worst case.
+    MAX_SELECTION_ATTEMPTS = 8
+
+    def _fetch_video(
+        self,
+        query: ClipQuery,
+        exclude_ids: Optional[Any],
+        mock: bool,
+    ) -> Tuple[Optional[PexelsVideo], bool]:
+        """One selection attempt for one query, live or mocked."""
+        if mock or not self.pexels_fetcher.api_key:
+            return self.pexels_fetcher.mock_video(
+                query=query.search_query,
+                clip_index=query.clip_index,
+                exclude_ids=exclude_ids,
+            )
+        return self.pexels_fetcher.search_video(
+            query=query.search_query,
+            orientation="portrait",
+            per_page=5,
+            exclude_ids=exclude_ids,
+        )
+
+    def _select_unused_video(
+        self,
+        query: ClipQuery,
+        used: Optional[UsedVideoIds],
+        mock: bool,
+    ) -> Tuple[Optional[PexelsVideo], bool]:
+        """Pick a video for ``query`` that no other slot in the plan holds.
+
+        The window this closes: selection takes seconds (a Pexels round
+        trip), so two threads can search against the same snapshot and pick
+        the same video before either has recorded it. The snapshot alone
+        cannot prevent that -- nothing can, since both searches are already
+        in flight. What decides it is ``reserve``, an atomic test-and-set
+        run the instant a video is chosen and *before* the download: exactly
+        one caller gets True, and the loser simply selects again against a
+        fresh snapshot that now contains the winner's id, coming back with
+        different footage rather than an empty slot.
+
+        Reserving before downloading also means a failed download keeps its
+        id reserved. That is deliberate: releasing it would only offer a
+        known-bad candidate to the next beat, and a release racing another
+        thread's snapshot re-opens the same window for no gain.
+        """
+        if used is None:
+            return self._fetch_video(query, None, mock)
+
+        was_fallback = False
+        for _ in range(self.MAX_SELECTION_ATTEMPTS):
+            video, was_fallback = self._fetch_video(query, used.snapshot(), mock)
+            if video is None:
+                # Every candidate this query can reach is already used.
+                # Reported as "no video", which the clip layer turns into a
+                # fallback still -- never into a repeat.
+                return None, was_fallback
+            if used.reserve(video.id):
+                return video, was_fallback
+            # Lost the race for this id. Loop: the next snapshot contains
+            # it, so the search is forced onto a different video.
+        return None, was_fallback
+
     def match(
         self,
         script_segment: str,
@@ -800,6 +1004,7 @@ class StockVideoMatcherAgent:
         output_dir: str = "output_clips",
         on_query_ready: Optional[Any] = None,
         mock: bool = False,
+        used_video_ids: Optional[UsedVideoIds] = None,
     ) -> StockMatcherResult:
         """Synchronously match stock footage to script segment.
 
@@ -810,10 +1015,28 @@ class StockVideoMatcherAgent:
             output_dir: Folder to save downloaded MP4 clips.
             on_query_ready: Optional callback receiving generated queries.
             mock: If True, uses deterministic offline mock generation.
+            used_video_ids: A ``UsedVideoIds`` registry shared by every
+                ``match()`` call belonging to one plan. Ids in it are
+                excluded from selection and every id this call keeps is
+                added to it, so no Pexels video carries two slots of the
+                same video. ``None`` (the default, and what the CLI uses)
+                disables deduplication entirely and leaves behaviour
+                exactly as it was.
 
         Returns:
             StockMatcherResult containing all queries, matches, and file paths.
         """
+        used = used_video_ids
+        if used is not None and not isinstance(used, UsedVideoIds):
+            # A bare set would look like it worked and quietly race: "not in
+            # / add" is two operations, and this method runs on four threads
+            # at once. Refuse it at the door rather than ship a check that
+            # holds only when nobody is in a hurry.
+            raise TypeError(
+                "used_video_ids must be a UsedVideoIds registry, not "
+                f"{type(used_video_ids).__name__}: a plain set cannot be "
+                "test-and-set atomically and match() is called concurrently."
+            )
         start_time = time.time()
         # output_dir is carried in a local and handed to each download_clip
         # call below; it is deliberately NOT stored on self.downloader.
@@ -848,22 +1071,23 @@ class StockVideoMatcherAgent:
         # 2. Fetch stock videos for each query
         for query in queries:
             try:
-                if mock or not self.pexels_fetcher.api_key:
-                    matched_video, was_fallback = self.pexels_fetcher.mock_video(
-                        query=query.search_query,
-                        clip_index=query.clip_index,
+                matched_video, was_fallback = self._select_unused_video(
+                    query, used=used, mock=mock
+                )
+                if matched_video:
+                    error = None
+                elif used is not None:
+                    error = (
+                        "No unused stock video found for query: every candidate "
+                        "is already used elsewhere in this plan"
                     )
                 else:
-                    matched_video, was_fallback = self.pexels_fetcher.search_video(
-                        query=query.search_query,
-                        orientation="portrait",
-                        per_page=5,
-                    )
+                    error = "No stock video found for query"
                 match_entry = ClipMatch(
                     clip_index=query.clip_index,
                     query=query,
                     video=matched_video,
-                    error=None if matched_video else "No stock video found for query",
+                    error=error,
                 )
             except Exception as exc:
                 match_entry = ClipMatch(
@@ -905,8 +1129,13 @@ class StockVideoMatcherAgent:
         download: bool = False,
         output_dir: str = "output_clips",
         mock: bool = False,
+        used_video_ids: Optional[UsedVideoIds] = None,
     ) -> StockMatcherResult:
-        """Asynchronously execute matching via asyncio thread pool."""
+        """Asynchronously execute matching via asyncio thread pool.
+
+        ``used_video_ids`` is forwarded unchanged; the registry is
+        thread-safe, which is exactly what a thread-pool caller needs.
+        """
         return await asyncio.to_thread(
             self.match,
             script_segment=script_segment,
@@ -914,6 +1143,7 @@ class StockVideoMatcherAgent:
             download=download,
             output_dir=output_dir,
             mock=mock,
+            used_video_ids=used_video_ids,
         )
 
 

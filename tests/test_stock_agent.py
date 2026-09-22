@@ -419,6 +419,7 @@ class TestStockVideoMatcherAgent:
             download=False,
             output_dir="output_clips",
             mock=False,
+            used_video_ids=None,
         )
 
     def test_mock_match(self):
@@ -434,3 +435,245 @@ class TestStockVideoMatcherAgent:
         assert result.matches[0].video is not None
         assert result.matches[0].video.selected_file.is_portrait is True
         assert result.matches[0].video.selected_file.resolution == "1080x1920"
+
+
+# ===========================================================================
+# Deduplication: no Pexels video twice in one plan
+# ===========================================================================
+
+import threading
+
+from stock_agent import UsedVideoIds
+
+
+def _payload(video_id, width=1080, height=1920, quality="hd"):
+    """One Pexels-API-shaped video dict with a single MP4 file."""
+    return {
+        "id": video_id,
+        "url": f"https://pexels.com/video/{video_id}",
+        "duration": 15,
+        "user": {"name": "Someone"},
+        "video_files": [{
+            "id": video_id * 10,
+            "quality": quality,
+            "file_type": "video/mp4",
+            "width": width,
+            "height": height,
+            "fps": 30.0,
+            "link": f"https://video.mp4/{video_id}.mp4",
+        }],
+    }
+
+
+class TestUsedVideoIds:
+    """The registry itself: the only thing standing between four worker
+    threads and two beats keeping the same video."""
+
+    def test_reserve_is_won_by_exactly_one_thread(self):
+        """The select-to-record window: every thread may *see* the id as
+        free, but only one may keep it. ``reserve`` is the atomic
+        test-and-set that closes the window, so N racing threads must
+        produce exactly one winner."""
+        used = UsedVideoIds()
+        threads = 16
+        start = threading.Barrier(threads)
+        wins = []
+        lock = threading.Lock()
+
+        def claim():
+            start.wait(timeout=5)
+            won = used.reserve(4242)
+            with lock:
+                wins.append(won)
+
+        workers = [threading.Thread(target=claim) for _ in range(threads)]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join(timeout=5)
+
+        assert wins.count(True) == 1, f"{wins.count(True)} threads kept 4242"
+        assert len(wins) == threads
+        assert 4242 in used.snapshot()
+
+    def test_snapshot_does_not_alias_the_registry(self):
+        used = UsedVideoIds()
+        used.reserve(1)
+        snap = used.snapshot()
+        used.reserve(2)
+        assert snap == {1}, "a snapshot must not keep mutating underfoot"
+
+    def test_a_registry_can_be_seeded(self):
+        used = UsedVideoIds([7, 8])
+        assert used.reserve(7) is False
+        assert used.reserve(9) is True
+        assert used.snapshot() == {7, 8, 9}
+
+
+class TestExclusionReachesSelection:
+    """A caller that can only *reject* a duplicate gets a fallback still.
+    To substitute, the exclusion has to reach ``_select_best_video``."""
+
+    @pytest.fixture
+    def fetcher(self):
+        return PexelsFetcher(api_key="mock_pexels_key")
+
+    def test_select_best_video_skips_excluded_ids(self, fetcher):
+        videos = [_payload(101), _payload(102)]
+        best = fetcher._select_best_video(videos, target_portrait=True,
+                                          exclude_ids={101})
+        assert best is not None and best.id == 102
+
+    def test_select_best_video_returns_none_when_all_are_excluded(self, fetcher):
+        videos = [_payload(101), _payload(102)]
+        assert fetcher._select_best_video(videos, target_portrait=True,
+                                          exclude_ids={101, 102}) is None
+
+    def test_search_video_substitutes_the_next_best_candidate(self, fetcher):
+        """The headline behaviour: the top result is already used, so the
+        slot comes back with a *different Pexels video* -- not None, which
+        the caller could only turn into a fallback still."""
+        page = [_payload(101), _payload(102)]
+
+        def execute(query, orientation=None, per_page=5):
+            return list(page), False
+
+        with patch.object(fetcher, "_execute_search", side_effect=execute):
+            top, _ = fetcher.search_video("gold bars stacked rows")
+            assert top.id == 101
+            second, was_fallback = fetcher.search_video(
+                "gold bars stacked rows", exclude_ids={101})
+
+        assert second is not None, "the used top result rejected the slot"
+        assert second.id == 102
+        assert was_fallback is False
+
+    def test_search_video_broadens_when_the_first_tier_is_exhausted(self, fetcher):
+        """Every portrait candidate is already used, so the search widens
+        through its existing fallback tiers rather than giving up."""
+        def execute(query, orientation=None, per_page=5):
+            if orientation == "portrait":
+                return [_payload(101)], False
+            return [_payload(303, width=1920, height=1080)], False
+
+        with patch.object(fetcher, "_execute_search", side_effect=execute):
+            video, was_fallback = fetcher.search_video(
+                "gold bars stacked rows", exclude_ids={101})
+
+        assert video is not None and video.id == 303
+        assert was_fallback is True
+
+    def test_search_video_gives_up_when_every_tier_is_exhausted(self, fetcher):
+        """Exhaustion is reported as "no video", which the clip layer turns
+        into a fallback still -- never into a repeat."""
+        def execute(query, orientation=None, per_page=5):
+            return [_payload(101)], False
+
+        with patch.object(fetcher, "_execute_search", side_effect=execute):
+            video, _ = fetcher.search_video("gold bars stacked rows",
+                                            exclude_ids={101})
+        assert video is None
+
+    def test_search_video_widens_the_page_when_ids_are_excluded(self, fetcher):
+        """More exclusions need more candidates to choose between, so an
+        excluded search asks Pexels for a bigger page."""
+        seen = []
+
+        def execute(query, orientation=None, per_page=5):
+            seen.append(per_page)
+            return [_payload(101)], False
+
+        with patch.object(fetcher, "_execute_search", side_effect=execute):
+            fetcher.search_video("q one two", exclude_ids={999})
+        assert seen and min(seen) > 5
+
+    def test_mock_video_substitutes_an_unused_id(self):
+        fetcher = PexelsFetcher(api_key="")
+        first, _ = fetcher.mock_video("gold bars", clip_index=1)
+        second, _ = fetcher.mock_video("gold bars", clip_index=1,
+                                       exclude_ids={first.id})
+        assert second is not None and second.id != first.id
+        assert second.selected_file.link != first.selected_file.link
+
+
+class TestAgentDeduplication:
+    """``match()`` is where selection and recording meet."""
+
+    def test_two_matches_sharing_a_registry_never_repeat_a_video(self):
+        agent = StockVideoMatcherAgent()
+        used = UsedVideoIds()
+        first = agent.match("vault", 5.0, mock=True, used_video_ids=used)
+        second = agent.match("vault", 5.0, mock=True, used_video_ids=used)
+        ids = [m.video.id for m in first.matches + second.matches if m.video]
+        assert len(ids) == 4
+        assert len(set(ids)) == 4, f"a video was matched twice: {ids}"
+        assert used.snapshot() == set(ids), (
+            "every selected video must be recorded before it is downloaded")
+
+    def test_without_a_registry_match_behaves_exactly_as_before(self):
+        agent = StockVideoMatcherAgent()
+        first = agent.match("vault", 5.0, mock=True)
+        second = agent.match("vault", 5.0, mock=True)
+        assert [m.video.id for m in first.matches] == \
+               [m.video.id for m in second.matches]
+
+    def test_a_plain_set_is_rejected_rather_than_silently_unsafe(self):
+        """A bare ``set`` would look like it worked and race under the
+        4-worker pool, so it is refused at the door."""
+        agent = StockVideoMatcherAgent()
+        with pytest.raises(TypeError):
+            agent.match("vault", 5.0, mock=True, used_video_ids=set())
+
+    def test_two_threads_selecting_the_same_video_keep_different_ones(self):
+        """The window between "this video was selected" and "this id was
+        recorded": a barrier forces both threads to search while the
+        registry is still empty, so both *select* 7001. Only one may keep
+        it; the loser must re-select -- and must come back with the other
+        video, not empty-handed."""
+        agent = StockVideoMatcherAgent()
+        agent.pexels_fetcher.api_key = "present-so-the-real-path-runs"
+        agent.query_generator.generate_queries = MagicMock(return_value=(
+            [ClipQuery(clip_index=1, search_query="gold bars stacked",
+                       shot_intent="x")], 1))
+
+        catalogue = [7001, 7002]
+        gate = threading.Barrier(2)
+
+        def search(query, orientation="portrait", per_page=5, exclude_ids=None):
+            excluded = set(exclude_ids or ())
+            if not excluded:
+                # Both threads take their snapshot before either reserves.
+                gate.wait(timeout=5)
+            for video_id in catalogue:
+                if video_id in excluded:
+                    continue
+                return PexelsVideo(
+                    id=video_id, url=f"https://pexels.com/{video_id}",
+                    duration=10, tags=[], user_name="Someone",
+                    selected_file=VideoFileCandidate(
+                        id=video_id, quality="hd", file_type="video/mp4",
+                        width=1080, height=1920, fps=30.0,
+                        link=f"https://video.mp4/{video_id}.mp4")), False
+            return None, False
+
+        agent.pexels_fetcher.search_video = search
+        used = UsedVideoIds()
+        results = []
+        lock = threading.Lock()
+
+        def run():
+            result = agent.match("vault", 2.0, used_video_ids=used)
+            with lock:
+                results.append(result.matches[0].video)
+
+        threads = [threading.Thread(target=run) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert len(results) == 2
+        assert all(v is not None for v in results), (
+            "a thread that lost the race came back empty instead of "
+            "substituting")
+        assert {v.id for v in results} == {7001, 7002}

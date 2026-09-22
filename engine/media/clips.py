@@ -19,6 +19,7 @@ from pathlib import Path
 
 from engine.contract import Beat, Clip, ReelPlan
 from engine.media.images import generate_beat_image
+from stock_agent import UsedVideoIds
 
 # The agent generates one query per this many seconds. Mirrors
 # VisualQueryGenerator.calculate_clip_count so the two cannot drift apart.
@@ -121,7 +122,8 @@ def beat_output_dir(target_dir: str | Path, beat_id: str) -> Path:
     return Path(target_dir) / safe_beat_id(beat_id)
 
 
-def beat_clips(agent, beat: Beat, target_dir: str | Path) -> list[Clip]:
+def beat_clips(agent, beat: Beat, target_dir: str | Path,
+               used_video_ids: UsedVideoIds | None = None) -> list[Clip]:
     """Match and download footage for one beat.
 
     The slot count is the timeline's contract, not a suggestion: if the
@@ -133,6 +135,13 @@ def beat_clips(agent, beat: Beat, target_dir: str | Path) -> list[Clip]:
     in ``beat_output_dir(target_dir, beat.beat_id)`` so that no other beat's
     downloads can collide with or race this one's (see that function's
     docstring for why the downloader's naming makes this necessary).
+
+    ``used_video_ids`` is the plan's registry of Pexels ids already spoken
+    for. It is handed *into* ``match()`` rather than used to filter what
+    comes back, because ``match()`` returns exactly one video per query:
+    filtering afterwards could only drop a duplicate slot to a fallback
+    still, whereas an exclusion the selection can see returns different
+    footage. ``None`` leaves matching exactly as it was.
     """
     seconds = beat.seconds()
     count = clip_count(seconds)
@@ -160,7 +169,8 @@ def beat_clips(agent, beat: Beat, target_dir: str | Path) -> list[Clip]:
     result = agent.match(script_segment=segment,
                          duration_seconds=seconds,
                          download=True,
-                         output_dir=str(beat_dir))
+                         output_dir=str(beat_dir),
+                         used_video_ids=used_video_ids)
     matches = list(result.matches)[:count]
 
     clips: list[Clip] = []
@@ -224,11 +234,29 @@ def generate_plan_clips(plan: ReelPlan, agent, client, work_dir: str | Path,
     limit or other per-beat failure is caught instead of retried: one
     attempt per beat, because retrying a 429 turns a slow path into a
     banned one.
+
+    No Pexels video fills two slots of the same video. The registry that
+    enforces it is built *here*, so it covers exactly one plan: a later
+    video is free to use the same footage, and only repetition inside one
+    reel looks like a mistake. It is passed into every beat rather than
+    accumulated in the ``as_completed`` loop below, where the other shared
+    writes happen, because by the time a beat completes its clips are
+    already downloaded -- recording ids there would tell the next beat what
+    the previous one took only if the two never overlapped, and four of them
+    are in flight at once. The registry is written from all four worker
+    threads and is safe for it: see ``UsedVideoIds``, whose ``reserve`` is
+    an atomic test-and-set.
+
+    Deliberately *not* covered: the fallback image tier. Those stills are
+    generated per beat (each with its own seed) rather than picked from a
+    shared catalogue, so they have no id to collide on; and a plan whose
+    stock footage ran out needs its stills more than it needs them unique.
     """
     target_dir = Path(work_dir) / plan.plan_id / "clips"
     target_dir.mkdir(parents=True, exist_ok=True)
     beats = plan.script.beats
     counts: dict[str, int] = {}
+    used_video_ids = UsedVideoIds()
 
     def make(item):
         index, beat = item
@@ -239,7 +267,8 @@ def generate_plan_clips(plan: ReelPlan, agent, client, work_dir: str | Path,
                                              clip_count(beat.seconds()))]
         else:
             try:
-                clips = beat_clips(agent, beat, target_dir)
+                clips = beat_clips(agent, beat, target_dir,
+                                   used_video_ids=used_video_ids)
             except Exception as exc:
                 # One attempt per beat. A rate limit answered with retries
                 # turns a slow path into a banned one.
