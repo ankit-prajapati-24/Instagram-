@@ -1132,7 +1132,8 @@ def create_app(db_path: str | Path | None = None,
             if not _under_roots(destination, [Path(settings.work_dir)]):
                 raise HTTPException(500, "upload path escaped work_dir")
             try:
-                seconds = ingest_narration(partial, destination, settings)
+                seconds, _cleanup = ingest_narration(partial, destination,
+                                                    settings)
             except UploadRejected as exc:
                 # A 415 rather than a 400: these are all judgements about
                 # the media itself — it does not decode, it is silent, it

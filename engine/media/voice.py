@@ -35,11 +35,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
+import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from engine.contract import ReelPlan, WordTiming
@@ -270,7 +272,7 @@ def cleanup_filters(settings) -> str:
     )
 
 
-def _loudnorm_measurement(path: Path, settings) -> dict:
+def _loudnorm_measurement(path: Path, settings, filters: str = "") -> dict:
     """Run loudnorm's analysis pass and return what it measured.
 
     Two passes rather than one because single-pass loudnorm is a *dynamic*
@@ -278,12 +280,19 @@ def _loudnorm_measurement(path: Path, settings) -> dict:
     speech is audible as pumping. Measuring first and then applying one
     linear gain preserves the delivery, which is the entire reason somebody
     recorded their own narration instead of using Piper's.
+
+    ``filters``, when given, is a cleanup fragment (see ``cleanup_filters``)
+    prepended ahead of ``loudnorm`` -- Global Constraint 2's reason: the
+    measured values have to describe the signal that ends up written, not
+    the noisy one that came off the microphone. Left empty (the default),
+    this is the same raw measurement ``ingest_narration`` always took.
     """
+    af = f"{filters}," if filters else ""
+    af += (f"loudnorm=I={UPLOAD_LOUDNESS}:TP={UPLOAD_TRUE_PEAK}"
+           f":LRA={UPLOAD_LOUDNESS_RANGE}:print_format=json")
     result = subprocess.run(
         [settings.ffmpeg, "-hide_banner", "-nostats", "-i", str(path),
-         "-af", (f"loudnorm=I={UPLOAD_LOUDNESS}:TP={UPLOAD_TRUE_PEAK}"
-                 f":LRA={UPLOAD_LOUDNESS_RANGE}:print_format=json"),
-         "-f", "null", "-"],
+         "-af", af, "-f", "null", "-"],
         capture_output=True, text=True)
     if result.returncode != 0:
         raise UploadRejected(
@@ -302,48 +311,117 @@ def _loudnorm_measurement(path: Path, settings) -> dict:
             f"could not read loudness back from ffmpeg: {exc}") from exc
 
 
-def ingest_narration(source: str | Path, target: str | Path,
-                     settings) -> float:
-    """Accept one beat of human-supplied narration. Returns its seconds.
+def _input_i(measured: dict) -> float:
+    """``input_i`` off a loudnorm measurement, or ``-inf`` if it can't be
+    read -- the same fallback the silence check has always used, now
+    shared by both the raw check and the post-write probe."""
+    try:
+        return float(measured["input_i"])
+    except (KeyError, TypeError, ValueError):
+        return float("-inf")
 
-    Does three jobs in one place because they are one question asked three
+
+def ingest_narration(source: str | Path, target: str | Path, settings, *,
+                     raw_target: Path | None = None,
+                     clean: bool | None = None) -> tuple[float, CleanupReport]:
+    """Accept one beat of human-supplied narration.
+
+    Returns ``(seconds, CleanupReport)``. ``seconds`` keeps its original
+    meaning — the length of the file actually written — and the report is
+    the record Global Constraint 4 asks for: nothing an upload goes through
+    here happens silently, the same rule ``voice_engine``, ``Clip.provider``
+    and ``word_timing_source`` already follow.
+
+    Does four jobs in one place because they are one question asked four
     ways — is this really usable narration:
 
       * it decodes at all, which a signature check cannot establish;
       * it says something, rather than being silence or a blip;
+      * cleanup, if it is on, clears room noise, clicks and overlong
+        pauses without touching what was actually said;
       * it comes out in Piper's format, at Piper's loudness.
 
     Refusals are ``UploadRejected`` carrying a sentence aimed at whoever
-    picked the file. Nothing reaches ``target`` unless all three pass: the
-    transcode lands on a temporary path and is moved into place last, so a
-    rejected upload cannot leave a broken beat behind.
+    picked the file. Nothing reaches ``target`` unless every check passes:
+    the transcode lands on a temporary path and is moved into place last,
+    so a rejected upload cannot leave a broken beat behind.
+
+    Too-short, silent and does-not-decode are all judged on ``source``
+    itself, before cleanup runs. Judging them on the cleaned signal instead
+    breaks in both directions: a recording that is nothing but noise would
+    have the denoiser quiet it below the silence floor and be accepted, and
+    a real recording could have ``silenceremove`` eat its only content and
+    then be refused as silent for a defect cleanup itself introduced.
+
+    ``raw_target``, when given, receives a byte-identical copy of
+    ``source`` once it has passed those checks — not transcoded, not
+    cleaned, since that copy is what a later revert re-ingests and has to
+    be the exact bytes handed over. ``raw_target=None`` (the default) keeps
+    no copy, unchanged from before this parameter existed.
+
+    ``clean`` overrides ``settings.voice_clean`` for this one call; ``None``
+    (the default) uses the setting.
     """
-    source, target = Path(source), Path(target)
+    source = Path(source)
+    target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        seconds = probe_duration(source, settings.ffmpeg)
+        seconds_before = probe_duration(source, settings.ffmpeg)
     except RuntimeError as exc:
         raise UploadRejected(
             "ffmpeg could not read a duration out of that file, so it is "
             "not audio this pipeline can use.") from exc
-    if seconds < MIN_UPLOAD_SECONDS:
+    if seconds_before < MIN_UPLOAD_SECONDS:
         raise UploadRejected(
-            f"that file is {seconds:.2f}s, too short to be a beat of "
-            f"narration (the minimum is {MIN_UPLOAD_SECONDS:g}s). A beat's "
-            f"length sets its clip slots and its caption timings, so a "
-            f"stray blip would take those down with it.")
+            f"that file is {seconds_before:.2f}s, too short to be a beat "
+            f"of narration (the minimum is {MIN_UPLOAD_SECONDS:g}s). A "
+            f"beat's length sets its clip slots and its caption timings, "
+            f"so a stray blip would take those down with it.")
 
-    measured = _loudnorm_measurement(source, settings)
-    try:
-        input_i = float(measured["input_i"])
-    except (KeyError, TypeError, ValueError):
-        input_i = float("-inf")
-    if not input_i > SILENCE_LUFS:
+    # Raw, unfiltered measurement -- this is what the too-short check above
+    # already used implicitly (it is the same file) and what the silent
+    # check below uses explicitly. See the docstring for why this must not
+    # be the cleaned signal.
+    raw_measured = _loudnorm_measurement(source, settings)
+    if not _input_i(raw_measured) > SILENCE_LUFS:
         raise UploadRejected(
-            f"that file is silent (measured {measured.get('input_i')} "
+            f"that file is silent (measured {raw_measured.get('input_i')} "
             f"LUFS). It would render as a gap the length of the beat, with "
             f"the captions scrolling over nothing.")
+
+    if raw_target is not None:
+        raw_target = Path(raw_target)
+        raw_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, raw_target)
+
+    effective = (settings if clean is None
+                else replace(settings, voice_clean=clean))
+    filters = cleanup_filters(effective)
+
+    # Global Constraint 2: the same filter chain has to appear in the
+    # measure pass and the write pass, so the measured values describe the
+    # signal that ends up written. With cleanup off ``filters`` is empty
+    # and this is the exact same single measurement taken above -- no
+    # second ffmpeg invocation, and the one pass this function has always
+    # made is still the only one.
+    measured = raw_measured if not filters else _loudnorm_measurement(
+        source, settings, filters)
+
+    if filters and not math.isfinite(_input_i(measured)):
+        # Cleanup emptied the file outright: silenceremove trimmed every
+        # sample once the denoiser had already pulled the whole thing below
+        # its threshold, which is exactly what a recording that is nothing
+        # but noise does. That upload already earned acceptance from the
+        # raw silence check above; loudnorm's ``measured_I`` cannot take a
+        # literal ``-inf`` (ffmpeg: "Value -inf for parameter 'measured_I'
+        # out of range"), and there is nothing left to encode besides. So
+        # cleanup is skipped for this one write and the raw signal is
+        # normalised instead -- an honest fallback, not a silent one:
+        # ``filters_applied`` on the report is left at "" below, same as
+        # if cleanup had been off for this call.
+        filters = ""
+        measured = raw_measured
 
     # Linear mode with the measured values: one gain for the whole beat and
     # no riding. ffmpeg drops back to dynamic by itself if the requested
@@ -356,12 +434,28 @@ def ingest_narration(source: str | Path, target: str | Path,
                f":measured_thresh={measured['input_thresh']}"
                f":offset={measured.get('target_offset', 0)}"
                f":linear=true")
+    if filters:
+        # Verified against ffmpeg on 2026-09-23: chaining ``silenceremove``
+        # into ``loudnorm`` and then asking ffmpeg to resample/downmix the
+        # *output* (the plain ``-ar``/``-ac`` below, which is all the
+        # cleanup-off path has ever needed) crashes with "Assertion
+        # best_input >= 0 failed" in ffmpeg_filter.c -- reproduced on a
+        # plain continuous tone, so this is a quirk in how that combination
+        # builds its filter graph, not a symptom of any real defect in the
+        # audio. Doing the resample and the channel mix explicitly, inside
+        # the filter graph and ahead of ``loudnorm``, avoids it; the
+        # trailing ``-ar``/``-ac`` flags are kept so the muxed stream's
+        # header still names the format explicitly.
+        write_filters = (f"{filters},aresample={NARRATION_SAMPLE_RATE},"
+                         f"aformat=channel_layouts=mono,{applied}")
+    else:
+        write_filters = applied
 
     partial = target.with_suffix(target.suffix + ".part")
     try:
         result = subprocess.run(
             [settings.ffmpeg, "-hide_banner", "-v", "error", "-y",
-             "-i", str(source), "-af", applied,
+             "-i", str(source), "-af", write_filters,
              "-ar", str(NARRATION_SAMPLE_RATE),
              "-ac", str(NARRATION_CHANNELS),
              "-c:a", "libmp3lame", "-q:a", "2",
@@ -383,7 +477,20 @@ def ingest_narration(source: str | Path, target: str | Path,
         os.replace(partial, target)
     finally:
         Path(partial).unlink(missing_ok=True)
-    return written
+
+    # Read-only probe off the file that was actually written. Not a third
+    # transform pass -- nothing here feeds back into what was encoded --
+    # just the number Global Constraint 4 requires for the report.
+    final_measured = _loudnorm_measurement(target, settings)
+
+    report = CleanupReport(
+        seconds_before=seconds_before,
+        seconds_after=written,
+        loudness_before=_input_i(measured),
+        loudness_after=_input_i(final_measured),
+        filters_applied=filters,
+    )
+    return written, report
 
 
 def apply_beat_audio(beat, path: str | Path, settings, *,

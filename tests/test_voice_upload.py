@@ -28,8 +28,10 @@ import pytest
 
 from engine.config import Settings
 from engine.media.voice import (NARRATION_CHANNELS, NARRATION_SAMPLE_RATE,
-                                UPLOAD_LOUDNESS, UploadRejected,
-                                apply_beat_audio, ingest_narration)
+                                SILENCE_LUFS, UPLOAD_LOUDNESS,
+                                UploadRejected, apply_beat_audio,
+                                cleanup_filters, ingest_narration,
+                                probe_duration)
 from tests.factories import make_plan
 
 
@@ -78,6 +80,65 @@ def _loudness(settings, path: Path) -> float:
     line = next(ln for ln in result.stderr.splitlines()
                 if "Input Integrated" in ln)
     return float(line.split(":")[1].strip().split()[0])
+
+
+def _noisy_tone(settings, path: Path, *, seconds: float = 3.0) -> Path:
+    """A tone with white noise mixed in -- a noisy room behind real
+    narration, not silence and not pure noise."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [settings.ffmpeg, "-hide_banner", "-v", "error", "-y",
+         "-f", "lavfi", "-i", f"sine=frequency=220:duration={seconds}",
+         "-f", "lavfi",
+         "-i", f"anoisesrc=color=white:amplitude=0.05:duration={seconds}",
+         "-filter_complex",
+         "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0[out]",
+         "-map", "[out]", "-ar", "44100", "-ac", "1", str(path)],
+        check=True, capture_output=True)
+    return path
+
+
+def _gap_tone(settings, path: Path) -> Path:
+    """tone / 2s silence / tone -- an internal gap cleanup's
+    ``silenceremove`` caps at ``voice_pause_cap``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [settings.ffmpeg, "-hide_banner", "-v", "error", "-y",
+         "-f", "lavfi", "-i", "sine=frequency=220:duration=1",
+         "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono:d=2",
+         "-f", "lavfi", "-i", "sine=frequency=220:duration=1",
+         "-filter_complex", "[0:a][1:a][2:a]concat=n=3:v=0:a=1[out]",
+         "-map", "[out]", "-ar", "44100", "-ac", "1", str(path)],
+        check=True, capture_output=True)
+    return path
+
+
+def _mean_volume_above(settings, path: Path, hz: float) -> float:
+    """Mean volume (dB) of everything above ``hz`` -- isolates broadband
+    noise mixed in beside a low tone, same measurement
+    tests/test_voice_cleanup.py uses to show a noise floor moved."""
+    result = subprocess.run(
+        [settings.ffmpeg, "-hide_banner", "-nostats", "-i", str(path),
+         "-af", f"highpass=f={hz},volumedetect", "-f", "null", "-"],
+        capture_output=True, text=True)
+    line = next(ln for ln in result.stderr.splitlines()
+                if "mean_volume" in ln)
+    return float(line.split(":")[1].strip().split()[0])
+
+
+def _cleaned_loudness_preview(settings, source: Path, tmp_path: Path) -> float:
+    """What ``source`` would measure at if cleanup ran on it standalone.
+
+    Used only to prove a refusal-ordering scenario is real -- the fixture
+    really would look silent if the silence gate ran on the cleaned signal
+    -- never to decide what ``ingest_narration`` itself should do.
+    """
+    preview = tmp_path / f"{source.stem}-cleaned-preview.wav"
+    subprocess.run(
+        [settings.ffmpeg, "-hide_banner", "-v", "error", "-y",
+         "-i", str(source), "-af", cleanup_filters(settings), str(preview)],
+        check=True, capture_output=True)
+    return _loudness(settings, preview)
 
 
 # --- the ingest ------------------------------------------------------------
@@ -135,7 +196,7 @@ def test_the_ingest_keeps_the_length_it_was_given(settings, tmp_path):
     """Duration is the one thing normalising must not touch: it is the
     beat's span, and every clip slot and caption word is cut from it."""
     source = _tone(settings, tmp_path / "in.wav", seconds=4.25)
-    seconds = ingest_narration(source, tmp_path / "out.mp3", settings)
+    seconds, _report = ingest_narration(source, tmp_path / "out.mp3", settings)
     assert abs(seconds - 4.25) < 0.1
 
 
@@ -214,3 +275,185 @@ def test_retiming_one_beat_moves_the_plans_total(settings, tmp_path):
     apply_beat_audio(plan.script.beats[0], audio, settings, engine="upload")
 
     assert plan.duration() > before + 2.5
+
+
+# --- cleanup folded into the ingest (Task 2) --------------------------------
+
+
+def test_the_raw_upload_lands_beside_the_cleaned_one_byte_identical(
+        settings, tmp_path):
+    """``raw_target`` gets the exact bytes handed over -- not transcoded,
+    not cleaned -- because that copy is what a later revert re-ingests."""
+    settings.voice_clean = True
+    source = _tone(settings, tmp_path / "in.wav", seconds=3.0)
+    raw_copy = tmp_path / "raw" / "kept.wav"
+
+    seconds, report = ingest_narration(
+        source, tmp_path / "out.mp3", settings, raw_target=raw_copy)
+
+    assert raw_copy.read_bytes() == source.read_bytes()
+    assert seconds > 0
+    assert report.filters_applied
+
+
+def test_the_clean_parameter_overrides_the_setting_for_one_call(
+        settings, tmp_path):
+    """``clean=False`` turns cleanup off for a call even though the setting
+    is on, and ``clean=True`` turns it on even though the setting is off --
+    what the revert route (Task 3) needs, measured off real output here."""
+    settings.voice_clean = True
+    on_by_default = _noisy_tone(settings, tmp_path / "a.wav")
+    _, forced_off = ingest_narration(
+        on_by_default, tmp_path / "a.mp3", settings, clean=False)
+    assert forced_off.filters_applied == ""
+
+    settings.voice_clean = False
+    off_by_default = _noisy_tone(settings, tmp_path / "b.wav")
+    _, forced_on = ingest_narration(
+        off_by_default, tmp_path / "b.mp3", settings, clean=True)
+    assert forced_on.filters_applied
+
+
+def test_cleanup_on_makes_a_noisy_upload_measurably_cleaner_than_the_raw(
+        settings, tmp_path):
+    """The written file's noise floor moved, and the report says cleanup
+    ran -- not asserted on the filter string, measured off the file."""
+    settings.voice_clean = True
+    source = _noisy_tone(settings, tmp_path / "noisy.wav")
+    raw_noise = _mean_volume_above(settings, source, 4000)
+
+    target = tmp_path / "out.mp3"
+    seconds, report = ingest_narration(source, target, settings)
+
+    clean_noise = _mean_volume_above(settings, target, 4000)
+    # A smaller margin than tests/test_voice_cleanup.py uses: that file
+    # measures the cleanup filter's own WAV output directly, this one
+    # measures after loudnorm's gain and a lossy mp3 encode have also run,
+    # both of which raise the noise floor back up somewhat.
+    assert clean_noise < raw_noise - 2.5, (
+        f"noise floor only moved {raw_noise:.1f} -> {clean_noise:.1f} dB, "
+        f"wanted at least 2.5 dB of reduction")
+    assert report.filters_applied
+    assert abs(seconds - report.seconds_after) < 0.01
+
+
+def test_cleanup_off_gives_the_same_output_as_before_this_feature(
+        settings, tmp_path):
+    """``voice_clean = False`` behaves exactly as ``ingest_narration`` did
+    before cleanup existed: same loudness band, no trimming, and the
+    report's empty ``filters_applied`` is the honest record of that."""
+    settings.voice_clean = False
+    source = _tone(settings, tmp_path / "quiet.wav", seconds=3.0,
+                   volume="-30dB")
+    target = tmp_path / "out.mp3"
+
+    seconds, report = ingest_narration(source, target, settings)
+
+    after = _loudness(settings, target)
+    assert abs(after - UPLOAD_LOUDNESS) <= 1.5
+    assert report.filters_applied == ""
+    assert abs(report.seconds_before - report.seconds_after) < 0.1
+    assert abs(seconds - 3.0) < 0.1
+
+
+def test_a_silent_upload_is_still_refused_with_cleanup_on(settings, tmp_path):
+    settings.voice_clean = True
+    source = tmp_path / "mute.wav"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [settings.ffmpeg, "-hide_banner", "-v", "error", "-y",
+         "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "3",
+         str(source)], check=True, capture_output=True)
+    with pytest.raises(UploadRejected, match="silen"):
+        ingest_narration(source, tmp_path / "out.mp3", settings)
+
+
+def test_loud_noise_with_no_speech_is_accepted_though_cleanup_would_silence_it(
+        settings, tmp_path):
+    """The subtle part of the refusal ordering, direction one: a recording
+    that is nothing but noise is loud enough raw to pass the silence gate,
+    even though the denoiser and ``silenceremove`` together quiet it to
+    nothing once cleanup actually runs. Judging the *cleaned* signal
+    instead would refuse it as silent -- the gate has to run on the raw
+    upload for this not to happen.
+    """
+    settings.voice_clean = True
+    source = tmp_path / "noise.wav"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [settings.ffmpeg, "-hide_banner", "-v", "error", "-y",
+         "-f", "lavfi",
+         "-i", "anoisesrc=color=white:amplitude=0.01:duration=3",
+         "-ar", "44100", "-ac", "1", str(source)],
+        check=True, capture_output=True)
+
+    raw_loudness = _loudness(settings, source)
+    assert raw_loudness > SILENCE_LUFS, "fixture must not be silent raw"
+    cleaned_loudness = _cleaned_loudness_preview(settings, source, tmp_path)
+    assert cleaned_loudness <= SILENCE_LUFS, (
+        "fixture is supposed to be silenced by cleanup, or this test "
+        "proves nothing about the ordering")
+
+    # No UploadRejected: judged on the raw upload, this passes. Cleanup
+    # having nothing left to normalise falls back to the raw signal for
+    # the write, which the report says honestly.
+    seconds, report = ingest_narration(source, tmp_path / "out.mp3", settings)
+    assert seconds > 0
+    assert report.filters_applied == ""
+
+
+def test_a_quiet_real_recording_is_not_refused_after_cleanup_erases_it(
+        settings, tmp_path):
+    """The subtle part of the refusal ordering, direction two: a soft but
+    real recording (a single tone standing in for quietly-spoken
+    narration) is loud enough raw to pass the silence gate, even though
+    cleanup's ``silenceremove`` trims the whole thing away once it runs --
+    exactly the loss the ordering exists to protect a real recording from.
+    """
+    settings.voice_clean = True
+    source = _tone(settings, tmp_path / "soft.wav", seconds=3.0,
+                   volume="-30dB")
+
+    raw_loudness = _loudness(settings, source)
+    assert raw_loudness > SILENCE_LUFS, "fixture must not be silent raw"
+    cleaned_loudness = _cleaned_loudness_preview(settings, source, tmp_path)
+    assert cleaned_loudness <= SILENCE_LUFS, (
+        "fixture is supposed to be erased by cleanup, or this test proves "
+        "nothing about the ordering")
+
+    seconds, report = ingest_narration(source, tmp_path / "out.mp3", settings)
+    assert seconds > 0
+    assert report.filters_applied == ""
+
+
+def test_report_seconds_bracket_a_real_trim(settings, tmp_path):
+    """``seconds_before``/``seconds_after`` are not just echoed inputs --
+    they bracket the internal-silence trim cleanup actually performs, and
+    match what the files themselves measure."""
+    settings.voice_clean = True
+    source = _gap_tone(settings, tmp_path / "gap.wav")
+    target = tmp_path / "out.mp3"
+    real_before = probe_duration(source, settings.ffmpeg)
+
+    seconds, report = ingest_narration(source, target, settings)
+
+    real_after = probe_duration(target, settings.ffmpeg)
+    assert abs(report.seconds_before - real_before) < 0.01
+    assert abs(report.seconds_after - real_after) < 0.01
+    assert abs(seconds - real_after) < 0.01
+    # the internal 2s gap, capped to well under a second, is a real trim
+    assert report.seconds_before - report.seconds_after > 1.0
+    assert report.filters_applied
+
+
+def test_report_loudness_matches_what_the_written_file_measures(
+        settings, tmp_path):
+    settings.voice_clean = True
+    source = _tone(settings, tmp_path / "in.wav", seconds=3.0,
+                   volume="-20dB")
+    target = tmp_path / "out.mp3"
+
+    seconds, report = ingest_narration(source, target, settings)
+
+    real_after = _loudness(settings, target)
+    assert abs(report.loudness_after - real_after) < 0.5
