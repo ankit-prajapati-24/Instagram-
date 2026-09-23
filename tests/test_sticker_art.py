@@ -240,14 +240,21 @@ def test_the_art_itself_stays_fully_opaque():
     assert out.getpixel((48, 48))[3] == 255
 
 
-def test_punchy_gets_an_outline_that_widens_the_silhouette():
+def test_punchy_gets_a_light_outline_not_just_the_shadows_spill():
+    """The shadow also puts alpha outside the art, so alpha alone proves
+    nothing -- the earlier version of this test passed with the outline
+    switched off. The outline is near-white and the shadow is black, so
+    colour is what separates them."""
     art = matte(_disc(side=96))
     out = ground(art, "punchy")
-    # A ring just outside the disc's edge is empty before grounding and
-    # opaque after, on the side the shadow does not fall.
-    probe = (4, 48)
-    assert art.getpixel(probe)[3] == 0
-    assert out.getpixel(probe)[3] > 0
+
+    probe = (5, 48)                  # just outside the disc's left edge
+    assert art.getpixel(probe)[3] == 0, "probe should start outside the art"
+
+    red, green, blue, alpha = out.getpixel(probe)
+    assert alpha > 0, "something should reach the probe"
+    assert red > 140 and green > 140 and blue > 140, \
+        f"expected the near-white outline, got {(red, green, blue)}"
 
 
 def test_dark_gets_a_gold_glow_not_a_hard_edge():
@@ -259,9 +266,21 @@ def test_dark_gets_a_gold_glow_not_a_hard_edge():
     assert red > blue, f"glow should be warm, got {(red, green, blue)}"
 
 
-def test_the_art_still_covers_its_own_halo():
-    """The halo sits under the art, so the art's own pixels are unchanged."""
+def test_grounding_leaves_opaque_art_alone_and_blends_only_its_rim():
+    """The invariant is about *opaque* pixels.
+
+    A translucent rim blending into the halo is intended -- it is what makes
+    the halo sit behind the art instead of ringing it. What must not happen
+    is the opaque body of the art changing, or its silhouette eroding.
+    """
     art = matte(_disc(side=96))
     for style in STYLES:
         out = ground(art, style)
-        assert out.getpixel((48, 48))[:3] == art.getpixel((48, 48))[:3]
+        assert out.size == art.size
+
+        opaque = [(x, y) for y in range(96) for x in range(96)
+                  if art.getpixel((x, y))[3] == 255]
+        assert opaque, "fixture should have a solid interior"
+        for point in opaque:
+            assert out.getpixel(point) == art.getpixel(point), \
+                f"{style} changed opaque art at {point}"

@@ -220,6 +220,12 @@ def ground(frame: Image.Image, style: str) -> Image.Image:
     gold glow instead, because an outline on a dark grade reads as cut out
     and pasted on. Both sit under the art and over the shadow.
 
+    The art's fully opaque pixels come through untouched; its anti-aliased rim
+    does not, and must not. That rim is translucent because ``matte`` softens
+    the alpha to stop hard GIF edges shimmering over moving footage, and
+    blending it with the halo underneath is what makes the halo read as being
+    *behind* the art rather than as a ring drawn around it.
+
     Drawn on the existing canvas, not a larger one: the canvas is what the
     overlay pins at a fixed x/y, and growing it here would move every
     sticker off its anchor.
