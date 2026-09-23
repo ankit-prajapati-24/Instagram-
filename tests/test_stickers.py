@@ -510,15 +510,18 @@ def _source_audio(ffmpeg, path, seconds):
                          "-ar", "48000", "-ac", "1", str(path)])
 
 
-def _sticker_plan(tmp_path, settings, seconds=2.2):
+def _sticker_plan(tmp_path, settings, seconds=2.2, captions=None):
     """Three flat-grey beats, each carrying one trigger word.
 
     Flat and motionless on purpose: the only thing that may differ between
     the stickers-on and stickers-off renders is the sticker itself.
+
+    Default captions fire the `death` trigger, which ships art. Pass
+    `captions` to fire a different one, e.g. a no-art trigger like `water`.
     """
-    captions = ["Jungle mein ek kankaal mila tha",
-                "Raat ko wahan koi nahi jaata",
-                "Ye raaz aaj tak band hai"]
+    captions = captions or ["Jungle mein ek kankaal mila tha",
+                             "Raat ko wahan koi nahi jaata",
+                             "Ye raaz aaj tak band hai"]
     plan = make_plan(beats=3, measured=seconds)
     for index, (beat, text) in enumerate(zip(plan.script.beats, captions)):
         beat.role = "setup"      # no push: hold the picture dead still
@@ -557,6 +560,24 @@ def _changed_pixels(left, right, threshold=24):
     return sum(1 for i in range(0, len(left), 3)
                if max(abs(left[i + c] - right[i + c]) for c in range(3))
                > threshold)
+
+
+def _changed_in_box(left, right, box, width, threshold=24):
+    """Changed pixels inside ``box`` only, on two rgb24 buffers.
+
+    The captions animate word by word near the bottom of the frame, so a
+    whole-frame diff cannot tell a moving sticker from a moving caption.
+    The sticker's own box can.
+    """
+    x0, y0, w, h = box
+    count = 0
+    for y in range(y0, y0 + h):
+        for x in range(x0, x0 + w):
+            i = (y * width + x) * 3
+            if max(abs(left[i + c] - right[i + c])
+                   for c in range(3)) > threshold:
+                count += 1
+    return count
 
 
 def test_a_real_render_with_stickers_still_equals_the_narration_total(
@@ -712,3 +733,107 @@ def test_a_real_render_survives_stickers_captions_and_mixed_clip_counts(
     probe = probe_video(out, settings.ffmpeg)
     assert probe["bytes"] > 0
     assert probe["duration"] == pytest.approx(total, abs=0.05)
+
+
+def test_the_baked_sticker_actually_moves_while_it_is_on_screen(tmp_path,
+                                                                monkeypatch):
+    """The whole point of this feature.
+
+    The old sticker popped in over its first 7 frames and then held a single
+    unchanging picture for 0.987 of its 1.40 visible seconds. A graph that
+    composites a frozen frame and one that composites an animation produce
+    the *same* filtergraph string, so this reads pixels out of a real
+    render.
+
+    The bake is done here, at the render's own size, rather than reusing the
+    committed 184px one: `_render_settings` renders 360 wide, and
+    `baked_sequence` refuses a bake made for another size on purpose.
+    """
+    from scripts.bake_stickers import bake_one
+
+    settings = _render_settings(tmp_path)
+    plan = _sticker_plan(tmp_path, settings)
+
+    # `_sticker_plan`'s beats are role "setup" -> punchy, and its first
+    # caption carries "kankaal" -> the `death` trigger, which ships art.
+    size = stk.sticker_size(settings.width, settings.sticker_scale)
+    baked_root = tmp_path / "baked"
+    source = Path("assets/lordicon/death.gif")
+    if not source.exists():                      # pragma: no cover - env
+        pytest.skip("run scripts/fetch_sticker_art.py first")
+    bake_one(source, baked_root / "death" / "punchy", style="punchy",
+             size=size, fps=int(settings.fps))
+    monkeypatch.setattr(stk, "BAKED_ROOT", baked_root)
+
+    prepared = stk.prepare(plan, settings)
+    baked = [s for s in prepared if s.baked]
+    assert baked, "expected the death sticker to resolve to baked art"
+    sticker = baked[0]
+
+    out = tmp_path / "moving.mp4"
+    render(plan, settings, out)
+
+    box = stk.sticker_box(sticker.slot, settings.width, settings.height,
+                          sticker.size)
+    shots = [_frame_rgb(settings.ffmpeg, out, sticker.start + offset)
+             for offset in (0.30, 0.70, 1.10)]
+
+    first = _changed_in_box(shots[0], shots[1], box, settings.width)
+    second = _changed_in_box(shots[1], shots[2], box, settings.width)
+    assert first > 50, "the sticker is frozen between 0.30s and 0.70s"
+    assert second > 50, "the sticker is frozen between 0.70s and 1.10s"
+
+
+def test_an_emoji_sticker_still_holds_for_its_whole_window(tmp_path):
+    """`loop` is dead code for baked art and load-bearing for the emoji path.
+
+    A baked sequence is round(HOLD_SECONDS * fps) frames and fills the trim
+    window by itself. The emoji pop is seven frames -- 0.233s of a 1.400s
+    window -- so without `loop` an emoji sticker would vanish a quarter of a
+    second in. Ten triggers still take that path, and no other real-render
+    test in this file touches it, because `_sticker_plan`'s "kankaal" now
+    resolves to baked art.
+
+    `water` fires this on purpose: it is the most-fired trigger in the
+    production corpus (19 hits across 113 beats) and, unlike `death`, has no
+    `art` entry in stickers.json at all -- so it can never accidentally
+    start resolving to a baked sequence and stop exercising this path,
+    however this file's render size changes in the future.
+    """
+    settings = _render_settings(tmp_path)
+    plan = _sticker_plan(tmp_path, settings, captions=[
+        "Us jheel ka paani kabhi nahi sukhta",
+        "Gaon wale ab udhar nahi jaate",
+        "Wo raaz aaj tak wahin dafan hai"])
+    cues = stk.prepare(plan, settings)
+    assert cues, "fixture produced no stickers"
+    cue = cues[0]
+    assert cue.name == "water", f"expected the water trigger, got {cue.name}"
+    assert not cue.baked, "water ships no art -- this must be the emoji path"
+
+    size = stk.sticker_size(settings.width)
+    x, y, w, h = stk.sticker_box(cue.slot, settings.width, settings.height,
+                                 size)
+
+    settings.stickers = False
+    plain = tmp_path / "plain.mp4"
+    render(plan, settings, plain)
+
+    settings.stickers = True
+    popped = tmp_path / "popped.mp4"
+    render(plan, settings, popped)
+
+    # Late in the window: past the 7-frame pop (0.233s) and before the fade
+    # starts (1.22s). Only `loop` keeps the emoji on screen here -- without
+    # it the input would have ended at 0.233s and `repeatlast=0:eof_action=
+    # pass` would have sent `overlay` back to passing the plain frame
+    # through, so this and the plain render would already agree.
+    at = cue.start + 1.10
+    off = _frame_rgb(settings.ffmpeg, plain, at)
+    on = _frame_rgb(settings.ffmpeg, popped, at)
+    span = _changed_span(off, on, y + h // 2, settings.width)
+    assert span is not None, (
+        "nothing changed 1.10s in: the emoji sticker is gone, which is "
+        "what happens if `loop` stops holding its last frame")
+    assert span[0] >= x - 3 and span[1] <= x + w + 3, (
+        f"the sticker is outside its box: changed {span}, box x={x} w={w}")

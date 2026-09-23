@@ -534,9 +534,16 @@ def sticker_chain(stickers: list[Sticker], video_label: str,
 
     Returns ``(parts, out_label)``. Per sticker:
 
-    * ``loop`` holds the final pop frame and ``trim`` bounds the hold; the
-      input then ends, and with ``repeatlast=0:eof_action=pass`` that is
-      what makes ``overlay`` go back to passing the main stream through.
+    * ``loop`` holds the final frame and ``trim`` bounds the window; the input
+      then ends, and with ``repeatlast=0:eof_action=pass`` that is what makes
+      ``overlay`` go back to passing the main stream through.
+
+      ``loop`` looks dead now and is not. A baked sequence is
+      ``round(HOLD_SECONDS * fps)`` frames, so it fills the trim window on its
+      own and ``loop`` never holds anything. The emoji path is seven frames --
+      0.233s against a 1.400s window -- and ``loop`` is the only reason those
+      stickers stay on screen for the other 1.167s. Ten triggers still take
+      that path, ``water`` most of all.
     * ``setpts`` moves the whole thing onto its cue. The delay is
       deliberately NOT ``tpad`` (measured on this ffmpeg: it silently fails
       to shift the stream) and NOT ``-itsoffset`` (measured: the overlay
