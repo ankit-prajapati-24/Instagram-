@@ -6,6 +6,7 @@ bake, and picking an icon a second time costs nothing.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -117,3 +118,61 @@ def test_an_icon_with_a_trapped_white_pocket_is_refused_by_name(tmp_path,
     with pytest.raises(ValueError, match="2816-skull-halloween"):
         sc.ensure_baked("2816-skull-halloween", root=tmp_path, size=60,
                         fps=30)
+
+
+@pytest.mark.parametrize("slug", [
+    "../../../evil", "/etc/passwd", "C:/Windows/evil", "a/b",
+    "a\\b", "with space", "UPPER", "", "null\x00byte",
+])
+def test_a_slug_that_is_not_a_slug_never_becomes_a_path(slug, tmp_path):
+    """The slug reaches this module from an HTTP body.
+
+    `bake_key`'s digest is what distinguishes two bakes; the readable
+    prefix is a convenience, and a convenience is not worth a directory
+    name that can leave the cache.
+    """
+    with pytest.raises(ValueError, match="not a Lordicon slug"):
+        sc.bake_key(slug, "dark", 184, 30)
+    with pytest.raises(ValueError, match="not a Lordicon slug"):
+        sc.preview_png(slug, root=tmp_path)
+
+
+def test_every_shipped_slug_still_passes():
+    """The guard must not reject the real catalogue's own names."""
+    for slug in ("27-globe", "2130-skull-poison", "196-clock-arrow-rotate-left",
+                 "1195-earthworm", "440-dna"):
+        assert sc.safe_slug(slug) == slug
+
+
+@pytest.mark.parametrize("meta", [
+    {"frames": 42, "canvas": 78, "fps": None, "size": 60},
+    {"frames": [42], "canvas": 78, "fps": 30, "size": 60},
+    {"canvas": 78, "fps": 30, "size": 60},
+], ids=["null-fps", "non-int-frames", "missing-frames"])
+def test_a_corrupt_meta_resolves_to_none_not_a_crash(meta, tmp_path):
+    """A torn write, a hand edit, schema drift -- none of it may raise.
+
+    ``cached_sequence``'s whole contract is None for every kind of absence;
+    a render must never go down because one cache entry's meta.json is bad,
+    when the next bake overwrites it anyway.
+    """
+    folder = tmp_path / "bakes" / sc.bake_key("27-globe", "dark", 60, 30)
+    folder.mkdir(parents=True)
+    (folder / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    assert sc.cached_sequence("27-globe", "dark", fps=30, size=60,
+                              root=tmp_path) is None
+
+
+def test_a_failed_download_leaves_no_stage_behind(tmp_path, monkeypatch):
+    """Match ``sticker_catalog.refresh``: a fetch that fails must not leave
+    a ``.part`` file behind for the next call to trip over.
+    """
+    def boom(slug, dest):
+        raise OSError("no route to host")
+
+    monkeypatch.setattr(sc, "_download", boom)
+
+    with pytest.raises(OSError, match="no route to host"):
+        sc.ensure_baked("27-globe", root=tmp_path, size=60, fps=30)
+    assert not list((tmp_path / "sources").glob("*.part")), \
+        "staging file left behind"

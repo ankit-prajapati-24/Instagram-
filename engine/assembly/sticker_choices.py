@@ -13,6 +13,7 @@ are already on disk and `cached_sequence` is a directory listing.
 from __future__ import annotations
 
 import hashlib
+import re
 import sys
 import urllib.request
 from pathlib import Path
@@ -23,6 +24,21 @@ BAKES_DIRNAME = "bakes"
 PREVIEWS_DIRNAME = "previews"
 SOURCES_DIRNAME = "sources"
 
+# A Lordicon slug is `<number>-<words>`; nothing else may become a path
+# component here. The digest in bake_key is what actually distinguishes two
+# bakes, so the readable prefix is a convenience -- and a convenience is not
+# worth letting `../` or an absolute path through into a directory name.
+# Task 5 checks the slug against the catalogue as well; this is the check
+# that does not depend on a caller remembering to.
+_SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def safe_slug(slug: str) -> str:
+    """The slug, or raise. The only way a slug becomes part of a path."""
+    if not isinstance(slug, str) or not _SLUG.fullmatch(slug):
+        raise ValueError(f"not a Lordicon slug: {slug!r}")
+    return slug
+
 
 def bake_key(slug: str, style: str, size: int, fps: int) -> str:
     """A directory name for one baked sequence.
@@ -31,6 +47,7 @@ def bake_key(slug: str, style: str, size: int, fps: int) -> str:
     sitemap and this becomes a path. The slug is kept in front of the digest
     anyway, so a human can read the cache.
     """
+    slug = safe_slug(slug)
     digest = hashlib.sha256(
         f"{slug}|{style}|{size}|{fps}".encode()).hexdigest()[:12]
     return f"{slug}-{style}-{digest}"
@@ -43,13 +60,20 @@ def _download(slug: str, dest: Path) -> None:
 
 def _source(slug: str, root: Path) -> Path:
     """The cached source GIF, downloaded on first use."""
+    slug = safe_slug(slug)
     folder = Path(root) / SOURCES_DIRNAME
     folder.mkdir(parents=True, exist_ok=True)
     dest = folder / f"{slug}.gif"
     if not dest.exists():
         staged = dest.with_suffix(".part")
-        _download(slug, staged)
-        staged.replace(dest)
+        try:
+            _download(slug, staged)
+            staged.replace(dest)
+        except Exception:
+            # Same cleanup as sticker_catalog.refresh: no half-written
+            # file left behind for the next call to trip over.
+            staged.unlink(missing_ok=True)
+            raise
     return dest
 
 
@@ -81,9 +105,12 @@ def _resolve(folder: Path, *, fps: int, size: int
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         frames = int(meta["frames"])
         canvas = int(meta["canvas"])
+        if int(meta["fps"]) != fps or int(meta["size"]) != size:
+            return None
     except (OSError, ValueError, KeyError, TypeError):
-        return None
-    if int(meta.get("fps", -1)) != fps or int(meta.get("size", -1)) != size:
+        # A cache entry we cannot read is a cache entry we do not have.
+        # Raising would take down a render over a file the next bake
+        # rewrites anyway.
         return None
     if frames <= 0 or len(list(folder.glob("frame-*.png"))) != frames:
         return None
@@ -98,7 +125,12 @@ def ensure_baked(slug: str, *, root: Path, size: int, fps: int) -> None:
     that would render with a white blob in it is a choice to reject rather
     than a failure to swallow.
     """
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    # Guarded, not unconditional: this runs on every call, and Task 5 calls
+    # it from a long-lived server process where an unconditional insert
+    # would grow sys.path by one duplicate entry per request forever.
+    repo_root = str(Path(__file__).resolve().parent.parent.parent)
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
     from engine.assembly.sticker_art import STYLES
     from scripts.bake_stickers import bake_one
 
@@ -123,6 +155,7 @@ def preview_png(slug: str, *, root: Path, style: str = "punchy",
 
     from engine.assembly.sticker_art import apply_style, ground, matte
 
+    slug = safe_slug(slug)
     root = Path(root)
     folder = root / PREVIEWS_DIRNAME
     folder.mkdir(parents=True, exist_ok=True)
