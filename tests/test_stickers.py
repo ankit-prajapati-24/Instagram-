@@ -586,6 +586,78 @@ def test_both_cues_survive_when_the_font_is_there(tmp_path):
     assert "death" in names and "fire" in names, names
 
 
+# --- chosen art -------------------------------------------------------------
+
+def test_a_chosen_slug_wins_over_the_committed_art(tmp_path, monkeypatch):
+    from engine.assembly import sticker_choices as sc
+    from scripts.bake_stickers import bake_one
+
+    plan = _timed(beats=4, captions=[
+        "Jungle mein ek kankaal mila tha"] * 4)
+    settings = shipped_settings()
+    settings.work_dir = tmp_path
+    size = stk.sticker_size(settings.width, settings.sticker_scale)
+
+    # Bake a stand-in for the chosen slug straight into the cache, so this
+    # test needs no network.
+    src = Path("assets/lordicon/witness.gif")
+    if not src.exists():                       # pragma: no cover - env
+        pytest.skip("run scripts/fetch_sticker_art.py first")
+    key = sc.bake_key("2813-creepy-eye-ball", "punchy", size,
+                      int(settings.fps))
+    bake_one(src, tmp_path / sc.BAKES_DIRNAME / key, style="punchy",
+             size=size, fps=int(settings.fps))
+
+    chosen = stk.prepare(plan, settings,
+                         choices={"death": "2813-creepy-eye-ball"})
+    assert chosen, "expected a sticker"
+    assert chosen[0].baked is True
+    assert sc.bake_key("2813-creepy-eye-ball", "punchy", size,
+                       int(settings.fps)) in chosen[0].pattern
+
+
+def test_no_choices_behaves_exactly_as_before(tmp_path):
+    plan = _timed(beats=4, captions=[
+        "Jungle mein ek kankaal mila tha"] * 4)
+    settings = shipped_settings()
+    settings.work_dir = tmp_path
+
+    without = stk.prepare(plan, settings)
+    with_empty = stk.prepare(plan, settings, choices={})
+    with_none = stk.prepare(plan, settings, choices=None)
+    assert [s.pattern for s in without] == [s.pattern for s in with_empty]
+    assert [s.pattern for s in without] == [s.pattern for s in with_none]
+
+
+def test_a_choice_whose_cache_is_gone_falls_through_and_does_not_raise(
+        tmp_path):
+    plan = _timed(beats=4, captions=[
+        "Jungle mein ek kankaal mila tha"] * 4)
+    settings = shipped_settings()
+    settings.work_dir = tmp_path
+
+    prepared = stk.prepare(plan, settings,
+                           choices={"death": "9999-never-baked"})
+    assert prepared, "must fall back, not vanish"
+    # Falls to the committed art, which is still baked designed art.
+    assert prepared[0].baked is True
+
+
+def test_a_choice_for_a_trigger_that_did_not_fire_is_ignored(tmp_path):
+    # A single beat, not the four-beat fixture the other choice tests
+    # share: that fixture's identical caption fires "death" on every beat,
+    # and the cap keeps three of them. That would turn the assertion below
+    # into a check on the cap instead of a check that an irrelevant choice
+    # is ignored.
+    plan = _timed(beats=1, captions=["Jungle mein ek kankaal mila tha"])
+    settings = shipped_settings()
+    settings.work_dir = tmp_path
+
+    prepared = stk.prepare(plan, settings,
+                           choices={"mountain": "1875-planet"})
+    assert [s.name for s in prepared] == ["death"]
+
+
 # --- real renders ----------------------------------------------------------
 # Everything below invokes ffmpeg. This is the part that can fail when the
 # graph is well-formed but composites nothing.

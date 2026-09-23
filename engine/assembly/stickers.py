@@ -477,7 +477,8 @@ def render_pop_frames(emoji: str, cache_dir: str | Path, *, size: int,
 
 
 def prepare(plan: ReelPlan, settings, *,
-            cache_dir: str | Path | None = None) -> list[Sticker]:
+            cache_dir: str | Path | None = None,
+            choices: dict[str, str] | None = None) -> list[Sticker]:
     """Every sticker this plan should get, its pop drawn and cached.
 
     Returns an empty list when stickers are off and when nothing triggered.
@@ -486,6 +487,12 @@ def prepare(plan: ReelPlan, settings, *,
     missing decoration must never cost a render, and must not cost the
     other stickers either. Baked art needs no font, so on a box without one
     a plan still gets every designed sticker it triggered.
+
+    ``choices`` maps a trigger to a Lordicon slug someone picked for this
+    reel in the panel. It is the top rung: a chosen icon beats the committed
+    art, which beats the emoji glyph. A slug whose bake is missing falls
+    through to the rung below rather than failing, so cleaning the cache
+    costs a nicer sticker and never a render.
     """
     if not getattr(settings, "stickers", False):
         return []
@@ -512,7 +519,15 @@ def prepare(plan: ReelPlan, settings, *,
     for cue in cues:
         beat = plan.script.beats[cue.beat_index]
         style = style_for_role(getattr(beat, "role", None))
-        found = baked_sequence(cue.name, style, fps=fps, size=size)
+        found = None
+        chosen = (choices or {}).get(cue.name)
+        if chosen:
+            from engine.assembly.sticker_choices import cached_sequence
+            found = cached_sequence(
+                chosen, style, fps=fps, size=size,
+                root=Path(getattr(settings, "work_dir", ".")))
+        if found is None:
+            found = baked_sequence(cue.name, style, fps=fps, size=size)
         if found is not None:
             pattern, frames, canvas = found
         else:
