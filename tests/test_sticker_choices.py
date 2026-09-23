@@ -176,3 +176,19 @@ def test_a_failed_download_leaves_no_stage_behind(tmp_path, monkeypatch):
         sc.ensure_baked("27-globe", root=tmp_path, size=60, fps=30)
     assert not list((tmp_path / "sources").glob("*.part")), \
         "staging file left behind"
+
+
+def test_a_nonsense_slug_reads_as_no_bake_rather_than_raising(tmp_path):
+    """A lookup answers; only the write paths refuse.
+
+    prepare() falls through this to the committed art and then to the
+    emoji, so raising here would turn a bad row in the choices table into
+    a failed render -- the one thing a decoration must never cost.
+    """
+    for slug in ("../../../evil", "/etc/passwd", "", "UPPER"):
+        assert sc.cached_sequence(slug, "dark", fps=30, size=184,
+                                  root=tmp_path) is None
+
+    # The write paths still refuse the same slugs.
+    with pytest.raises(ValueError):
+        sc.bake_key("../../../evil", "dark", 184, 30)

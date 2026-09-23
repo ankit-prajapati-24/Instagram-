@@ -85,12 +85,20 @@ def cached_sequence(slug: str, style: str, *, fps: int, size: int,
     baked at another size -- so the caller falls to the rung below rather
     than rendering something wrong. The same contract as
     ``stickers.baked_sequence``, deliberately: the caller treats them alike.
+
+    A slug that is not a slug answers ``None`` rather than raising: this is
+    a lookup, and the honest answer to "is there a bake for this?" is no.
+    The write paths still refuse it -- ``bake_key`` and ``_source`` are
+    about to create something at that path, and a read is not.
     """
     # Not reusing ``stickers.baked_sequence``: it expects a
     # ``<trigger>/<style>`` layout under one root, and this cache is keyed
     # flat by content so two reels can share a bake. The checks are the
     # same ones, in ``_resolve`` below.
-    folder = Path(root) / BAKES_DIRNAME / bake_key(slug, style, size, fps)
+    try:
+        folder = Path(root) / BAKES_DIRNAME / bake_key(slug, style, size, fps)
+    except ValueError:
+        return None
     return _resolve(folder, fps=fps, size=size)
 
 
