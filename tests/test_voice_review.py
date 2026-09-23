@@ -1192,3 +1192,73 @@ def test_a_raw_path_outside_the_work_dir_is_never_served(client, tmp_path):
 
     assert client.get("/api/audio/p1/b0",
                       params={"raw": 1}).status_code == 404
+
+
+# --- a respeak must not be discardable by the toggle (fix round 1) ---------
+#
+# Upload -> respeak -> toggle used to re-ingest the *old* raw and call
+# apply_beat_audio(engine=UPLOAD_ENGINE), silently overwriting whatever the
+# respeak had just corrected. raw_audio_path/cleanup are correctly carried
+# forward unchanged by the PATCH route (the raw file really is still
+# there, Global Constraint 3), but that is exactly what made the toggle
+# dangerous: it had no way to tell "this beat's raw is still active" from
+# "this beat's raw is stale history" except ``voice_engine``, and it never
+# looked.
+
+
+def test_a_respoken_beat_refuses_the_cleanup_toggle_and_keeps_the_correction(
+        client, monkeypatch, tmp_path):
+    settings = _settings(client)
+    settings.voice_clean = True
+    _seed(client, beats=2, seconds=4.0)
+    assert _upload(client, "b0",
+                   _gap_tone(settings, tmp_path / "gapped.wav")
+                   ).status_code == 200
+    assert _store(client).get_plan("p1").script.beats[0].voice_engine \
+        == "upload"
+
+    _fake_engine(monkeypatch, settings)
+    respeak = client.patch("/api/plan/p1/voice/b0",
+                           json={"voice_text": "फीस माफ़"})
+    assert respeak.status_code == 200, respeak.text
+    respoken = _store(client).get_plan("p1").script.beats[0]
+    assert respoken.voice_engine == "piper"
+    respoken_path = Path(respoken.audio_path)
+    respoken_seconds = respoken.measured_seconds
+    # The raw upload is still on file -- respeak must not have touched it.
+    assert respoken.raw_audio_path
+
+    response = client.post("/api/plan/p1/voice/b0/cleanup",
+                           json={"enabled": False})
+    assert response.status_code == 409, response.text
+
+    beat = _store(client).get_plan("p1").script.beats[0]
+    assert beat.voice_engine == "piper", \
+        "the toggle silently reverted the beat to its old upload"
+    assert Path(beat.audio_path) == respoken_path
+    assert beat.measured_seconds == pytest.approx(respoken_seconds, abs=0.01)
+
+
+def test_the_board_does_not_advertise_a_revert_control_after_a_respeak(
+        client, monkeypatch, tmp_path):
+    """``replaced`` already says the upload is no longer active; the
+    revert-related fields have to agree with it rather than describing a
+    take that is no longer on the timeline."""
+    settings = _settings(client)
+    settings.voice_clean = True
+    _seed(client, beats=2, seconds=4.0)
+    _upload(client, "b0", _gap_tone(settings, tmp_path / "gapped.wav"))
+
+    _fake_engine(monkeypatch, settings)
+    client.patch("/api/plan/p1/voice/b0", json={"voice_text": "नया पाठ"})
+
+    row = client.get("/api/plan/p1/voice").json()["beats"][0]
+    assert row["replaced"] is False
+    assert row["raw_audio"] is None
+    assert row["cleaned"] is None
+    assert row["cleanup"] is None
+    assert row["cleanup_toggle"] is None
+    # The file itself was never touched -- only the board stopped
+    # advertising it, and the route (tested above) stopped acting on it.
+    assert Path(_store(client).get_plan("p1").script.beats[0]
+               .raw_audio_path).is_file()

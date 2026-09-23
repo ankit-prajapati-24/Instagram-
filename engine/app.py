@@ -286,6 +286,8 @@ RAW_UPLOAD_SUFFIX = {
     "audio/webm": ".webm",
     "audio/mp4": ".m4a",
     "video/quicktime": ".mov",
+    "video/mp4": ".mp4",
+    "video/webm": ".webm",
 }
 
 
@@ -1071,14 +1073,23 @@ def create_app(db_path: str | Path | None = None,
             path = Path(beat.audio_path) if beat.audio_path else None
             raw_path = Path(beat.raw_audio_path) if beat.raw_audio_path \
                 else None
+            replaced = beat.voice_engine == UPLOAD_ENGINE
+            # Gated on ``replaced``, not only on a raw file being on disk:
+            # a beat that was uploaded and then re-spoken still has a raw
+            # file (Global Constraint 3 never destroys it) and a stale
+            # ``cleanup`` report describing that old upload, but the
+            # upload is no longer what the beat says -- ``toggle_cleanup``
+            # refuses it for exactly this reason, so the board must not
+            # advertise a revert control it will be refused for.
             raw_exists = bool(raw_path and raw_path.is_file()
-                              and _under_roots(raw_path, roots))
+                              and _under_roots(raw_path, roots)
+                              and replaced)
             rows.append({
                 "beat_id": beat.beat_id,
                 "role": beat.role,
                 "seconds": round(beat.seconds(), 2),
                 "engine": beat.voice_engine,
-                "replaced": beat.voice_engine == UPLOAD_ENGINE,
+                "replaced": replaced,
                 "word_timing_source": beat.word_timing_source,
                 # What this beat is supposed to say, and what gets burned
                 # over it. Both, because they differ: the voice is
@@ -1090,18 +1101,21 @@ def create_app(db_path: str | Path | None = None,
                 "audio": f"/api/audio/{plan_id}/{beat.beat_id}",
                 "replace": f"/api/plan/{plan_id}/voice/{beat.beat_id}",
                 # A beat nothing was ever uploaded for -- a synthesised
-                # beat, or one uploaded before this existed -- reports no
-                # raw rather than erroring: ``None`` all the way down.
+                # beat, one uploaded before this existed, or one that has
+                # since been re-spoken -- reports no raw rather than
+                # erroring or advertising a stale one: ``None`` all the
+                # way down.
                 "raw_audio": (f"/api/audio/{plan_id}/{beat.beat_id}?raw=1"
                              if raw_exists else None),
                 # Whether *what's currently written* went through the
                 # cleanup chain -- distinct from whether cleanup was
                 # merely asked for. See ``_cleaned``.
-                "cleaned": _cleaned(beat.cleanup),
+                "cleaned": _cleaned(beat.cleanup) if raw_exists else None,
                 "cleanup": (beat.cleanup.model_dump()
-                           if beat.cleanup else None),
-                "cleanup_toggle": f"/api/plan/{plan_id}/voice/"
-                                  f"{beat.beat_id}/cleanup",
+                           if raw_exists and beat.cleanup else None),
+                "cleanup_toggle": (f"/api/plan/{plan_id}/voice/"
+                                  f"{beat.beat_id}/cleanup"
+                                  if raw_exists else None),
             })
 
         narration = plan.duration()
@@ -1491,6 +1505,25 @@ def create_app(db_path: str | Path | None = None,
                 404, f"beat {beat_id!r} has no raw upload stored to "
                      f"re-ingest. Only a beat whose narration was uploaded "
                      f"through this gate keeps one.")
+        if beat.voice_engine != UPLOAD_ENGINE:
+            # The raw upload is still there (Global Constraint 3 never
+            # destroys it), but it is no longer what this beat says. A
+            # respeak through the PATCH route carries raw_audio_path and
+            # cleanup forward unchanged -- correctly, since the file itself
+            # is still real -- but re-ingesting it here would call
+            # apply_beat_audio with engine=UPLOAD_ENGINE and silently
+            # overwrite the correction that respeak just made. Refused
+            # rather than risked: this is the same shape of bug
+            # image_provider already shipped once, a field read long after
+            # nothing wrote it for the beat's current state.
+            raise HTTPException(
+                409, f"beat {beat_id!r} is currently saying "
+                     f"{beat.voice_engine!r}'s take, not its uploaded one. "
+                     f"Toggling cleanup would silently discard whatever "
+                     f"replaced the upload. The raw file is still on disk "
+                     f"-- upload it again (POST to the beat's own voice "
+                     f"URL) to make it active before toggling cleanup on "
+                     f"it.")
         raw_path = Path(beat.raw_audio_path)
         if not raw_path.is_file() or not _under_roots(
                 raw_path, [Path(settings.work_dir)]):
