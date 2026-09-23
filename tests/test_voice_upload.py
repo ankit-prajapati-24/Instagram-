@@ -141,6 +141,25 @@ def _cleaned_loudness_preview(settings, source: Path, tmp_path: Path) -> float:
     return _loudness(settings, preview)
 
 
+def _decorrelated_stereo(settings, path: Path, *,
+                         seconds: float = 5.0) -> Path:
+    """Genuinely two-channel audio: a different tone in L and R, joined --
+    not one mono source duplicated to both, which is all ``_tone`` and
+    ``_noisy_tone`` ever produce. A real phone recording with two live
+    channels looks like this, not like a mono signal wearing a stereo
+    header."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [settings.ffmpeg, "-hide_banner", "-v", "error", "-y",
+         "-f", "lavfi", "-i", f"sine=frequency=220:duration={seconds}",
+         "-f", "lavfi", "-i", f"sine=frequency=880:duration={seconds}",
+         "-filter_complex",
+         "[0:a][1:a]join=inputs=2:channel_layout=stereo[out]",
+         "-map", "[out]", "-ar", "44100", str(path)],
+        check=True, capture_output=True)
+    return path
+
+
 # --- the ingest ------------------------------------------------------------
 
 
@@ -314,6 +333,34 @@ def test_the_clean_parameter_overrides_the_setting_for_one_call(
     assert forced_on.filters_applied
 
 
+def test_cleanup_on_a_decorrelated_stereo_upload_still_lands_in_the_band(
+        settings, tmp_path):
+    """Review round 1, Critical 1: measuring the cleaned signal before it
+    is downmixed to mono, then writing the downmix afterwards, computes
+    loudnorm's gain for a different signal than the one it is applied to.
+    Real two-channel content (different audio per channel, not one mono
+    source duplicated to both -- which is all ``_tone``'s stereo fixture
+    ever was) is exactly where that shows up. The fix has to put the same
+    resample/downmix ahead of ``loudnorm`` in *both* the measure pass and
+    the write pass, so this has to land in the same 1.5 dB band
+    tests/test_voice_upload.py already holds every other upload to.
+    """
+    settings.voice_clean = True
+    source = _decorrelated_stereo(settings, tmp_path / "panned.wav")
+    probed = _probe(settings, source)
+    assert not probed["mono"], "fixture must be genuinely two-channel"
+
+    target = tmp_path / "out.mp3"
+    seconds, report = ingest_narration(source, target, settings)
+
+    after = _loudness(settings, target)
+    assert abs(after - UPLOAD_LOUDNESS) <= 1.5, (
+        f"normalised to {after} LUFS, wanted within 1.5 dB of "
+        f"{UPLOAD_LOUDNESS}")
+    assert report.filters_applied
+    assert report.cleanup_abandoned is False
+
+
 def test_cleanup_on_makes_a_noisy_upload_measurably_cleaner_than_the_raw(
         settings, tmp_path):
     """The written file's noise floor moved, and the report says cleanup
@@ -352,6 +399,7 @@ def test_cleanup_off_gives_the_same_output_as_before_this_feature(
     after = _loudness(settings, target)
     assert abs(after - UPLOAD_LOUDNESS) <= 1.5
     assert report.filters_applied == ""
+    assert report.cleanup_abandoned is False
     assert abs(report.seconds_before - report.seconds_after) < 0.1
     assert abs(seconds - 3.0) < 0.1
 
@@ -396,10 +444,13 @@ def test_loud_noise_with_no_speech_is_accepted_though_cleanup_would_silence_it(
 
     # No UploadRejected: judged on the raw upload, this passes. Cleanup
     # having nothing left to normalise falls back to the raw signal for
-    # the write, which the report says honestly.
+    # the write, which the report says honestly: cleanup was requested
+    # (filters_applied names it) but abandoned (cleanup_abandoned), not
+    # simply off.
     seconds, report = ingest_narration(source, tmp_path / "out.mp3", settings)
     assert seconds > 0
-    assert report.filters_applied == ""
+    assert report.filters_applied
+    assert report.cleanup_abandoned is True
 
 
 def test_a_quiet_real_recording_is_not_refused_after_cleanup_erases_it(
@@ -423,7 +474,43 @@ def test_a_quiet_real_recording_is_not_refused_after_cleanup_erases_it(
 
     seconds, report = ingest_narration(source, tmp_path / "out.mp3", settings)
     assert seconds > 0
-    assert report.filters_applied == ""
+    assert report.filters_applied
+    assert report.cleanup_abandoned is True
+
+
+def test_cleanup_off_and_cleanup_abandoned_are_distinguishable_reports(
+        settings, tmp_path):
+    """Both leave the written file at the raw signal's normalised loudness
+    and both could otherwise look identical on the report -- but a caller
+    (Task 3's review board) has to be able to tell "cleanup was off" from
+    "cleanup was attempted and abandoned because it emptied the file"."""
+    settings.voice_clean = False
+    off_source = _tone(settings, tmp_path / "off.wav", seconds=3.0)
+    _, off_report = ingest_narration(off_source, tmp_path / "off.mp3",
+                                     settings)
+
+    settings.voice_clean = True
+    abandoned_source = tmp_path / "abandoned.wav"
+    abandoned_source.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [settings.ffmpeg, "-hide_banner", "-v", "error", "-y",
+         "-f", "lavfi",
+         "-i", "anoisesrc=color=white:amplitude=0.01:duration=3",
+         "-ar", "44100", "-ac", "1", str(abandoned_source)],
+        check=True, capture_output=True)
+    _, abandoned_report = ingest_narration(
+        abandoned_source, tmp_path / "abandoned.mp3", settings)
+
+    assert off_report.filters_applied == ""
+    assert off_report.cleanup_abandoned is False
+    assert abandoned_report.filters_applied
+    assert abandoned_report.cleanup_abandoned is True
+    # the pair together is the actual requirement: same falsy-vs-not shape
+    # on filters_applied would read as "cleanup was off" either way unless
+    # cleanup_abandoned also differs.
+    assert ((off_report.filters_applied, off_report.cleanup_abandoned)
+           != (abandoned_report.filters_applied,
+               abandoned_report.cleanup_abandoned))
 
 
 def test_report_seconds_bracket_a_real_trim(settings, tmp_path):

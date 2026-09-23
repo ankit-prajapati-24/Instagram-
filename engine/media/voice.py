@@ -217,6 +217,13 @@ class CleanupReport:
     loudness_before: float
     loudness_after: float
     filters_applied: str
+    # ``filters_applied`` alone cannot distinguish "cleanup was off" from
+    # "cleanup ran, emptied the file, and was abandoned for this write" --
+    # both would otherwise report the same values. This tells them apart:
+    # False for both "off" and "ran normally"; True only for the fallback
+    # in ``ingest_narration``, and then ``filters_applied`` still names the
+    # fragment that was attempted, not written over with "".
+    cleanup_abandoned: bool = False
 
 
 def cleanup_filters(settings) -> str:
@@ -397,18 +404,43 @@ def ingest_narration(source: str | Path, target: str | Path, settings, *,
 
     effective = (settings if clean is None
                 else replace(settings, voice_clean=clean))
-    filters = cleanup_filters(effective)
+    requested_filters = cleanup_filters(effective)
 
     # Global Constraint 2: the same filter chain has to appear in the
     # measure pass and the write pass, so the measured values describe the
-    # signal that ends up written. With cleanup off ``filters`` is empty
-    # and this is the exact same single measurement taken above -- no
-    # second ffmpeg invocation, and the one pass this function has always
-    # made is still the only one.
-    measured = raw_measured if not filters else _loudnorm_measurement(
-        source, settings, filters)
+    # signal that ends up written. ``pipeline`` is that chain -- cleanup
+    # plus the format conversion below -- and it is empty when cleanup is
+    # off, in which case ``measured`` reuses the single raw measurement
+    # taken above rather than running a second ffmpeg invocation.
+    pipeline = ""
+    if requested_filters:
+        # Verified against ffmpeg on 2026-09-23, and re-verified against
+        # this repository's own ``settings.ffmpeg`` while fixing review
+        # round 1: chaining ``silenceremove`` into ``loudnorm`` on a file
+        # with no internal gap for ``silenceremove`` to actually trim (a
+        # plain continuous tone, reproduced on both mono and stereo),
+        # while ffmpeg also resamples/downmixes the *output* (the plain
+        # ``-ar``/``-ac`` flags below, all the cleanup-off path has ever
+        # needed), crashes with "Assertion best_input >= 0 failed" in
+        # ffmpeg_filter.c. A file with an actual gap for silenceremove to
+        # trim does not trigger it, which is presumably why review round 1
+        # could not reproduce it on gapped fixtures alone. Doing the
+        # resample and channel mix explicitly, inside the filter graph and
+        # ahead of ``loudnorm``, avoids it -- and doing it identically in
+        # *both* passes, not just the write, is what review round 1 also
+        # asked for: measuring a cleaned-but-still-stereo signal and then
+        # downmixing only on write measured 3+ dB off target on a
+        # genuinely decorrelated (hard-panned) two-channel recording,
+        # because loudnorm's gain was computed for a different signal than
+        # the one it was applied to.
+        pipeline = (f"{requested_filters},aresample={NARRATION_SAMPLE_RATE},"
+                   f"aformat=channel_layouts=mono")
 
-    if filters and not math.isfinite(_input_i(measured)):
+    measured = raw_measured if not pipeline else _loudnorm_measurement(
+        source, settings, pipeline)
+
+    cleanup_abandoned = False
+    if pipeline and not math.isfinite(_input_i(measured)):
         # Cleanup emptied the file outright: silenceremove trimmed every
         # sample once the denoiser had already pulled the whole thing below
         # its threshold, which is exactly what a recording that is nothing
@@ -418,9 +450,12 @@ def ingest_narration(source: str | Path, target: str | Path, settings, *,
         # out of range"), and there is nothing left to encode besides. So
         # cleanup is skipped for this one write and the raw signal is
         # normalised instead -- an honest fallback, not a silent one:
-        # ``filters_applied`` on the report is left at "" below, same as
-        # if cleanup had been off for this call.
-        filters = ""
+        # ``cleanup_abandoned`` on the report says so, and
+        # ``filters_applied`` still names what was attempted rather than
+        # being overwritten with "", which would read identically to
+        # cleanup never having been requested at all.
+        cleanup_abandoned = True
+        pipeline = ""
         measured = raw_measured
 
     # Linear mode with the measured values: one gain for the whole beat and
@@ -434,22 +469,7 @@ def ingest_narration(source: str | Path, target: str | Path, settings, *,
                f":measured_thresh={measured['input_thresh']}"
                f":offset={measured.get('target_offset', 0)}"
                f":linear=true")
-    if filters:
-        # Verified against ffmpeg on 2026-09-23: chaining ``silenceremove``
-        # into ``loudnorm`` and then asking ffmpeg to resample/downmix the
-        # *output* (the plain ``-ar``/``-ac`` below, which is all the
-        # cleanup-off path has ever needed) crashes with "Assertion
-        # best_input >= 0 failed" in ffmpeg_filter.c -- reproduced on a
-        # plain continuous tone, so this is a quirk in how that combination
-        # builds its filter graph, not a symptom of any real defect in the
-        # audio. Doing the resample and the channel mix explicitly, inside
-        # the filter graph and ahead of ``loudnorm``, avoids it; the
-        # trailing ``-ar``/``-ac`` flags are kept so the muxed stream's
-        # header still names the format explicitly.
-        write_filters = (f"{filters},aresample={NARRATION_SAMPLE_RATE},"
-                         f"aformat=channel_layouts=mono,{applied}")
-    else:
-        write_filters = applied
+    write_filters = f"{pipeline},{applied}" if pipeline else applied
 
     partial = target.with_suffix(target.suffix + ".part")
     try:
@@ -488,7 +508,14 @@ def ingest_narration(source: str | Path, target: str | Path, settings, *,
         seconds_after=written,
         loudness_before=_input_i(measured),
         loudness_after=_input_i(final_measured),
-        filters_applied=filters,
+        # The fragment requested, not ``pipeline``: "" when cleanup was
+        # off, the cleanup chain when it was requested -- whether it ran
+        # (``cleanup_abandoned`` False) or was abandoned (True). Never
+        # silently collapsed back to "" for the abandoned case, which
+        # would be indistinguishable from cleanup never having been asked
+        # for.
+        filters_applied=requested_filters,
+        cleanup_abandoned=cleanup_abandoned,
     )
     return written, report
 
