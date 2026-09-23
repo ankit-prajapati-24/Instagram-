@@ -69,20 +69,44 @@ def test_a_baked_slug_resolves_like_the_committed_art_does(tmp_path,
     assert Path(pattern % 0).exists()
 
 
-def test_baking_the_same_slug_twice_does_not_download_twice(tmp_path,
-                                                             monkeypatch):
-    src = _gif(tmp_path / "src.gif")
-    calls = []
+def test_choosing_the_same_slug_twice_re_bakes_nothing(tmp_path,
+                                                       monkeypatch):
+    """The point of a content-addressed cache, asserted on the expensive
+    half.
+
+    Counting downloads alone does not do it: a download is 0.4s and is
+    guarded by ``_source``'s own ``dest.exists()``, so that count stays at
+    one even with ``ensure_baked``'s cache check deleted -- while every
+    re-choose silently pays sixteen seconds to bake both styles again. The
+    spy wraps the real ``bake_one`` rather than replacing it, because a
+    stub that writes nothing would leave the cache empty and make the
+    second round bake legitimately.
+    """
+    import scripts.bake_stickers as bakery
+
+    downloads = []
+    bakes = []
+    real_bake_one = bakery.bake_one
 
     def fake_download(slug, dest):
-        calls.append(slug)
+        downloads.append(slug)
         _gif(Path(dest))
 
+    def spy_bake_one(gif, out_dir, **kwargs):
+        bakes.append(Path(out_dir).name)
+        return real_bake_one(gif, out_dir, **kwargs)
+
     monkeypatch.setattr(sc, "_download", fake_download)
+    monkeypatch.setattr(bakery, "bake_one", spy_bake_one)
 
     sc.ensure_baked("27-globe", root=tmp_path, size=60, fps=30)
+    first = list(bakes)
+    assert len(first) == 2, f"both styles bake the first time: {first}"
+
     sc.ensure_baked("27-globe", root=tmp_path, size=60, fps=30)
-    assert len(calls) == 1
+
+    assert bakes == first, f"the second choose must bake nothing: {bakes}"
+    assert downloads == ["27-globe"], f"and fetch nothing: {downloads}"
 
 
 def test_a_preview_is_one_frame_not_a_bake(tmp_path, monkeypatch):
@@ -161,6 +185,40 @@ def test_a_corrupt_meta_resolves_to_none_not_a_crash(meta, tmp_path):
     (folder / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
     assert sc.cached_sequence("27-globe", "dark", fps=30, size=60,
                               root=tmp_path) is None
+
+
+def test_a_bake_that_does_not_span_the_hold_window_resolves_to_none(
+        tmp_path):
+    """The same window check ``stickers.baked_sequence`` makes.
+
+    ``bake_key`` hashes slug, style, size and fps -- not ``HOLD_SECONDS``.
+    So if the hold window ever moves, every cached bake keeps its key and
+    stays a cache hit at the old length, while the committed art beside it
+    is correctly rejected and re-baked. The chosen icon would then be the
+    only sticker that plays truncated, and it is the rung that wins, so the
+    committed art's correctness would not save it.
+
+    The frame files are all written here: without this check the existing
+    count guard is satisfied and the bake resolves.
+    """
+    from engine.assembly.stickers import HOLD_SECONDS
+
+    fps, size = 30, 60
+    wrong = round(HOLD_SECONDS * fps) - 12
+    assert wrong > 0 and wrong != round(HOLD_SECONDS * fps)
+
+    folder = tmp_path / sc.BAKES_DIRNAME / sc.bake_key(
+        "27-globe", "dark", size, fps)
+    folder.mkdir(parents=True)
+    (folder / "meta.json").write_text(
+        json.dumps({"frames": wrong, "canvas": 78, "fps": fps,
+                    "size": size}), encoding="utf-8")
+    for i in range(wrong):
+        Image.new("RGBA", (8, 8)).save(folder / f"frame-{i:03d}.png")
+
+    assert sc.cached_sequence("27-globe", "dark", fps=fps, size=size,
+                              root=tmp_path) is None, (
+        "a bake that does not fill the hold window would play truncated")
 
 
 def test_a_failed_download_leaves_no_stage_behind(tmp_path, monkeypatch):

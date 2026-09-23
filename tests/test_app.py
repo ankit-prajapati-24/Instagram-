@@ -994,3 +994,111 @@ def test_a_refused_icon_leaves_the_previous_choice_alone(tmp_path,
     assert resp.status_code == 422
     assert "pocket of white" in resp.json()["detail"]
     assert store.sticker_choices(plan_id) == {"death": "2130-skull-poison"}
+
+
+def test_a_slug_outside_the_catalogue_404s_before_anything_is_fetched(
+        tmp_path, monkeypatch):
+    """The preview route's gate, and the order it has to hold in.
+
+    ``preview_png`` downloads its source GIF on a cache miss, so a slug
+    that reaches it is a slug the panel fetched an arbitrary URL for with
+    its own network access -- the same hole the choose route's catalogue
+    check exists to close. A status code alone cannot show that nothing was
+    fetched, so the spy stands in for ``preview_png`` and returns a real
+    file: without it, a route that got past the gate would fail on the
+    response instead of on the assertion that matters.
+    """
+    from engine.assembly import sticker_catalog as cat
+    from engine.assembly import sticker_choices as sc
+    client, store, plan_id = _approved_plan_with_voice(tmp_path)
+
+    monkeypatch.setattr(cat, "refresh", lambda *a, **k: None)
+    monkeypatch.setattr(cat, "load", lambda *a, **k: ("2130-skull-poison",))
+
+    stand_in = tmp_path / "preview.png"
+    stand_in.write_bytes(PNG_1x1)
+    rendered = []
+
+    def spy_preview_png(slug, **kwargs):
+        rendered.append(slug)
+        return stand_in
+
+    monkeypatch.setattr(sc, "preview_png", spy_preview_png)
+
+    resp = client.get("/api/sticker-preview/1195-earthworm")
+
+    # No `resp.text` here: a route that wrongly served this would put PNG
+    # bytes into the failure message. The next assertion is the diagnosis.
+    assert resp.status_code == 404
+    assert rendered == [], (
+        f"nothing may be fetched or rendered for an unknown slug: {rendered}")
+
+    # The control: a slug that *is* in the catalogue goes through, so the
+    # 404 above is the gate and not a route that never works.
+    ok = client.get("/api/sticker-preview/2130-skull-poison")
+    assert ok.status_code == 200, ok.text
+    assert rendered == ["2130-skull-poison"]
+
+
+def test_a_chosen_icon_survives_the_route_and_reaches_a_render(tmp_path,
+                                                               monkeypatch):
+    """The one test that crosses the route->render seam unmocked.
+
+    Every other test on this feature stops at one end. The four route
+    tests replace ``sticker_choices.ensure_baked``; the four ``prepare``
+    tests hand-place a bake exactly where the reader expects one. So both
+    ends passed six reviews while the writer baked into
+    ``work_dir/_lordicon/bakes/`` and the reader looked in
+    ``work_dir/bakes/`` -- every chosen icon silently discarded on every
+    render, the feature inert, and no test able to see it.
+
+    Nothing is faked between the two ends. The catalogue lookup is stubbed
+    so no 5.4MB sitemap is fetched, and ``_download`` is stubbed only to
+    hand over a GIF this repo already ships instead of reaching Lordicon.
+    The bake, the stored choice, the settings object and the resolution are
+    all the real ones -- ``settings`` here *is* the object the routes were
+    built with, so the two ends cannot drift apart inside the test.
+
+    ``death`` has committed art, so ``baked is True`` cannot on its own
+    tell a hit on the chosen bake from a fall-through to the committed
+    one. The slug in the pattern is what discriminates, and it is the
+    assertion that goes red when the two roots disagree.
+    """
+    import shutil
+
+    from engine.assembly import sticker_catalog as cat
+    from engine.assembly import sticker_choices as sc
+    from engine.assembly import stickers as stk
+
+    source = Path("assets/lordicon/death.gif")
+    if not source.exists():                    # pragma: no cover - env
+        pytest.skip("run scripts/fetch_sticker_art.py first")
+
+    client, store, plan_id = _approved_plan_with_voice(tmp_path)
+    settings = client.app.state.settings
+    slug = "2130-skull-poison"
+
+    monkeypatch.setattr(cat, "refresh", lambda *a, **k: None)
+    monkeypatch.setattr(cat, "load", lambda *a, **k: (slug,))
+    # The only fake between the ends, and it substitutes a local file for a
+    # network fetch -- it does not stand in for the bake.
+    monkeypatch.setattr(sc, "_download",
+                        lambda s, dest: shutil.copyfile(source, dest))
+
+    resp = client.post(f"/api/plan/{plan_id}/sticker/death",
+                       json={"slug": slug})
+    assert resp.status_code == 200, resp.text
+    assert store.sticker_choices(plan_id) == {"death": slug}
+
+    plan = store.get_plan(plan_id)
+    prepared = stk.prepare(plan, settings,
+                           choices=store.sticker_choices(plan_id))
+
+    assert prepared, "the death cue must still fire"
+    chosen = prepared[0]
+    assert chosen.name == "death"
+    assert chosen.baked is True
+    assert slug in chosen.pattern, (
+        "the bake the route just wrote never reached the render -- the "
+        f"writer and the reader disagree about the root: {chosen.pattern}")
+    assert Path(chosen.pattern % 0).exists(), "the frames must be on disk"

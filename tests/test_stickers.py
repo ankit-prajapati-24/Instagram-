@@ -588,9 +588,33 @@ def test_both_cues_survive_when_the_font_is_there(tmp_path):
 
 # --- chosen art -------------------------------------------------------------
 
-def test_a_chosen_slug_wins_over_the_committed_art(tmp_path, monkeypatch):
+def _bake_into_the_choice_cache(settings, slug, *, style="punchy") -> Path:
+    """A real bake for ``slug``, where ``prepare`` will look for it.
+
+    The root comes from ``sticker_choices.cache_root`` -- the same call the
+    panel's three routes and ``prepare``'s top rung all make -- and is
+    deliberately not spelled out here. A test that writes its own idea of
+    the root encodes the reader's assumption and asks nobody who writes
+    there; that is exactly how the writer and the reader came to disagree,
+    and how four tests kept passing while the feature did nothing.
+
+    Returns the bake directory, so a caller can delete it.
+    """
     from engine.assembly import sticker_choices as sc
     from scripts.bake_stickers import bake_one
+
+    src = Path("assets/lordicon/witness.gif")
+    if not src.exists():                       # pragma: no cover - env
+        pytest.skip("run scripts/fetch_sticker_art.py first")
+    size = stk.sticker_size(settings.width, settings.sticker_scale)
+    folder = (sc.cache_root(settings) / sc.BAKES_DIRNAME
+              / sc.bake_key(slug, style, size, int(settings.fps)))
+    bake_one(src, folder, style=style, size=size, fps=int(settings.fps))
+    return folder
+
+
+def test_a_chosen_slug_wins_over_the_committed_art(tmp_path):
+    from engine.assembly import sticker_choices as sc
 
     plan = _timed(beats=4, captions=[
         "Jungle mein ek kankaal mila tha"] * 4)
@@ -598,15 +622,9 @@ def test_a_chosen_slug_wins_over_the_committed_art(tmp_path, monkeypatch):
     settings.work_dir = tmp_path
     size = stk.sticker_size(settings.width, settings.sticker_scale)
 
-    # Bake a stand-in for the chosen slug straight into the cache, so this
+    # A stand-in for the chosen slug, baked straight into the cache, so this
     # test needs no network.
-    src = Path("assets/lordicon/witness.gif")
-    if not src.exists():                       # pragma: no cover - env
-        pytest.skip("run scripts/fetch_sticker_art.py first")
-    key = sc.bake_key("2813-creepy-eye-ball", "punchy", size,
-                      int(settings.fps))
-    bake_one(src, tmp_path / sc.BAKES_DIRNAME / key, style="punchy",
-             size=size, fps=int(settings.fps))
+    _bake_into_the_choice_cache(settings, "2813-creepy-eye-ball")
 
     chosen = stk.prepare(plan, settings,
                          choices={"death": "2813-creepy-eye-ball"})
@@ -617,6 +635,16 @@ def test_a_chosen_slug_wins_over_the_committed_art(tmp_path, monkeypatch):
 
 
 def test_no_choices_behaves_exactly_as_before(tmp_path):
+    """The spec's promise is byte-identical ``Sticker`` objects, not merely
+    the same file pattern.
+
+    ``Sticker`` is a frozen dataclass, so ``==`` compares every field --
+    ``baked``, ``style``, ``canvas``, ``frames``, ``slot``, ``start`` and
+    the rest. Comparing only ``.pattern``, as this test used to, would miss
+    a top rung that returned the right path with the wrong frame count or
+    left ``baked`` unset, which is precisely the kind of drift the new rung
+    can introduce.
+    """
     plan = _timed(beats=4, captions=[
         "Jungle mein ek kankaal mila tha"] * 4)
     settings = shipped_settings()
@@ -625,22 +653,51 @@ def test_no_choices_behaves_exactly_as_before(tmp_path):
     without = stk.prepare(plan, settings)
     with_empty = stk.prepare(plan, settings, choices={})
     with_none = stk.prepare(plan, settings, choices=None)
-    assert [s.pattern for s in without] == [s.pattern for s in with_empty]
-    assert [s.pattern for s in without] == [s.pattern for s in with_none]
+    assert without, "expected stickers to compare"
+    assert without == with_empty
+    assert without == with_none
 
 
 def test_a_choice_whose_cache_is_gone_falls_through_and_does_not_raise(
         tmp_path):
+    """Deleting a bake costs a nicer sticker, never a render.
+
+    Written as a before-and-after on one live choice, because the obvious
+    version -- assert a never-baked slug falls back -- passes just as
+    happily when the top rung is dead and ``cached_sequence`` never
+    resolves anything at all. It passed exactly that way while the panel
+    baked into one directory and this read another. The first half proves
+    the rung is alive; only then does the second half mean anything.
+    """
+    import shutil
+
+    from engine.assembly import sticker_choices as sc
+
     plan = _timed(beats=4, captions=[
         "Jungle mein ek kankaal mila tha"] * 4)
     settings = shipped_settings()
     settings.work_dir = tmp_path
+    size = stk.sticker_size(settings.width, settings.sticker_scale)
+    key = sc.bake_key("2813-creepy-eye-ball", "punchy", size,
+                      int(settings.fps))
+    choices = {"death": "2813-creepy-eye-ball"}
 
-    prepared = stk.prepare(plan, settings,
-                           choices={"death": "9999-never-baked"})
+    folder = _bake_into_the_choice_cache(settings, "2813-creepy-eye-ball")
+    live = stk.prepare(plan, settings, choices=choices)
+    assert live, "expected a sticker"
+    assert key in live[0].pattern, (
+        "the top rung must resolve before this test can say anything about "
+        f"falling off it: {live[0].pattern}")
+
+    shutil.rmtree(folder)                       # the cache is cleaned
+
+    prepared = stk.prepare(plan, settings, choices=choices)
     assert prepared, "must fall back, not vanish"
+    assert key not in prepared[0].pattern, "the bake is gone; this is stale"
     # Falls to the committed art, which is still baked designed art.
     assert prepared[0].baked is True
+    assert prepared == stk.prepare(plan, settings), (
+        "a choice with no bake must leave the reel exactly as it was")
 
 
 def test_a_choice_for_a_trigger_that_did_not_fire_is_ignored(tmp_path):

@@ -1945,7 +1945,7 @@ def create_app(db_path: str | Path | None = None,
         if plan is None:
             raise HTTPException(404, "no such plan")
 
-        cache = Path(settings.work_dir) / "_lordicon"
+        cache = sticker_choices_mod.cache_root(settings)
         note = ""
         slugs: tuple[str, ...] = ()
         try:
@@ -1985,7 +1985,7 @@ def create_app(db_path: str | Path | None = None,
     @app.get("/api/sticker-preview/{slug}")
     def sticker_preview(slug: str) -> FileResponse:
         """One matted frame of an icon, for the picker to show."""
-        cache = Path(settings.work_dir) / "_lordicon"
+        cache = sticker_choices_mod.cache_root(settings)
         slugs = sticker_catalog.load(cache)
         if slug not in slugs:
             raise HTTPException(404, "not a catalogue slug")
@@ -2007,7 +2007,7 @@ def create_app(db_path: str | Path | None = None,
         if store.get_plan(plan_id) is None:
             raise HTTPException(404, "no such plan")
 
-        cache = Path(settings.work_dir) / "_lordicon"
+        cache = sticker_choices_mod.cache_root(settings)
         try:
             sticker_catalog.refresh(cache)
         except sticker_catalog.CatalogUnavailable as exc:
@@ -2021,8 +2021,15 @@ def create_app(db_path: str | Path | None = None,
             sticker_choices_mod.ensure_baked(
                 body.slug, root=cache, size=size, fps=int(settings.fps))
         except ValueError as exc:
-            # The icon has a pocket of trapped white and would render with a
-            # blob in it. Refusing keeps whatever was chosen before.
+            # Two refusals land here, and the detail below is `str(exc)`, so
+            # the caller sees whichever it was:
+            #   - `bake_one` refusing an icon with a pocket of trapped white,
+            #     which would render with a blob in it;
+            #   - `safe_slug` refusing a slug that could not become a path.
+            #     The catalogue check above already rejects anything not in
+            #     the sitemap, so this is the module's own defence in depth
+            #     rather than the gate that matters.
+            # Either way, refusing keeps whatever was chosen before.
             raise HTTPException(422, str(exc)) from exc
 
         store.choose_sticker(plan_id, trigger, body.slug)

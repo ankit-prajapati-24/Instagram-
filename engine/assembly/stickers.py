@@ -530,10 +530,17 @@ def prepare(plan: ReelPlan, settings, *,
         found = None
         chosen = (choices or {}).get(cue.name)
         if chosen:
-            from engine.assembly.sticker_choices import cached_sequence
+            # Imported here, not at module scope: this module is loaded on
+            # every render and `sticker_choices` pulls in the catalogue, the
+            # bake script and Pillow, none of which a render needs. `root`
+            # comes from that module too -- the panel writes these bakes and
+            # this reads them, and spelling the path here is what made the
+            # feature inert once already.
+            from engine.assembly.sticker_choices import (
+                cache_root, cached_sequence)
             found = cached_sequence(
                 chosen, style, fps=fps, size=size,
-                root=Path(getattr(settings, "work_dir", ".")))
+                root=cache_root(settings))
         if found is None:
             found = baked_sequence(cue.name, style, fps=fps, size=size)
         if found is not None:

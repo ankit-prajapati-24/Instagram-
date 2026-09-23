@@ -24,6 +24,28 @@ BAKES_DIRNAME = "bakes"
 PREVIEWS_DIRNAME = "previews"
 SOURCES_DIRNAME = "sources"
 
+# Everything this module caches for one engine lives under here, inside the
+# work directory. A constant rather than a literal because the panel writes
+# these bakes and the renderer reads them, and when the two sides each spelled
+# the path themselves they drifted -- the feature shipped inert for exactly
+# that reason: four literals, two of which said `work_dir/_lordicon` and two
+# of which said `work_dir`. Anyone who needs this root calls `cache_root`.
+# (Not to be confused with `stickers.CACHE_DIRNAME`, "_stickers", which is
+# that module's own cache of rendered emoji pops. Different owner, different
+# contents, deliberately a different directory.)
+CACHE_DIRNAME = "_lordicon"
+
+
+def cache_root(settings) -> Path:
+    """Where this engine's chosen-sticker cache lives.
+
+    Takes the settings object rather than a path so that every caller --
+    three routes in the panel and one rung of ``prepare`` -- reaches the
+    same directory by construction instead of by agreement.
+    """
+    return Path(getattr(settings, "work_dir", ".")) / CACHE_DIRNAME
+
+
 # A Lordicon slug is `<number>-<words>`; nothing else may become a path
 # component here. The digest in bake_key is what actually distinguishes two
 # bakes, so the readable prefix is a convenience -- and a convenience is not
@@ -106,6 +128,13 @@ def _resolve(folder: Path, *, fps: int, size: int
              ) -> tuple[str, int, int] | None:
     import json
 
+    # Imported here, like json above, so that importing this module never
+    # drags in the renderer -- `stickers` imports this one back, lazily,
+    # inside `prepare`. The constant is read rather than copied: a second
+    # spelling of the hold window is the same drift that made this feature
+    # inert once already.
+    from engine.assembly.stickers import HOLD_SECONDS
+
     meta_path = folder / "meta.json"
     if not meta_path.exists():
         return None
@@ -120,7 +149,19 @@ def _resolve(folder: Path, *, fps: int, size: int
         # Raising would take down a render over a file the next bake
         # rewrites anyway.
         return None
-    if frames <= 0 or len(list(folder.glob("frame-*.png"))) != frames:
+    if frames <= 0:
+        return None
+    # The same window check `stickers.baked_sequence` makes, for the same
+    # reason: `sticker_chain` trims to HOLD_SECONDS and gates `enable` to
+    # that span, so a sequence of any other length plays truncated.
+    # `bake_key` hashes slug, style, size and fps and *not* HOLD_SECONDS, so
+    # without this a bake made at the old window would keep its key and stay
+    # a cache hit forever, while the committed art beside it was rejected
+    # and re-baked -- the chosen icon, which is the rung that wins, would be
+    # the only sticker playing truncated.
+    if frames != round(HOLD_SECONDS * fps):
+        return None
+    if len(list(folder.glob("frame-*.png"))) != frames:
         return None
     return str(folder / "frame-%03d.png"), frames, canvas
 
