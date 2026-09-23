@@ -181,6 +181,14 @@ def apply_style(frame: Image.Image, style: str) -> Image.Image:
     return _tint(drained, ACCENT, _DARK_TINT)
 
 
+# PRE-RESIZE. Every pixel value in this block and in _HALO is in *source*
+# pixels: ground() runs on the 400x400 source frame and bake_one resizes to
+# the shipped 184px afterwards, so each one lands at 184/400 = ~0.46x on
+# screen -- a "6px" shadow offset is ~2.8px in the reel, a "3px" outline is
+# ~1.4px. They are written this way on purpose and must not be rescaled to
+# match the spec's prose: the look was judged by eye at the final on-screen
+# size and approved there, so the numbers describe the input, not the result.
+#
 # Offset down, blur radius, and opacity of the drop shadow, per style. Dark
 # sits deeper and softer because it has to separate the sticker from footage
 # that is already dark; punchy only has to stop it floating.
@@ -228,7 +236,10 @@ def ground(frame: Image.Image, style: str) -> Image.Image:
 
     Drawn on the existing canvas, not a larger one: the canvas is what the
     overlay pins at a fixed x/y, and growing it here would move every
-    sticker off its anchor.
+    sticker off its anchor. The canvas margin is not what stops the shadow
+    and glow overflowing -- measured, it goes entirely unused. They clip at
+    the edge of the source frame instead, harmlessly: the most any shipped
+    icon leaves at that edge is alpha 12/255.
     """
     if style not in STYLES:
         raise ValueError(f"unknown style {style!r}; expected one of {STYLES}")

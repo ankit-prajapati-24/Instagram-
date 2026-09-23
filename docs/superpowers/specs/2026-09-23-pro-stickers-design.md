@@ -165,12 +165,33 @@ change exists to remove.
 
 So the visible duration is byte-identical to today's: this alters *what is
 on screen*, never *how long*. Every timing test that passes now keeps
-passing. The static hold is deleted outright. `FADE_OUT_SECONDS` stays, applied by the existing `fade`
-filter, so the exit is unchanged.
+passing. `FADE_OUT_SECONDS` stays, applied by the existing `fade` filter, so
+the exit is unchanged.
 
-`sticker_chain` no longer needs
-`loop=loop=-1:size=1:start={frames-1}` — the sequence now covers the whole
-window. Everything else in that fragment stays byte-for-byte, including
+**The static hold is gone, but nothing deletes it** (Ruling 13). Earlier
+drafts of this section said the hold was deleted outright and that
+`sticker_chain` "no longer needs `loop=loop=-1:size=1:start={frames-1}`".
+Both are wrong, and the second one is dangerous:
+
+- The freeze disappeared the moment `WINDOW_SECONDS` became `HOLD_SECONDS`
+  (Ruling 1). A baked sequence is `round(HOLD_SECONDS * fps)` = 42 frames at
+  30fps, so it fills the trim window by itself and `loop` has nothing left to
+  hold. No filter had to be removed for that to be true.
+- **`loop` stays, because the emoji path still needs it.** `render_pop_frames`
+  is unchanged: it produces `pop_frame_count(30)` = 7 frames = 0.233s against
+  the same 1.400s trim, and `loop` is the only reason those stickers stay on
+  screen for the other 1.167s. With `repeatlast=0:eof_action=pass` the overlay
+  stops compositing the moment the input ends. Removing `loop` would have made
+  every emoji sticker vanish 0.233s into its window — and ten triggers still
+  take that path (`shock`, `money`, `ghost`, `secret`, `fire`, `danger`,
+  `night`, `water`, `mountain`, `location`), `water` being the single
+  most-fired trigger in the real corpus.
+- It would also have happened silently. Every real-render sticker test uses a
+  caption containing `kankaal`, which resolves to `death` — a trigger that now
+  has art — so the whole suite exercises the baked path. A real-render test
+  now drives the emoji path specifically and pins why the filter must remain.
+
+Everything else in that fragment stays byte-for-byte, including
 `settb=1/fps` on every label, `enable=between(...)`, and the rule that the
 overlay never touches the MAIN branch's PTS. The narration-length invariant
 is therefore untouched.
@@ -179,11 +200,20 @@ is therefore untouched.
 
 Both styles start from the same matted frames, so art is fetched once.
 
+**All pixel sizes below are source pixels, applied before the resize.**
+`ground` runs on the 400x400 source frame and `bake_one` resizes to the
+shipped 184px afterwards, so every distance here lands at 184/400 = **0.46x**
+on screen. The numbers are kept as they are because the look was judged by eye
+at the final on-screen size and approved on that basis (Ruling 17); changing
+them would change an approved look to match a number that was only ever
+descriptive. The on-screen value is given after each one.
+
 **punchy** (`hook`, `cta`, and the default for any unmapped role)
 - saturation ×1.15
 - 3px outline in near-white at 85% opacity, to hold the shape against busy
-  footage
-- drop shadow: 6px down, 12px blur, 45% black
+  footage — **~1.4px on screen**
+- drop shadow: 6px down, 12px blur, 45% black — **~2.8px down, ~5.5px blur
+  on screen**
 
 **dark** (`reveal`, `twist`)
 - **darken first**: brightness x0.72. This is what makes it dark; desaturating
@@ -194,13 +224,22 @@ Both styles start from the same matted frames, so art is fetched once.
   spoken word with (`COLOUR_SPOKEN`). The channel has exactly one accent
   colour and the sticker should use it rather than introduce a second. Ten
   percent is a warmth, not a coat of paint.
-- outer glow in the same gold at 170/255 over 10px, to separate it from dark
+- outer glow in the same gold at 170/255 over 10px (**~4.6px on screen**), to
+  separate it from dark
   footage instead of an outline. Not "low opacity": tested over a real frame
   from `outputs/NANDA-DEVI-real-run.mp4`, 72 was invisible and 120 was still
   weak against mottled mid-tone footage. 170 reads as a rim light, which is
   the effect the dark grade wants and the one this bullet originally asked
   for in the wrong units.
-- drop shadow: 4px down, 16px blur, 60% black
+- drop shadow: 4px down, 16px blur, 60% black — **~1.8px down, ~7.4px blur
+  on screen**
+
+The shadow and halo are drawn on the existing canvas, not a larger one: the
+canvas is what the overlay pins at a fixed x/y, and growing it would move
+every sticker off its anchor. The canvas margin is not what keeps them from
+overflowing — it measured entirely unused. The halo clips at the edge of the
+source frame instead, harmlessly: the most any shipped icon puts at that edge
+is alpha 12/255.
 
 These three numbers were chosen by rendering the five shipped icons under five
 candidate combinations and looking at them, not by taste. The first attempt
@@ -227,11 +266,25 @@ Unchanged in spirit, and it now has one more rung:
 
 1. Baked frames for `(trigger, style)` → use them.
 2. Baked frames missing → the existing emoji pop path.
-3. No colour emoji font → `StickerUnavailable`, stickers are dropped, the
-   render proceeds.
+3. No colour emoji font → `StickerUnavailable` for **that cue only**. It is
+   skipped, the remaining stickers are prepared as normal, and the render
+   proceeds.
 
-A missing decoration must never cost a render. `prepare()` keeps returning
-`[]` rather than raising.
+Rung 3 is per-cue, not per-render. Baked art opens no font, so a machine
+without a colour emoji font — the Linux VPS `engine/config.py` already
+contemplates, where this is the normal case rather than an edge case — still
+gets every designed sticker the plan triggered, and loses only the ones that
+had nothing but an emoji to fall back to. Dropping the whole list there was a
+real defect: a plan whose `death` beat had baked art and whose later beat did
+not came out with no stickers at all, the designed ones lost to a failure in
+the rung beneath them.
+
+Slots are numbered over the stickers that survive, not over the cues, because
+`canvas_origin` cycles x-positions on the slot number and a gap in that cycle
+could sit two consecutive stickers in the same place.
+
+A missing decoration must never cost a render, and must not cost the other
+stickers either. `prepare()` keeps returning `[]` rather than raising.
 
 ## Attribution
 
