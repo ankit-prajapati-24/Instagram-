@@ -179,3 +179,41 @@ def apply_style(frame: Image.Image, style: str) -> Image.Image:
         _DARK_SATURATION).convert("RGBA")
     drained.putalpha(alpha)
     return _tint(drained, ACCENT, _DARK_TINT)
+
+
+# Offset down, blur radius, and opacity of the drop shadow, per style. Dark
+# sits deeper and softer because it has to separate the sticker from footage
+# that is already dark; punchy only has to stop it floating.
+_SHADOW = {
+    "punchy": (6, 12, 115),
+    "dark": (4, 16, 153),
+}
+
+
+def ground(frame: Image.Image, style: str) -> Image.Image:
+    """``frame`` with a drop shadow under it, on the same canvas.
+
+    Without this the sticker sits *on* the frame rather than *in* it -- the
+    third of the three things that made the emoji read as clipart. The
+    shadow is baked rather than drawn by ffmpeg because the renderer's whole
+    speed argument rests on the overlay having nothing to compute per frame.
+
+    Drawn on the existing canvas, not a larger one: the canvas is what the
+    overlay pins at a fixed x/y, and growing it here would move every
+    sticker off its anchor.
+    """
+    if style not in STYLES:
+        raise ValueError(f"unknown style {style!r}; expected one of {STYLES}")
+    offset, radius, opacity = _SHADOW[style]
+
+    alpha = frame.getchannel("A")
+    shadow_alpha = Image.new("L", frame.size, 0)
+    shadow_alpha.paste(alpha, (0, offset))
+    shadow_alpha = shadow_alpha.filter(ImageFilter.GaussianBlur(radius))
+    shadow_alpha = shadow_alpha.point(lambda v: v * opacity // 255)
+
+    shadow = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+    shadow.putalpha(shadow_alpha)
+
+    out = Image.alpha_composite(shadow, frame)
+    return out

@@ -200,7 +200,10 @@ def test_dark_is_actually_darker_not_merely_paler():
 def test_dark_keeps_enough_colour_to_stay_legible():
     """Two differently coloured regions must still differ after grading.
     The first attempt flattened everything toward one gold, which is how
-    the eye's pupil vanished into the eyeball around it."""
+    the eye's pupil vanished into the eyeball around it. The threshold of
+    100 sits between the old broken grade (which measured 63 and let the
+    bug ship) and the current grade (146), so this test would have caught
+    the defect it was written for."""
     from PIL import ImageDraw
     im = Image.new("RGB", (64, 64), (255, 255, 255))
     d = ImageDraw.Draw(im)
@@ -211,4 +214,27 @@ def test_dark_keeps_enough_colour_to_stay_legible():
     outer = graded.getpixel((16, 32))
     inner = graded.getpixel((32, 32))
     spread = sum(abs(a - b) for a, b in zip(outer, inner))
-    assert spread > 60, f"regions collapsed toward one colour (spread {spread})"
+    assert spread > 100, f"regions collapsed toward one colour (spread {spread})"
+
+
+from engine.assembly.sticker_art import ground
+
+
+def test_the_shadow_adds_opacity_below_the_art():
+    art = matte(_disc(side=96))
+    out = ground(art, "punchy")
+    # A point just under the disc's bottom edge is empty before grounding.
+    probe = (48, 92)
+    assert art.getpixel(probe)[3] == 0
+    assert out.getpixel(probe)[3] > 0, "shadow should fall below the art"
+
+
+def test_grounding_keeps_the_canvas_size():
+    art = matte(_disc(side=96))
+    assert ground(art, "dark").size == art.size
+
+
+def test_the_art_itself_stays_fully_opaque():
+    art = matte(_disc(side=96))
+    out = ground(art, "punchy")
+    assert out.getpixel((48, 48))[3] == 255
