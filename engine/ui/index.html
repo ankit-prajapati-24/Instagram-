@@ -248,11 +248,20 @@
   .beatrow .vhead .eng { color: var(--muted); }
   .beatrow .vhead .eng.upload { color: var(--moss); }
   .beatrow .vhead .eng.weak { color: var(--gold); }
-  .beatrow .vsay {
-    font-size: 14px; line-height: 1.5; color: var(--paper);
-    word-break: break-word;
+  .beatrow .vtext { display: flex; flex-direction: column; gap: 4px; }
+  .beatrow .vtext label {
+    font-size: 10.5px; color: var(--muted); text-transform: uppercase;
+    letter-spacing: 0.06em;
   }
-  .beatrow .vcap { font-size: 11.5px; color: var(--muted); line-height: 1.4; }
+  .beatrow textarea {
+    width: 100%; background: #0b0f10; color: var(--paper);
+    border: 1px solid var(--rule); padding: 6px 8px; font-family: inherit;
+    line-height: 1.5; resize: vertical;
+  }
+  .beatrow textarea:focus { outline: none; border-color: var(--gold); }
+  .beatrow textarea.dirty { border-color: var(--gold); }
+  .beatrow textarea.vsay { font-size: 14px; }
+  .beatrow textarea.vcap { font-size: 11.5px; color: var(--muted); }
   .beatrow .vside { display: flex; flex-direction: column; gap: 6px; }
   .beatrow audio { width: 100%; height: 32px; }
   .beatrow button.copy, .beatrow label.pick {
@@ -514,6 +523,14 @@
         levelled to the same loudness, so an uploaded beat does not jump
         out next to a synthesised one. Replacing a beat changes how long
         the video is, which is what the line below tracks.</p>
+      <p class="hint">If the voice simply says a word wrong, you do not
+        need a recording at all: fix the spelling in the spoken line and
+        press <b>Say it again</b>. Only that beat is spoken again. The two
+        lines move independently on purpose — respell the word
+        phonetically in the spoken line and the burned caption keeps the
+        real spelling, so the listener hears it right and the viewer reads
+        it right. Editing only the caption re-times the words without
+        saying anything again.</p>
       <p class="lenbar" id="voice-length"></p>
       <div class="beatlist" id="beatlist"></div>
       <div class="entry">
@@ -809,15 +826,23 @@ function renderVoice() {
         <span class="eng ${b.replaced ? "upload" : (weak ? "weak" : "")}"
               id="veng-${esc(b.beat_id)}">${esc(b.engine || "not spoken")}</span>
       </div>
-      <div>
-        <div class="vsay">${esc(b.voice_text)}</div>
-        <div class="vcap">burned: ${esc(b.caption_text)}</div>
+      <div class="vtext">
+        <label for="vsay-${esc(b.beat_id)}">spoken · Devanagari</label>
+        <textarea class="vsay" rows="2" spellcheck="false"
+                  data-beat="${esc(b.beat_id)}"
+                  id="vsay-${esc(b.beat_id)}">${esc(b.voice_text)}</textarea>
+        <label for="vcap-${esc(b.beat_id)}">burned on screen · Roman</label>
+        <textarea class="vcap" rows="2" spellcheck="false"
+                  data-beat="${esc(b.beat_id)}"
+                  id="vcap-${esc(b.beat_id)}">${esc(b.caption_text)}</textarea>
       </div>
       <div class="vside">
         <audio controls preload="none" src="${b.audio}"
                id="vaud-${esc(b.beat_id)}"></audio>
-        <button class="copy" data-beat="${esc(b.beat_id)}">Copy this
-          line</button>
+        <button class="copy" data-beat="${esc(b.beat_id)}"
+                data-act="respeak">Say it again</button>
+        <button class="copy" data-beat="${esc(b.beat_id)}"
+                data-act="copy">Copy this line</button>
         <label class="pick">
           Upload a take
           <input type="file" accept="audio/*,video/*"
@@ -831,15 +856,28 @@ function renderVoice() {
   $("beatlist").querySelectorAll("input[type=file]").forEach((input) => {
     input.onchange = () => replaceVoice(input);
   });
-  /* The text comes off the loaded data rather than out of a data-
-     attribute: it is Devanagari and the whole point of copying it is that
-     it arrives somewhere else byte for byte. */
+  /* A line the user has started editing is marked, so it is obvious which
+     rows have something unsaid in them. */
+  $("beatlist").querySelectorAll("textarea").forEach((box) => {
+    box.oninput = () => {
+      const row = VOICE.beats.find((b) => b.beat_id === box.dataset.beat);
+      const was = box.classList.contains("vsay")
+        ? row.voice_text : row.caption_text;
+      box.classList.toggle("dirty", box.value !== was);
+    };
+  });
+
   $("beatlist").querySelectorAll("button.copy").forEach((button) => {
+    const beat = button.dataset.beat;
+    if (button.dataset.act === "respeak") {
+      button.onclick = () => respeakBeat(beat, button);
+      return;
+    }
     button.onclick = async () => {
-      const row = VOICE.beats.find((b) => b.beat_id === button.dataset.beat);
-      if (!row) return;
+      /* Copied out of the box rather than out of the loaded data, so an
+         edit made here goes with it. */
       try {
-        await navigator.clipboard.writeText(row.voice_text);
+        await navigator.clipboard.writeText($("vsay-" + beat).value);
         button.textContent = "Copied";
         setTimeout(() => { button.textContent = "Copy this line"; }, 1400);
       } catch (err) {
@@ -848,6 +886,73 @@ function renderVoice() {
     };
   });
   show("s-voice");
+}
+
+/* Correct a word and hear it again, without touching the other beats.
+
+   Only the fields that actually changed are sent, which is exactly the
+   distinction the route draws: a voice_text edit is re-spoken, a
+   caption-only edit is not (the audio did not change -- only where its
+   words fall). */
+async function respeakBeat(beat, button) {
+  const row = VOICE.beats.find((b) => b.beat_id === beat);
+  if (!row) return;
+  const said = $("vsaid-" + beat);
+  const voice = $("vsay-" + beat).value;
+  const caption = $("vcap-" + beat).value;
+
+  const body = {};
+  if (voice !== row.voice_text) body.voice_text = voice;
+  if (caption !== row.caption_text) body.caption_text = caption;
+  if (!Object.keys(body).length) {
+    /* Nothing was edited, so this is a plain retry: say the same line
+       again rather than refusing, which is what the button says it does. */
+    body.voice_text = voice;
+  }
+
+  button.disabled = true;
+  said.className = "said";
+  said.textContent = body.voice_text === undefined
+    ? "re-timing the caption…" : "saying it again…";
+  try {
+    const response = await fetch(`/api/plan/${PLAN.plan_id}/voice/${beat}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      said.className = "said bad";
+      said.textContent = String(data.detail || response.status);
+      return;
+    }
+    said.className = "said ok";
+    said.textContent = data.respoken
+      ? `${data.seconds.toFixed(2)}s (was ${data.was_seconds.toFixed(2)}s)`
+      : `caption re-timed across ${data.seconds.toFixed(2)}s`;
+    $("vsecs-" + beat).textContent = data.seconds.toFixed(2) + "s";
+    $("veng-" + beat).textContent = data.engine;
+    $("veng-" + beat).className = "eng";
+    $("vrow-" + beat).classList.remove("swapped", "gone");
+    $("vaud-" + beat).src = `${data.audio}?t=${Date.now()}`;
+    $("vsay-" + beat).classList.remove("dirty");
+    $("vcap-" + beat).classList.remove("dirty");
+
+    row.voice_text = data.voice_text;
+    row.caption_text = data.caption_text;
+    row.engine = data.engine;
+    row.seconds = data.seconds;
+    row.replaced = false;
+    VOICE.narration_seconds = data.narration_seconds;
+    VOICE.in_gate = data.in_gate;
+    VOICE.in_window = data.in_window;
+    voiceLengthLine(VOICE);
+  } catch (err) {
+    said.className = "said bad";
+    said.textContent = String(err);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function replaceVoice(input) {
@@ -894,6 +999,7 @@ async function replaceVoice(input) {
       row.engine = data.engine; row.replaced = true;
       row.seconds = data.seconds; row.exists = true;
     }
+    $("veng-" + beat).className = "eng upload";
     /* One beat moved, so the total moved with it. */
     VOICE.narration_seconds = data.narration_seconds;
     VOICE.in_gate = data.in_gate;

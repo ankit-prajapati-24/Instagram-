@@ -157,10 +157,23 @@ narration and levelled to the same loudness, so an uploaded beat does not
 jump out next to a synthesised one. The synthesised original is left on
 disk untouched.
 
-Replacing a beat changes how long the whole video is, so the line above the
-list tracks the total against both windows: the range that will render at
-all, and the narrower range QC will publish. Nothing after this point
-shortens a script.
+If the voice simply says a word wrong you do not need a recording at all.
+Both lines are editable in place — the Devanagari one that gets spoken and
+the Roman one that gets burned — and **Say it again** re-speaks *only* that
+beat. They move independently on purpose: respell the word phonetically in
+the spoken line and the caption keeps the real spelling, so the listener
+hears it right and the viewer reads it right. A caption-only edit does not
+re-speak anything; the audio has not changed, only where its words fall.
+
+The spoken line has to be Devanagari — the same rule the script gate
+enforces, through the same code. Latin script is refused with the
+offending words named. That is not a style rule: the voice reads Latin
+letters as English and mispronounces them.
+
+Replacing or re-speaking a beat changes how long the whole video is, so
+the line above the list tracks the total against both windows: the range
+that will render at all, and the narrower range QC will publish. Nothing
+after this point shortens a script.
 
 This gate is before the footage is fetched, and it has to be: a beat's clip
 count is `ceil(measured / 2.5)` and its slot lengths divide the measured
@@ -180,7 +193,7 @@ again about the clips when you release it.
 python scripts/verify_e2e.py        # full pipeline, fake brain, everything else real
 python scripts/probe_omniroute.py   # which gateway endpoints answer
 python scripts/reset_cooldown.py    # what the dedup gate is blocking
-python -m pytest -q                 # 598 tests
+python -m pytest -q                 # 620 tests
 ```
 
 `verify_e2e.py` exits non-zero unless it produced a playable 1080x1920 MP4 with

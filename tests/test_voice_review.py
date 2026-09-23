@@ -690,8 +690,15 @@ def test_the_panel_calls_routes_that_are_registered(client):
 
     assert "/api/plan/{plan_id}/voice" in paths
     assert "/api/plan/{plan_id}/voice/approve" in paths
-    assert "/api/plan/{plan_id}/voice/{beat_id}" in paths
     assert "/api/audio/{plan_id}/{beat_id}" in paths
+
+    # One path, two verbs: POST is the upload, PATCH is the correction.
+    verbs = set()
+    for route in client.app.routes:
+        if getattr(route, "path", "") == "/api/plan/{plan_id}/voice/{beat_id}":
+            verbs |= set(getattr(route, "methods", []))
+    assert {"POST", "PATCH"} <= verbs, verbs
+    assert 'method: "PATCH"' in page, "the panel never sends the correction"
 
 
 def test_narration_too_long_sends_you_back_to_the_gate_not_to_a_dead_end(
@@ -713,3 +720,284 @@ def test_narration_too_long_sends_you_back_to_the_gate_not_to_a_dead_end(
     board = client.get("/api/plan/p1/voice").json()
     assert board["awaiting_review"] is True
     assert board["in_gate"] is False
+
+
+# --- correcting a word and saying it again ----------------------------------
+#
+# Why this exists: Piper mispronounces a word, and the fix is one character
+# in that beat's Devanagari. Before this, the only way to change it was to
+# go back to the script screen and re-produce, which re-speaks every beat
+# and throws away whatever else had been settled at this gate.
+
+
+def _fake_engine(monkeypatch, settings, *, seconds_per_word=0.5):
+    """Stand in for Piper with an ffmpeg tone whose length tracks the text.
+
+    Honours its argument, which is the whole point: a fixed-length stub
+    could not tell "the beat was re-spoken with the new words" from "the
+    beat was never re-spoken at all". The real engine is exercised by
+    ``test_the_real_engine_speaks_a_corrected_beat`` below.
+    """
+    import engine.media.voice as voice_mod
+
+    said: list[tuple[str, str]] = []
+
+    def fake(text, target, _settings):
+        said.append((str(target), text))
+        words = max(len(text.split()), 1)
+        _tone(settings, Path(target), seconds=words * seconds_per_word)
+        return 0
+
+    monkeypatch.setattr(voice_mod, "synth_beat_piper", fake)
+    return said
+
+
+def test_correcting_a_word_re_speaks_only_that_beat(client, monkeypatch):
+    said = _fake_engine(monkeypatch, _settings(client))
+    _seed(client, beats=2, seconds=4.0)
+
+    response = client.patch("/api/plan/p1/voice/b0",
+                            json={"voice_text": "मेरी फीस माफ़ करदो"})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["respoken"] is True
+    assert body["engine"] == "piper"
+    assert len(said) == 1, "more than one beat was re-spoken"
+    assert "फीस" in said[0][1]
+
+    plan = _store(client).get_plan("p1")
+    assert plan.script.beats[0].voice_text == "मेरी फीस माफ़ करदो"
+    # The other beat was not touched: same audio, same measurement.
+    assert plan.script.beats[1].measured_seconds == pytest.approx(4.0,
+                                                                 abs=0.2)
+
+
+def test_the_corrected_beat_is_re_measured_and_re_timed(client, monkeypatch):
+    _fake_engine(monkeypatch, _settings(client), seconds_per_word=1.0)
+    _seed(client, beats=2, seconds=4.0)
+
+    body = client.patch("/api/plan/p1/voice/b0",
+                        json={"voice_text": "एक दो तीन चार पाँच छह"}).json()
+
+    assert body["seconds"] == pytest.approx(6.0, abs=0.3)
+    assert body["was_seconds"] == pytest.approx(4.0, abs=0.2)
+    assert body["narration_seconds"] == pytest.approx(10.0, abs=0.4)
+
+    beat = _store(client).get_plan("p1").script.beats[0]
+    assert beat.words
+    assert beat.words[-1].end == pytest.approx(beat.measured_seconds,
+                                               abs=0.05)
+
+
+def test_the_audio_is_overwritten_rather_than_piling_up(client, monkeypatch):
+    """A corrected beat replaces its take. A second file nothing reads is
+    how a work dir turns into a graveyard."""
+    _fake_engine(monkeypatch, _settings(client))
+    plan = _seed(client, beats=2, seconds=4.0)
+    before = Path(plan.script.beats[0].audio_path)
+
+    client.patch("/api/plan/p1/voice/b0", json={"voice_text": "नया पाठ"})
+
+    after = Path(_store(client).get_plan("p1").script.beats[0].audio_path)
+    assert after == before
+
+
+def test_fixing_only_the_pronunciation_leaves_the_burned_caption_alone(
+        client, monkeypatch):
+    """The point of the two fields being separate: a phonetic respelling
+    for the voice, the real spelling for the eye."""
+    _fake_engine(monkeypatch, _settings(client))
+    plan = _seed(client, beats=2, seconds=4.0)
+    burned = plan.script.beats[0].caption_text
+
+    client.patch("/api/plan/p1/voice/b0", json={"voice_text": "फीस माफ़"})
+
+    assert _store(client).get_plan("p1").script.beats[0].caption_text \
+        == burned
+
+
+def test_changing_only_the_caption_does_not_re_speak_anything(
+        client, monkeypatch):
+    """The audio did not change, so there is nothing to say again — only
+    the word timings to redo against it."""
+    said = _fake_engine(monkeypatch, _settings(client))
+    _seed(client, beats=2, seconds=4.0)
+
+    body = client.patch("/api/plan/p1/voice/b0",
+                        json={"caption_text": "meri fees maaf kardo"}).json()
+
+    assert body["respoken"] is False
+    assert said == [], "the engine ran for a caption-only edit"
+    assert body["seconds"] == pytest.approx(4.0, abs=0.2)
+
+    beat = _store(client).get_plan("p1").script.beats[0]
+    assert beat.caption_text == "meri fees maaf kardo"
+    assert beat.voice_engine == "piper"
+    assert [w.word for w in beat.words] == ["meri", "fees", "maaf", "kardo"]
+
+
+def test_latin_script_in_the_voice_line_is_refused_with_the_words(
+        client, monkeypatch):
+    """The same rule the script gate enforces, through the same function:
+    Piper mispronounces Latin script whoever typed it."""
+    said = _fake_engine(monkeypatch, _settings(client))
+    _seed(client, beats=2, seconds=4.0)
+
+    response = client.patch("/api/plan/p1/voice/b0",
+                            json={"voice_text": "meri fees maaf kardo"})
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "meri" in detail and "fees" in detail
+    assert said == [], "a refused edit still ran the engine"
+
+
+def test_the_refused_edit_leaves_the_beat_exactly_as_it_was(
+        client, monkeypatch):
+    _fake_engine(monkeypatch, _settings(client))
+    plan = _seed(client, beats=2, seconds=4.0)
+    before = plan.script.beats[0].voice_text
+
+    client.patch("/api/plan/p1/voice/b0", json={"voice_text": "hello ji"})
+
+    assert _store(client).get_plan("p1").script.beats[0].voice_text == before
+
+
+def test_the_devanagari_rule_is_shared_not_copied():
+    """A second copy of "what counts as a violation" drifting from the
+    first is the failure this identity check exists to prevent."""
+    from engine.agents import latin_words as agents_rule
+    from engine.app import latin_words as app_rule
+
+    assert app_rule is agents_rule
+
+
+def test_an_empty_line_is_refused(client, monkeypatch):
+    _fake_engine(monkeypatch, _settings(client))
+    _seed(client, beats=2, seconds=4.0)
+    assert client.patch("/api/plan/p1/voice/b0",
+                        json={"voice_text": "   "}).status_code == 400
+
+
+def test_an_edit_that_changes_nothing_is_refused(client, monkeypatch):
+    _fake_engine(monkeypatch, _settings(client))
+    _seed(client, beats=2, seconds=4.0)
+    assert client.patch("/api/plan/p1/voice/b0", json={}).status_code == 400
+
+
+def test_correcting_is_refused_unless_the_plan_is_at_the_gate(
+        client, monkeypatch):
+    _fake_engine(monkeypatch, _settings(client))
+    _seed(client, status="approved")
+    assert client.patch("/api/plan/p1/voice/b0",
+                        json={"voice_text": "नया"}).status_code == 409
+
+
+def test_correcting_a_beat_that_does_not_exist_is_404(client, monkeypatch):
+    _fake_engine(monkeypatch, _settings(client))
+    _seed(client)
+    assert client.patch("/api/plan/p1/voice/nope",
+                        json={"voice_text": "नया"}).status_code == 404
+
+
+def test_re_speaking_replaces_narration_that_was_uploaded(
+        client, monkeypatch, tmp_path):
+    """Correcting the words means Piper says them, so an upload on that
+    beat is superseded. The engine flips back, visibly."""
+    settings = _settings(client)
+    _seed(client, beats=2, seconds=4.0)
+    assert _upload(client, "b0",
+                   _tone(settings, tmp_path / "mine.wav",
+                         seconds=6.0)).status_code == 200
+    assert _store(client).get_plan("p1").script.beats[0].voice_engine \
+        == "upload"
+
+    _fake_engine(monkeypatch, settings)
+    body = client.patch("/api/plan/p1/voice/b0",
+                        json={"voice_text": "फीस माफ़"}).json()
+
+    assert body["engine"] == "piper"
+    assert body["respoken"] is True
+    assert _store(client).get_plan("p1").script.beats[0].voice_engine \
+        == "piper"
+
+
+def test_the_real_engine_speaks_a_corrected_beat(client):
+    """One test with nothing stubbed, so the wiring is proven for real and
+    not only against a stand-in."""
+    from engine.media.piper_voice import PiperUnavailable
+
+    _seed(client, beats=2, seconds=4.0)
+    try:
+        response = client.patch(
+            "/api/plan/p1/voice/b0",
+            json={"voice_text": "समुद्र के नीचे एक पुराना शहर मिला है"})
+    except PiperUnavailable:            # pragma: no cover - env guard
+        pytest.skip("no voice engine is installed in this environment")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["respoken"] is True
+    assert body["seconds"] > 0.5
+
+    beat = _store(client).get_plan("p1").script.beats[0]
+    assert Path(beat.audio_path).is_file()
+    assert beat.measured_seconds == pytest.approx(body["seconds"], abs=0.01)
+
+
+def test_a_failed_re_speak_does_not_destroy_the_take_it_replaces(
+        client, monkeypatch):
+    """The loop this feature is for is: try a spelling, listen, try
+    another. So a failed attempt has to leave the beat exactly as
+    playable as it was.
+
+    Piper writes its mp3 straight onto the target with ``-y``. That was
+    harmless while synthesis only ever ran on a beat with nothing there
+    yet; re-speaking runs it on a beat that already has a take, and a
+    half-written file over a good one is a beat that can no longer be
+    played, re-spoken from, or rendered.
+    """
+    import engine.media.voice as voice_mod
+
+    plan = _seed(client, beats=2, seconds=4.0)
+    audio = Path(plan.script.beats[0].audio_path)
+    before = audio.read_bytes()
+    assert before
+
+    def writes_then_dies(text, target, _settings):
+        Path(target).write_bytes(b"\x00" * 64)   # a truncated take
+        raise OSError("the engine died halfway through")
+
+    monkeypatch.setattr(voice_mod, "synth_beat_piper", writes_then_dies)
+    monkeypatch.setattr(voice_mod, "synth_beat_edge", writes_then_dies)
+
+    response = client.patch("/api/plan/p1/voice/b0",
+                            json={"voice_text": "नया पाठ"})
+    assert response.status_code == 503, response.text
+
+    assert audio.read_bytes() == before, \
+        "a failed re-speak overwrote the take it was replacing"
+    beat = _store(client).get_plan("p1").script.beats[0]
+    assert beat.measured_seconds == pytest.approx(4.0, abs=0.2)
+    assert beat.voice_text != "नया पाठ", \
+        "the text was persisted although nothing said it"
+
+
+def test_a_failed_re_speak_leaves_no_scratch_file_behind(
+        client, monkeypatch):
+    import engine.media.voice as voice_mod
+
+    plan = _seed(client, beats=2, seconds=4.0)
+    audio_dir = Path(plan.script.beats[0].audio_path).parent
+    before = {p.name for p in audio_dir.iterdir()}
+
+    def dies(text, target, _settings):
+        Path(target).write_bytes(b"\x00" * 64)
+        raise OSError("nope")
+
+    monkeypatch.setattr(voice_mod, "synth_beat_piper", dies)
+    monkeypatch.setattr(voice_mod, "synth_beat_edge", dies)
+    client.patch("/api/plan/p1/voice/b0", json={"voice_text": "नया"})
+
+    assert {p.name for p in audio_dir.iterdir()} == before

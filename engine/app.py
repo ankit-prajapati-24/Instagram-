@@ -17,6 +17,13 @@ Four routes matter beyond CRUD, and two of them are human gates:
                                         stage uses — how many clips a beat
                                         gets, how long each one is — is
                                         derived from the measured narration.
+  ``PATCH /api/plan/{id}/voice/{beat}`` correct one beat's words and say
+                                        that beat again. Sits at gate two
+                                        because it is the last point at
+                                        which wording is free to change:
+                                        after CLIPS the footage has been
+                                        cut to the length the old wording
+                                        measured.
   ``POST /api/plan/{id}/clips/approve``  gate three. The plan sits in
                                         ``awaiting_clip_review`` until this
                                         releases it, and only this route can
@@ -48,6 +55,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from engine.agents import latin_words
 from engine.assembly.render import VIDEO_SUFFIXES
 from engine.config import (Settings, beat_count, beat_word_range,
                            speech_rate, spoken_seconds, word_budget,
@@ -58,7 +66,8 @@ from engine.gates.qc import pre_render_range
 from engine.media.align import build_aligner
 from engine.media.voice import (MIN_UPLOAD_SECONDS, UPLOAD_ENGINE,
                                 UploadRejected, apply_beat_audio,
-                                ingest_narration)
+                                beat_audio_path, ingest_narration,
+                                speak_beat)
 from engine.omniroute import OmniRouteClient
 from engine.pipeline import (BudgetError, GateError, ManualScriptError,
                              PipelineEvent, Stage, budget_report,
@@ -465,6 +474,19 @@ class ReleaseRequest(BaseModel):
     review is a decision, not a form."""
 
     captions_source: str | None = None
+
+
+class BeatTextEdit(BaseModel):
+    """A correction to one beat's words, made at the voice gate.
+
+    Both optional and both independent. Sending only ``voice_text`` fixes
+    a mispronunciation without touching what the viewer reads; sending
+    only ``caption_text`` fixes the burned text without saying anything
+    again. Omitting both is refused rather than read as "say it again".
+    """
+
+    voice_text: str | None = None
+    caption_text: str | None = None
 
 
 class VoiceReleaseRequest(ReleaseRequest):
@@ -1136,6 +1158,186 @@ def create_app(db_path: str | Path | None = None,
             # The totals, recomputed. Replacing one beat moves the whole
             # video's length, and the number the board was showing a
             # moment ago is now wrong.
+            "narration_seconds": round(narration, 2),
+            "in_gate": gate_min <= narration <= gate_max,
+            "in_window": (settings.duration_min <= narration
+                          <= settings.duration_max),
+            "audio": f"/api/audio/{plan_id}/{beat_id}",
+        }
+
+    @app.patch("/api/plan/{plan_id}/voice/{beat_id}")
+    def respeak_beat(plan_id: str, beat_id: str,
+                     request: BeatTextEdit) -> dict:
+        """Correct one beat's words and say it again — only that beat.
+
+        The case this is for is small and constant: the voice mispronounces
+        a word, and the fix is a character or two in that beat's
+        Devanagari. Before this the only way to change it was to go back to
+        the script screen and produce again, which re-speaks all ten beats
+        and discards everything else settled at this gate.
+
+        ``voice_text`` and ``caption_text`` move independently, and that is
+        the point rather than a convenience. The voice line is what Piper
+        reads; the caption line is what gets burned on screen. A
+        mispronunciation is fixed by respelling the word *phonetically in
+        the voice line only* — the viewer keeps seeing the real spelling
+        and the listener hears the right sound.
+
+        A caption-only edit does not re-speak anything. The audio did not
+        change, so there is nothing to say again; only the word timings
+        have to be laid out against it afresh.
+
+        PATCH rather than POST because POST on this same path is the
+        upload. One resource, two verbs, no third URL to keep in step.
+        """
+        plan = store.get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(404, "no such plan")
+        status = store.plan_status(plan_id)
+        if status != VOICE_REVIEW_STATUS:
+            raise HTTPException(
+                409, f"plan is '{status}', not awaiting voice review. A "
+                     f"beat's words are correctable at that gate, which is "
+                     f"the one moment nothing has been derived from them "
+                     f"yet — after CLIPS the footage has already been cut "
+                     f"to the length the old wording measured.")
+
+        index = next((i for i, b in enumerate(plan.script.beats)
+                      if b.beat_id == beat_id), None)
+        if index is None:
+            raise HTTPException(404, f"no such beat: {beat_id}")
+        beat = plan.script.beats[index]
+
+        voice_text = request.voice_text
+        caption_text = request.caption_text
+        if voice_text is None and caption_text is None:
+            raise HTTPException(
+                400, "send voice_text, caption_text, or both. An empty "
+                     "edit is refused rather than treated as a request to "
+                     "say the same thing again.")
+
+        if voice_text is not None:
+            voice_text = voice_text.strip()
+            if not voice_text:
+                raise HTTPException(
+                    400, "a beat has to say something. To drop a beat, "
+                         "edit the script and produce again — a beat with "
+                         "no words still owns a span of the timeline.")
+            # The same rule the script gate enforces, through the same
+            # function rather than a second copy of the regex: Piper
+            # mispronounces Latin script whoever typed it, and a rule that
+            # exists twice is a rule that will disagree with itself.
+            latin = latin_words(voice_text)
+            if latin:
+                raise HTTPException(
+                    400, f"the voice line has to be Devanagari, and this "
+                         f"one still has Latin script in it: "
+                         f"{', '.join(latin[:8])}. That is not a style "
+                         f"rule — the voice reads Latin letters as English "
+                         f"and mispronounces them. Write the sound in "
+                         f"Devanagari; the Roman spelling belongs in the "
+                         f"caption line, which is burned on screen and "
+                         f"never spoken.")
+
+        if caption_text is not None:
+            caption_text = caption_text.strip()
+            if not caption_text:
+                raise HTTPException(
+                    400, "the caption line is what gets burned on screen; "
+                         "it cannot be empty.")
+
+        was_seconds = beat.seconds()
+        # model_validate, not model_copy: pydantic v2 skips validation on
+        # model_copy, which is how an invalid motion once got persisted and
+        # made every later read of that plan a 500.
+        beat = Beat.model_validate({
+            **beat.model_dump(),
+            "voice_text": voice_text if voice_text is not None
+            else beat.voice_text,
+            "caption_text": caption_text if caption_text is not None
+            else beat.caption_text,
+        })
+        plan.script.beats[index] = beat
+
+        respeak = voice_text is not None
+        if respeak:
+            # The path synthesis already uses, through the one definition
+            # of it, so a corrected beat overwrites the take it replaces
+            # instead of leaving a second file nothing reads. Built from
+            # the stored ids, then contained: the ids are generated, but
+            # one arriving from a model's output must still not shape a
+            # path.
+            target = beat_audio_path(plan.plan_id, beat.beat_id,
+                                     settings.work_dir)
+            if not _under_roots(target, [Path(settings.work_dir)]):
+                raise HTTPException(500, "audio path escaped work_dir")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # Spoken onto a scratch path and moved into place only once it
+            # is whole. Piper writes its mp3 straight onto the target with
+            # ``-y``, which was harmless while synthesis only ever ran on a
+            # beat with nothing there yet — re-speaking runs it on a beat
+            # that already has a take, and the loop this feature exists for
+            # is "try a spelling, listen, try another". A half-written file
+            # over a good one is a beat that can no longer be played,
+            # re-spoken from, or rendered.
+            scratch = target.with_name(target.stem + ".respeak.mp3")
+            try:
+                engine, spans, _note = speak_beat(beat.voice_text, scratch,
+                                                  settings)
+                if not scratch.is_file() or scratch.stat().st_size == 0:
+                    raise RuntimeError("the engine wrote nothing")
+                os.replace(scratch, target)
+            except HTTPException:
+                raise
+            except Exception as exc:
+                # Every failure of this block means one thing to whoever
+                # pressed the button — it could not be said — so they all
+                # get the same answer rather than a 500 that reads like a
+                # bug in the panel. The beat is untouched: the edit is
+                # only in memory and has not been saved.
+                raise HTTPException(
+                    503, f"the voice could not say that: "
+                         f"{type(exc).__name__}: {exc}. The beat is "
+                         f"unchanged — its previous take is still there.")
+            finally:
+                scratch.unlink(missing_ok=True)
+            source = target
+        else:
+            # Nothing was said again, so the beat keeps the audio it has —
+            # including narration the user uploaded. Only the caption
+            # timings are laid out against it afresh.
+            if not beat.audio_path:
+                raise HTTPException(
+                    409, f"beat {beat_id!r} has no audio to re-time. Send "
+                         f"voice_text to have it spoken.")
+            source = Path(beat.audio_path)
+            # Carried through unchanged, ``None`` included: nothing spoke,
+            # so nothing about which engine spoke has changed. Coercing a
+            # missing engine to "" here would turn "not spoken" into a
+            # engine name of its own on the board and in the QC tally.
+            engine, spans = beat.voice_engine, None
+
+        apply_beat_audio(beat, source, settings, engine=engine,
+                         aligner=build_aligner(settings))
+        if spans is not None:
+            # ``apply_beat_audio`` clears this because a swapped file is
+            # not what the old engine described. Here it is: a fresh count
+            # from the engine that just spoke.
+            beat.spoken_words = spans
+        store.save_plan(plan, status=VOICE_REVIEW_STATUS)
+
+        narration = plan.duration()
+        gate_min, gate_max = pre_render_range(settings.duration_min,
+                                              settings.duration_max)
+        return {
+            "plan_id": plan_id, "beat_id": beat_id,
+            "respoken": respeak,
+            "engine": beat.voice_engine,
+            "voice_text": beat.voice_text,
+            "caption_text": beat.caption_text,
+            "seconds": round(beat.seconds(), 2),
+            "was_seconds": round(was_seconds, 2),
+            "word_timing_source": beat.word_timing_source,
             "narration_seconds": round(narration, 2),
             "in_gate": gate_min <= narration <= gate_max,
             "in_window": (settings.duration_min <= narration

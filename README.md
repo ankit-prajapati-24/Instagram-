@@ -58,7 +58,7 @@ whole pipeline work before spending anything. To get real scripts, follow
 python scripts/verify_e2e.py      # full pipeline, fake brain, real everything else
 python scripts/probe_omniroute.py # which gateway endpoints actually answer
 python scripts/reset_cooldown.py  # what the dedup gate is currently blocking
-python -m pytest tests/ -q        # 598 tests
+python -m pytest tests/ -q        # 620 tests
 ```
 
 `verify_e2e.py` exits non-zero unless it produced a playable 1080x1920 MP4 with
@@ -78,7 +78,7 @@ Measured on this machine, 2026-09-17/18:
 | Web panel | full flow driven end to end, including an edit to the hook beat surviving approval. No console errors, no mobile overflow |
 | Stock footage | 12/12 beats matched real Pexels footage on a real run, zero fallbacks; the matcher now downloads the smallest file that still covers 1080x1920 instead of the largest available (was up to 1.6 GB of 4K source for one video) |
 | Colour grade cost | +80.1s on a 49.8s render (143.0s ungraded → 223.1s graded); `RAHASYA_VIDEO_GRAIN=0` buys back most of that (187.5s) because grain, not the colour work, is what defeats inter-frame compression |
-| 598 tests | `pytest tests/ -q` |
+| 620 tests | `pytest tests/ -q` |
 
 | Not verified | Why |
 |---|---|

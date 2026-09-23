@@ -359,6 +359,51 @@ def synth_beat_piper(beat_text: str, target: Path, settings) -> int:
     return 0
 
 
+def speak_beat(text: str, target: str | Path, settings, *,
+               engine: str | None = None) -> tuple[str, int, str]:
+    """Say one beat. Returns ``(engine_used, spans, note)``.
+
+    The engine choice and the Piper-to-edge fallback live here rather than
+    inside ``synth_plan``'s loop because there are now two callers: the
+    whole plan, and one beat being re-spoken after a human corrected a
+    word at the voice gate. Two copies of "which engine, and what happens
+    when it is missing" is exactly the drift this repo keeps paying for.
+
+    ``engine`` overrides ``settings.voice_engine``, which is how the plan
+    loop carries a fallback forward: once Piper has failed it passes
+    ``"edge"`` for the remaining beats instead of retrying a broken
+    install nine more times.
+    """
+    engine = (engine or settings.voice_engine or "piper").strip().lower()
+    target = Path(target)
+
+    if engine != "piper":
+        return "edge", synth_beat_edge(text, target, settings), "edge"
+
+    from engine.media.piper_voice import PiperUnavailable
+    try:
+        return "piper", synth_beat_piper(text, target, settings), "piper"
+    except (PiperUnavailable, OSError) as exc:
+        # Say so loudly. This was silent, and a run that quietly used
+        # edge-tts looked identical to one that used Piper until someone
+        # noticed the voice had changed.
+        print(f"[voice] Piper unavailable, falling back to edge-tts: {exc}",
+              file=sys.stderr, flush=True)
+        return ("edge", synth_beat_edge(text, target, settings),
+                f"edge (piper unavailable: {str(exc)[:60]})")
+
+
+def beat_audio_path(plan_id: str, beat_id: str,
+                    work_dir: str | Path) -> Path:
+    """Where synthesis writes one beat. The single definition of it.
+
+    ``synth_plan`` built this inline, and the re-speak route needs the
+    identical path so a corrected beat overwrites the take it replaces
+    rather than accumulating a second file nothing reads.
+    """
+    return Path(work_dir) / plan_id / "audio" / f"{beat_id}.mp3"
+
+
 def synth_plan(plan: ReelPlan, work_dir: str | Path, settings,
                progress=None) -> dict[str, int]:
     """Fill audio_path, measured_seconds and words for every beat.
@@ -375,8 +420,8 @@ def synth_plan(plan: ReelPlan, work_dir: str | Path, settings,
     "interpolated": 1}``. Same reasoning — the fallback here is silent by
     design, so the run has to say what it actually did.
     """
-    work_dir = Path(work_dir) / plan.plan_id / "audio"
-    work_dir.mkdir(parents=True, exist_ok=True)
+    root = Path(work_dir)
+    (root / plan.plan_id / "audio").mkdir(parents=True, exist_ok=True)
 
     engine = (settings.voice_engine or "piper").strip().lower()
     # One aligner for the whole plan, or None when RAHASYA_ALIGN is off.
@@ -387,30 +432,18 @@ def synth_plan(plan: ReelPlan, work_dir: str | Path, settings,
     sources: dict[str, int] = {}
 
     for index, beat in enumerate(plan.script.beats):
-        target = work_dir / f"{beat.beat_id}.mp3"
+        target = beat_audio_path(plan.plan_id, beat.beat_id, root)
 
-        if engine == "piper":
-            from engine.media.piper_voice import PiperUnavailable
-            try:
-                spoken = synth_beat_piper(beat.voice_text, target, settings)
-                used = "piper"
-            except (PiperUnavailable, OSError) as exc:
-                # Fall back for the rest of the plan too: if Piper is broken
-                # for one beat it is broken for all of them, and retrying it
-                # per beat would just be slow.
-                #
-                # Say so loudly. This was silent, and a run that quietly used
-                # edge-tts looked identical to one that used Piper until
-                # someone noticed the voice had changed.
-                print(f"[voice] Piper unavailable, falling back to edge-tts "
-                      f"for the rest of this plan: {exc}",
-                      file=sys.stderr, flush=True)
-                engine = "edge"
-                spoken = synth_beat_edge(beat.voice_text, target, settings)
-                used = f"edge (piper unavailable: {str(exc)[:60]})"
-        else:
-            spoken = synth_beat_edge(beat.voice_text, target, settings)
-            used = "edge"
+        was = engine
+        engine, spoken, used = speak_beat(beat.voice_text, target, settings,
+                                          engine=engine)
+        if engine != was:
+            # Carried forward deliberately: if Piper is broken for one beat
+            # it is broken for all of them, and retrying it per beat would
+            # only be slow. Said out loud for the same reason the fallback
+            # itself is — it used to be silent.
+            print(f"[voice] the rest of this plan will use {engine}",
+                  file=sys.stderr, flush=True)
 
         beat.audio_path = str(target)
         beat.voice_engine = engine
