@@ -645,7 +645,7 @@ def ensure_baked(slug: str, *, root: Path, size: int, fps: int) -> None:
     than a failure to swallow.
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-    from engine.assembly.stickers import STYLES
+    from engine.assembly.sticker_art import STYLES
     from scripts.bake_stickers import bake_one
 
     root = Path(root)
