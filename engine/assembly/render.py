@@ -523,7 +523,8 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
 def build_command(plan: ReelPlan, settings, out_path: Path, *,
                   ass_path: str | None = None,
                   music_path: str | None = None,
-                  report: dict | None = None
+                  report: dict | None = None,
+                  choices: dict[str, str] | None = None
                   ) -> tuple[list[str], float, str | None]:
     """Assemble the ffmpeg argv. Split out so it can be asserted on.
 
@@ -570,7 +571,7 @@ def build_command(plan: ReelPlan, settings, out_path: Path, *,
     # Sticker inputs go LAST, after the music. `audio_offset` and
     # `music_index` are positional into this argv, and appending here is
     # what keeps both of them the numbers they already were.
-    prepared = stickers_mod.prepare(plan, settings)
+    prepared = stickers_mod.prepare(plan, settings, choices=choices)
     if report is not None:
         report["attribution"] = stickers_mod.attribution_for(prepared)
     sticker_offset = (len(inputs) + len(beats)
@@ -617,12 +618,14 @@ def build_command(plan: ReelPlan, settings, out_path: Path, *,
 
 def render(plan: ReelPlan, settings, out_path: str | Path, *,
            ass_path: str | None = None, music_path: str | None = None,
-           progress=None, report: dict | None = None) -> str:
+           progress=None, report: dict | None = None,
+           choices: dict[str, str] | None = None) -> str:
     """Produce the MP4. Returns the output path.
 
     ``report`` is passed straight to ``build_command``; see there. It is how
     a caller learns what this render actually put on screen without asking
-    the filesystem a second time afterwards.
+    the filesystem a second time afterwards. ``choices`` is passed straight
+    through too -- the trigger-to-slug map the panel recorded, if anything.
     """
     beats = plan.script.beats
     # A beat needs some visual to render, but which kind no longer matters:
@@ -642,7 +645,7 @@ def render(plan: ReelPlan, settings, out_path: str | Path, *,
 
     command, total, run_cwd = build_command(
         plan, settings, out_path, ass_path=ass_path, music_path=music_path,
-        report=report)
+        report=report, choices=choices)
 
     process = subprocess.Popen(command, stdout=subprocess.DEVNULL,
                                stderr=subprocess.PIPE, text=True,

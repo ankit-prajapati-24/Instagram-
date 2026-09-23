@@ -57,6 +57,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from engine.agents import latin_words
+from engine.assembly import sticker_catalog
+from engine.assembly import sticker_choices as sticker_choices_mod
+from engine.assembly import stickers as stickers_mod
 from engine.assembly.render import VIDEO_SUFFIXES
 from engine.config import (Settings, beat_count, beat_word_range,
                            speech_rate, spoken_seconds, word_budget,
@@ -595,6 +598,23 @@ class VoiceReleaseRequest(ReleaseRequest):
 
     review_clips: bool = False
     use_fake: bool = False
+
+
+class StickerChoice(BaseModel):
+    """What the sticker-choose route accepts: one catalogue slug.
+
+    Module level like every other request model here, not local to the
+    route -- this file has ``from __future__ import annotations`` at the
+    top, so every parameter annotation is a string until something resolves
+    it. FastAPI resolves them with ``get_type_hints``, which reads the
+    function's ``__globals__``; a class defined inside ``create_app`` lives
+    in that function's locals instead, so the lookup fails and FastAPI
+    quietly falls back to treating ``body`` as an unrecognised query
+    parameter rather than the request body. Confirmed on this branch: the
+    route 422s with "Field required" on a body that was actually sent.
+    """
+
+    slug: str = Field(min_length=1, max_length=120)
 
 
 def create_app(db_path: str | Path | None = None,
@@ -1907,6 +1927,107 @@ def create_app(db_path: str | Path | None = None,
             "kind": kind, "bytes": written, "media_type": sniffed,
             "thumb": f"/api/frame/{plan_id}/{beat_id}?slot={slot}",
         }
+
+    # -- the sticker picker -------------------------------------------------
+    # Same shape as the clip picker just above: candidates, a choose action,
+    # a gate. Here the gate is the catalogue check in choose_sticker, not a
+    # plan status -- a chosen icon does not block anything downstream, so
+    # there is no review stage to hold it at.
+    @app.get("/api/plan/{plan_id}/stickers")
+    def sticker_candidates(plan_id: str) -> dict:
+        """Every sticker that fired, with icons that could replace it.
+
+        Per fired cue, not per trigger: a trigger that did not fire has
+        nothing to show, and showing it anyway would invite choosing art for
+        a sticker this reel will never render.
+        """
+        plan = store.get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(404, "no such plan")
+
+        cache = Path(settings.work_dir) / "_lordicon"
+        note = ""
+        slugs: tuple[str, ...] = ()
+        try:
+            sticker_catalog.refresh(cache)
+            slugs = sticker_catalog.load(cache)
+        except sticker_catalog.CatalogUnavailable as exc:
+            # A picker that cannot list icons is an inconvenience. The
+            # committed art still renders, so this is a note, not an error.
+            note = f"catalogue unavailable: {exc}"
+
+        chosen = store.sticker_choices(plan_id)
+        triggers = {t.name: t for t in stickers_mod.load_triggers()}
+
+        rows = []
+        for cue in stickers_mod.find_cues(plan,
+                                          cap=int(settings.sticker_max)):
+            trigger = triggers.get(cue.name)
+            seen: list[str] = []
+            for term in (trigger.search if trigger else ()):
+                for slug in sticker_catalog.search(term, slugs):
+                    if slug not in seen:
+                        seen.append(slug)
+            rows.append({
+                "trigger": cue.name,
+                "word": cue.word,
+                "start": round(cue.start, 2),
+                "beat_id": plan.script.beats[cue.beat_index].beat_id,
+                "chosen": chosen.get(cue.name),
+                "candidates": [
+                    {"slug": slug,
+                     "preview": f"/api/sticker-preview/{slug}"}
+                    for slug in seen[:8]],
+                "choose": f"/api/plan/{plan_id}/sticker/{cue.name}",
+            })
+        return {"plan_id": plan_id, "rows": rows, "note": note}
+
+    @app.get("/api/sticker-preview/{slug}")
+    def sticker_preview(slug: str) -> FileResponse:
+        """One matted frame of an icon, for the picker to show."""
+        cache = Path(settings.work_dir) / "_lordicon"
+        slugs = sticker_catalog.load(cache)
+        if slug not in slugs:
+            raise HTTPException(404, "not a catalogue slug")
+        try:
+            png = sticker_choices_mod.preview_png(slug, root=cache)
+        except Exception as exc:
+            raise HTTPException(502, f"preview failed: {exc}") from exc
+        return FileResponse(png, media_type="image/png")
+
+    @app.post("/api/plan/{plan_id}/sticker/{trigger}")
+    def choose_sticker(plan_id: str, trigger: str,
+                       body: StickerChoice) -> dict:
+        """Bake one icon for this reel and remember it.
+
+        The slug is checked against the catalogue before anything is
+        fetched. Without that check this route is an arbitrary URL fetcher
+        with the panel's network access.
+        """
+        if store.get_plan(plan_id) is None:
+            raise HTTPException(404, "no such plan")
+
+        cache = Path(settings.work_dir) / "_lordicon"
+        try:
+            sticker_catalog.refresh(cache)
+        except sticker_catalog.CatalogUnavailable as exc:
+            raise HTTPException(503, f"catalogue unavailable: {exc}") from exc
+        if body.slug not in sticker_catalog.load(cache):
+            raise HTTPException(400, "not a catalogue slug")
+
+        size = stickers_mod.sticker_size(settings.width,
+                                         settings.sticker_scale)
+        try:
+            sticker_choices_mod.ensure_baked(
+                body.slug, root=cache, size=size, fps=int(settings.fps))
+        except ValueError as exc:
+            # The icon has a pocket of trapped white and would render with a
+            # blob in it. Refusing keeps whatever was chosen before.
+            raise HTTPException(422, str(exc)) from exc
+
+        store.choose_sticker(plan_id, trigger, body.slug)
+        return {"plan_id": plan_id, "trigger": trigger, "slug": body.slug,
+                "preview": f"/api/sticker-preview/{body.slug}"}
 
     @app.get("/api/plan/{plan_id}/publish")
     def publish_preview(plan_id: str) -> dict:

@@ -166,6 +166,12 @@ class Trigger:
     # source, family, variant, slug -- enough to rebuild the download URL
     # without storing one, so a CDN path change is a one-line fix here.
     art: dict | None = None
+    # Terms the Lordicon catalogue is queried with when the panel offers a
+    # replacement icon. Data, not code, for the same reason ``match`` is:
+    # the trigger's own name is often a bad query (there is no icon called
+    # "witness"), so the query has to be something an editor can fix
+    # without a deploy.
+    search: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -212,7 +218,9 @@ def load_triggers(path: str | Path | None = None) -> list[Trigger]:
             name=entry["name"], emoji=entry["emoji"],
             weight=int(entry.get("weight", 5)),
             match=tuple(a.strip().lower() for a in entry["match"] if a),
-            art=dict(art) if art else None))
+            art=dict(art) if art else None,
+            search=tuple(t.strip().lower()
+                         for t in entry.get("search", []) if t)))
     return triggers
 
 

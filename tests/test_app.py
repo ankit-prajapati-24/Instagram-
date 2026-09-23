@@ -14,6 +14,7 @@ import engine.publish.payloads as payloads
 from engine.app import create_app
 from engine.config import Settings
 from engine.contract import Clip, Metadata
+from engine.media.voice import caption_timings
 from engine.store import Store
 from tests.factories import make_plan
 
@@ -881,3 +882,115 @@ def test_frame_re_extracts_when_the_clip_is_newer_than_the_cached_poster(
     assert second.status_code == 200
     assert poster.stat().st_mtime > stale_mtime, (
         "the poster must be re-extracted when the clip is newer than it")
+
+
+# -- sticker picker: candidates, choose, preview -------------------------
+
+
+def _approved_plan_with_voice(tmp_path, plan_id="p1"):
+    """A client plus a saved, approved plan whose beat 0 carries real word
+    timings.
+
+    Modelled on the ``client`` fixture above, not built from it, because
+    these tests need the ``store`` the app was built with, and the fixture
+    only hands back the client. Beat 0 keeps ``make_plan``'s stock caption
+    ("...kankaal mile"), which fires the ``death`` trigger -- but only once
+    it has ``words`` on it. ``find_cues`` reads ``Beat.words`` for its
+    clock, and those are only ever filled by
+    ``engine.media.voice.caption_timings``, the same call the VOICE stage
+    makes; a plan fresh out of ``make_plan`` has none, and every cue-driven
+    test below would see an empty candidate list without this.
+    """
+    settings = Settings()
+    settings.db_path = tmp_path / "t.db"
+    settings.out_dir = tmp_path / "out"
+    settings.work_dir = tmp_path / "work"
+    settings.omniroute_base = "http://127.0.0.1:1/v1"
+    client = TestClient(create_app(settings=settings))
+    store: Store = client.app.state.store
+
+    plan = make_plan(plan_id=plan_id)
+    beat = plan.script.beats[0]
+    beat.words = caption_timings(beat.caption_text, beat.seconds())
+    store.save_plan(plan, status="approved")
+    return client, store, plan_id
+
+
+def test_sticker_candidates_lists_one_row_per_fired_cue(tmp_path, monkeypatch):
+    from engine.assembly import sticker_catalog as cat
+    client, store, plan_id = _approved_plan_with_voice(tmp_path)
+
+    monkeypatch.setattr(cat, "refresh", lambda *a, **k: None)
+    monkeypatch.setattr(cat, "load", lambda *a, **k: (
+        "2130-skull-poison", "2841-crashed-skull", "1195-earthworm"))
+
+    body = client.get(f"/api/plan/{plan_id}/stickers").json()
+
+    assert body["rows"], "a cue should have fired"
+    row = body["rows"][0]
+    assert row["trigger"] == "death"
+    assert row["word"]
+    assert row["candidates"]
+    assert all("slug" in c and "preview" in c for c in row["candidates"])
+    assert "1195-earthworm" not in [c["slug"] for c in row["candidates"]]
+
+
+def test_sticker_candidates_say_so_when_the_catalogue_is_unreachable(
+        tmp_path, monkeypatch):
+    from engine.assembly import sticker_catalog as cat
+    client, store, plan_id = _approved_plan_with_voice(tmp_path)
+
+    def boom(*a, **k):
+        raise cat.CatalogUnavailable("no route to host")
+
+    monkeypatch.setattr(cat, "refresh", boom)
+
+    body = client.get(f"/api/plan/{plan_id}/stickers").json()
+    assert body["rows"] == [] or all(
+        r["candidates"] == [] for r in body["rows"])
+    assert "no route to host" in body.get("note", "")
+
+
+def test_choosing_a_slug_outside_the_catalogue_is_refused_without_fetching(
+        tmp_path, monkeypatch):
+    from engine.assembly import sticker_catalog as cat
+    from engine.assembly import sticker_choices as sc
+    client, store, plan_id = _approved_plan_with_voice(tmp_path)
+
+    monkeypatch.setattr(cat, "refresh", lambda *a, **k: None)
+    monkeypatch.setattr(cat, "load", lambda *a, **k: ("2130-skull-poison",))
+
+    fetched = []
+    monkeypatch.setattr(sc, "ensure_baked",
+                        lambda *a, **k: fetched.append(a))
+
+    resp = client.post(f"/api/plan/{plan_id}/sticker/death",
+                       json={"slug": "http://evil.test/x.gif"})
+    assert resp.status_code == 400
+    assert fetched == [], "nothing may be fetched for an unknown slug"
+    assert store.sticker_choices(plan_id) == {}
+
+
+def test_a_refused_icon_leaves_the_previous_choice_alone(tmp_path,
+                                                          monkeypatch):
+    from engine.assembly import sticker_catalog as cat
+    from engine.assembly import sticker_choices as sc
+    client, store, plan_id = _approved_plan_with_voice(tmp_path)
+
+    monkeypatch.setattr(cat, "refresh", lambda *a, **k: None)
+    monkeypatch.setattr(cat, "load", lambda *a, **k: (
+        "2130-skull-poison", "2816-skull-halloween"))
+    monkeypatch.setattr(sc, "ensure_baked", lambda *a, **k: None)
+    client.post(f"/api/plan/{plan_id}/sticker/death",
+                json={"slug": "2130-skull-poison"})
+
+    def holed(*a, **k):
+        raise ValueError("2816-skull-halloween has a pocket of white")
+
+    monkeypatch.setattr(sc, "ensure_baked", holed)
+    resp = client.post(f"/api/plan/{plan_id}/sticker/death",
+                       json={"slug": "2816-skull-halloween"})
+
+    assert resp.status_code == 422
+    assert "pocket of white" in resp.json()["detail"]
+    assert store.sticker_choices(plan_id) == {"death": "2130-skull-poison"}

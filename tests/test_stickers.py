@@ -840,6 +840,33 @@ def test_render_not_just_build_command_hands_back_the_credit(tmp_path,
     assert report["attribution"] == stk.ATTRIBUTION
 
 
+def test_render_passes_a_chosen_slug_all_the_way_down(tmp_path,
+                                                       monkeypatch):
+    """render() -> build_command() -> prepare(choices=...).
+
+    Cutting any link here silently reverts every reel to the committed art
+    while the suite stays green, which is the same hole the `report`
+    hand-off test exists to close.
+    """
+    from engine.assembly import render as render_mod
+
+    seen = {}
+    real = stk.prepare
+
+    def spy(plan, settings, **kwargs):
+        seen["choices"] = kwargs.get("choices")
+        return real(plan, settings, **kwargs)
+
+    monkeypatch.setattr(render_mod.stickers_mod, "prepare", spy)
+
+    settings = _render_settings(tmp_path)
+    plan = _sticker_plan(tmp_path, settings)
+    render_mod.render(plan, settings, tmp_path / "o.mp4",
+                      choices={"death": "2130-skull-poison"})
+
+    assert seen["choices"] == {"death": "2130-skull-poison"}
+
+
 def test_the_sticker_is_actually_visible_at_its_trigger_word(tmp_path):
     """Pixels, not strings.
 

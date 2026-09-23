@@ -772,9 +772,13 @@ def render_stage(plan: ReelPlan, store, settings, *,
     # because by then the settings, the baked art and the code may all have
     # moved on while the MP4 has not.
     used: dict = {}
+    # What the panel picked for this reel, if anything. Read once here
+    # rather than inside the render, because the render takes a plan and
+    # settings and has no store to ask.
+    choices = store.sticker_choices(plan.plan_id)
     try:
         render(plan, settings, out_path, ass_path=ass_path,
-               music_path=music_path, report=used,
+               music_path=music_path, report=used, choices=choices,
                progress=lambda frac: emit(PipelineEvent(
                    Stage.RENDER, "info", f"{frac * 100:.0f}%")))
     except Exception as exc:
