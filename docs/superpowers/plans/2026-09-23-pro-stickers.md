@@ -924,10 +924,13 @@ def test_every_baked_frame_is_rgba_at_the_canvas_size(tmp_path):
 def test_an_icon_with_trapped_white_is_refused_by_name(tmp_path):
     from PIL import ImageDraw
     frames = []
-    for _ in range(4):
+    for i in range(4):
         im = Image.new("RGB", (64, 64), (255, 255, 255))
         d = ImageDraw.Draw(im)
-        d.ellipse((8, 8, 56, 56), fill=(20, 30, 40))
+        # Vary the fill per frame. Pillow merges byte-identical consecutive
+        # frames when writing a GIF, so four identical ones would be saved
+        # as a single frame and this fixture would not be an animation.
+        d.ellipse((8, 8, 56, 56), fill=(20 + i, 30, 40))
         d.ellipse((26, 26, 38, 38), fill=(255, 255, 255))
         frames.append(im)
     gif = tmp_path / "holed.gif"
@@ -976,7 +979,8 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from engine.assembly.sticker_art import (        # noqa: E402
-    STYLES, apply_style, ground, interior_white, matte, resample_indices)
+    STYLES, apply_style, ground, has_trapped_background, interior_white,
+    matte, resample_indices)
 from engine.assembly.stickers import (           # noqa: E402
     HOLD_SECONDS, load_triggers, sticker_canvas, sticker_size)
 
@@ -1019,11 +1023,20 @@ def bake_one(gif: Path, out_dir: Path, *, style: str, size: int,
     # Checked on one frame, not all of them: the trapped white that matters
     # is a fact about how the icon is drawn, and checking every frame of
     # every icon costs seconds for no new information.
-    trapped = interior_white(sources[len(sources) // 2])
-    if trapped:
+    #
+    # A fraction, not a count. A bright highlight inside the art is white and
+    # is meant to be -- 2130-skull-poison has 363 such pixels where the bones
+    # cross, and renders correctly. What must be caught is a *pocket* of
+    # background the fill could not reach, which is an order of magnitude
+    # bigger: 3.15% of the frame against 0.23% for that highlight.
+    probe = sources[len(sources) // 2]
+    if has_trapped_background(probe):
+        trapped = interior_white(probe)
         raise ValueError(
-            f"{gif.name} has {trapped} near-white pixels inside the art, "
-            f"which would render as holes. Choose another icon.")
+            f"{gif.name} has {trapped} near-white pixels inside the art "
+            f"({100 * trapped / (probe.size[0] * probe.size[1]):.2f}% of the "
+            f"frame), which would render as a white blob where transparency "
+            f"belongs. Choose another icon.")
 
     out_dir.mkdir(parents=True, exist_ok=True)
     for old in out_dir.glob("frame-*.png"):
