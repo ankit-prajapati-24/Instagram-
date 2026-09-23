@@ -49,10 +49,13 @@ def refresh(cache_dir: Path, *, force: bool = False) -> Path:
     staged = dest.with_suffix(".part")
     try:
         urllib.request.urlretrieve(SITEMAP_URL, staged)
+        staged.replace(dest)
     except Exception as exc:
+        # Every failure on this path funnels through one named error, and
+        # leaves no half-written stage behind: the next call must find
+        # either a whole cache or none.
         staged.unlink(missing_ok=True)
         raise CatalogUnavailable(str(exc)) from exc
-    staged.replace(dest)
     return dest
 
 
@@ -65,7 +68,13 @@ def load(cache_dir: Path) -> tuple[str, ...]:
     path = Path(cache_dir) / CACHE_NAME
     if not path.exists():
         return ()
-    text = path.read_text(encoding="utf-8")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # A cache we cannot read is the same answer as a cache we do not
+        # have: no candidates. Raising here would take down a panel screen
+        # over a file the next refresh will replace anyway.
+        return ()
     return tuple(dict.fromkeys(_LOC.findall(text)))
 
 
@@ -75,8 +84,9 @@ def search(term: str, slugs: tuple[str, ...], *, limit: int = 8) -> list[str]:
     A slug is ``<number>-<name>``; only the name is searched, because the
     numbers are catalogue ids and matching them surfaces nonsense. An exact
     word in the name beats a prefix, a prefix beats a substring, and among
-    equals a shorter name wins -- so ``globe`` finds ``27-globe`` before
-    ``1547-globe-honeymoon``.
+    equals a name with fewer hyphen-separated words wins -- so ``globe``
+    finds ``27-globe`` before ``1547-globe-honeymoon``, the plain thing
+    before the compound.
 
     Ranking cannot rescue a bad term: the catalogue has no icon named for
     the planet, so ``earth`` finds a worm. That is why the trigger map

@@ -92,3 +92,30 @@ def test_an_unreachable_catalogue_raises_a_named_error(tmp_path, monkeypatch):
     monkeypatch.setattr(cat.urllib.request, "urlretrieve", boom)
     with pytest.raises(cat.CatalogUnavailable, match="no route to host"):
         cat.refresh(tmp_path)
+
+
+def test_a_corrupt_cache_reads_as_no_catalogue(tmp_path):
+    """An unreadable cache is the same answer as a missing one.
+
+    The panel shows no candidates and the committed art still renders;
+    raising here would take a screen down over a file the next refresh
+    replaces anyway.
+    """
+    (tmp_path / cat.CACHE_NAME).write_bytes(b"\xff\xfe not utf-8 at all")
+    assert cat.load(tmp_path) == ()
+
+
+def test_a_failed_move_is_named_and_leaves_no_stage_behind(tmp_path,
+                                                            monkeypatch):
+    def fine(url, dest):
+        Path(dest).write_text("<urlset></urlset>", encoding="utf-8")
+
+    def cannot_move(self, target):
+        raise PermissionError("destination is locked")
+
+    monkeypatch.setattr(cat.urllib.request, "urlretrieve", fine)
+    monkeypatch.setattr(Path, "replace", cannot_move)
+
+    with pytest.raises(cat.CatalogUnavailable, match="locked"):
+        cat.refresh(tmp_path)
+    assert not list(tmp_path.glob("*.part")), "staging file left behind"
