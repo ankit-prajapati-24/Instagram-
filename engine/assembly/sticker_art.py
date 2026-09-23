@@ -194,10 +194,16 @@ _SHADOW = {
 # own edges; dark gets a soft gold glow instead, because an outline on a
 # dark grade reads as a sticker cut out and pasted on. Both sit under the
 # art and over the shadow.
+#
+# The glow is 170, not the "low opacity" the spec first asked for. Measured
+# over a real frame from outputs/NANDA-DEVI-real-run.mp4: at 72 it was
+# invisible against mottled mid-tone footage and at 120 still weak. The glow
+# exists to separate the sticker from dark footage, and below ~150 it does
+# not do that job.
 _HALO = {
     # style: (kind, pixels, colour, opacity)
     "punchy": ("outline", 3, (245, 245, 250), 217),
-    "dark": ("glow", 10, ACCENT, 72),
+    "dark": ("glow", 10, ACCENT, 170),
 }
 
 
