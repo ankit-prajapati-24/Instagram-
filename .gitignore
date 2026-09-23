@@ -10,6 +10,10 @@ assets/audio/
 *.mp3
 *.wav
 *.png
+# Baked sticker art is the exception: scripts/bake_stickers.py's PNG
+# sequences are committed on purpose, so a render needs neither the network
+# nor any Pillow work -- see scripts/bake_stickers.py's module docstring.
+!engine/data/stickers/**/*.png
 engine.db
 engine.db-wal
 engine.db-shm

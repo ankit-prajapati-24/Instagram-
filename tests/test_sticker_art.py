@@ -284,3 +284,71 @@ def test_grounding_leaves_opaque_art_alone_and_blends_only_its_rim():
         for point in opaque:
             assert out.getpixel(point) == art.getpixel(point), \
                 f"{style} changed opaque art at {point}"
+
+
+import json as _json
+
+from scripts.bake_stickers import WINDOW_SECONDS, bake_one, frame_count
+
+
+def test_the_window_is_exactly_the_span_the_chain_lets_through():
+    """The chain trims to HOLD_SECONDS and gates `enable` to the same span,
+    so a bake longer than that would have its tail cut and never finish."""
+    from engine.assembly import stickers as stk
+    assert WINDOW_SECONDS == pytest.approx(stk.HOLD_SECONDS)
+
+
+def test_the_frame_count_follows_the_configured_fps():
+    assert frame_count(30) == 42
+    assert frame_count(60) == 84
+    assert frame_count(24) == 34
+
+
+def test_baking_writes_one_png_per_output_frame_and_a_meta(tmp_path):
+    gif = _write_gif(tmp_path / "src.gif", frames=9, side=64,
+                     colour=(30, 40, 50))
+    out = tmp_path / "baked"
+    written = bake_one(gif, out, style="punchy", size=48, fps=30)
+
+    pngs = sorted(out.glob("frame-*.png"))
+    assert written == len(pngs) == frame_count(30)
+    assert pngs[0].name == "frame-000.png"
+
+    meta = _json.loads((out / "meta.json").read_text(encoding="utf-8"))
+    assert meta["frames"] == frame_count(30)
+    assert meta["fps"] == 30
+    assert meta["style"] == "punchy"
+    assert meta["licence"] == "Animated icons by Lordicon.com"
+
+
+def test_every_baked_frame_is_rgba_at_the_canvas_size(tmp_path):
+    gif = _write_gif(tmp_path / "src.gif", frames=9, side=64)
+    out = tmp_path / "baked"
+    bake_one(gif, out, style="dark", size=48, fps=30)
+
+    from engine.assembly.stickers import sticker_canvas
+    canvas = sticker_canvas(48)
+    for png in sorted(out.glob("frame-*.png")):
+        with Image.open(png) as im:
+            assert im.mode == "RGBA"
+            assert im.size == (canvas, canvas)
+
+
+def test_an_icon_with_trapped_white_is_refused_by_name(tmp_path):
+    from PIL import ImageDraw
+    frames = []
+    for i in range(4):
+        im = Image.new("RGB", (64, 64), (255, 255, 255))
+        d = ImageDraw.Draw(im)
+        # Vary the fill per frame. Pillow merges byte-identical consecutive
+        # frames when writing a GIF, so four identical ones would be saved
+        # as a single frame and this fixture would not be an animation.
+        d.ellipse((8, 8, 56, 56), fill=(20 + i, 30, 40))
+        d.ellipse((26, 26, 38, 38), fill=(255, 255, 255))
+        frames.append(im)
+    gif = tmp_path / "holed.gif"
+    frames[0].save(gif, save_all=True, append_images=frames[1:],
+                   duration=40, loop=0)
+
+    with pytest.raises(ValueError, match="holed.gif"):
+        bake_one(gif, tmp_path / "baked", style="punchy", size=48, fps=30)
