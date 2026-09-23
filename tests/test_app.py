@@ -253,6 +253,28 @@ def test_both_payloads_carry_the_lordicon_credit_when_art_rendered():
     assert stk.ATTRIBUTION not in ig_emoji["caption"]
 
 
+def test_a_long_caption_loses_its_own_tail_not_the_lordicon_credit():
+    """The credit is a licence requirement; the caption body is not.
+
+    Appending the credit and then truncating drops it on exactly the
+    hashtag-heavy captions this channel writes, and does so silently.
+    """
+    from engine.assembly import stickers as stk
+    baked = [stk.Sticker(
+        name="death", emoji="\U0001f480", word="kankaal", beat_index=0,
+        start=1.0, slot=0, style="punchy", baked=True, size=184, canvas=232,
+        frames=42, pattern="x-%03d.png", png="x-041.png")]
+
+    plan = make_plan()
+    plan.metadata.ig_caption = "x" * 3000
+
+    body = payloads.instagram_payload(
+        plan, "https://x/v.mp4", stickers=baked)
+
+    assert len(body["caption"]) <= payloads.MAX_IG_CAPTION
+    assert body["caption"].endswith(stk.ATTRIBUTION)
+
+
 def test_checklist_flags_placeholder_visuals():
     """Every beat's clips are placeholder-provider — the worst case, where
     the render leaned on blank gradient frames for the whole video."""

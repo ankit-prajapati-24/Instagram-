@@ -105,15 +105,24 @@ def instagram_payload(plan: ReelPlan, video_url: str, *,
     tags_line = _hashtag_block(plan, 8)
     if tags_line:
         caption = f"{caption}\n\n{tags_line}"
+
+    # The credit is a licence requirement, so it outranks the tail of the
+    # caption: reserve its room *before* the cut and append it after. Doing
+    # it the other way round silently drops the credit on exactly the
+    # captions long enough to need trimming -- which are the hashtag-heavy
+    # ones this channel actually writes.
     credit = stickers_mod.attribution_for(stickers or [])
     if credit:
+        caption = caption[:MAX_IG_CAPTION - len(credit) - 2].rstrip()
         caption = f"{caption}\n\n{credit}"
+    else:
+        caption = caption[:MAX_IG_CAPTION]
 
     return {
         "_pinned_comment": plan.metadata.pinned_comment,
         "media_type": "REELS",
         "video_url": video_url,
-        "caption": caption[:MAX_IG_CAPTION],
+        "caption": caption,
         "share_to_feed": True,
         "audio_name": "original",
     }
