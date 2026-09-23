@@ -194,8 +194,12 @@ Both styles start from the same matted frames, so art is fetched once.
   spoken word with (`COLOUR_SPOKEN`). The channel has exactly one accent
   colour and the sticker should use it rather than introduce a second. Ten
   percent is a warmth, not a coat of paint.
-- outer glow in the same gold, low opacity, to separate it from dark footage
-  instead of an outline
+- outer glow in the same gold at 170/255 over 10px, to separate it from dark
+  footage instead of an outline. Not "low opacity": tested over a real frame
+  from `outputs/NANDA-DEVI-real-run.mp4`, 72 was invisible and 120 was still
+  weak against mottled mid-tone footage. 170 reads as a rim light, which is
+  the effect the dark grade wants and the one this bullet originally asked
+  for in the wrong units.
 - drop shadow: 4px down, 16px blur, 60% black
 
 These three numbers were chosen by rendering the five shipped icons under five
