@@ -186,13 +186,22 @@ Both styles start from the same matted frames, so art is fetched once.
 - drop shadow: 6px down, 12px blur, 45% black
 
 **dark** (`reveal`, `twist`)
-- desaturate to 35%
-- tint toward `#FFD700`, the gold `captions.py` already highlights the spoken
-  word with (`COLOUR_SPOKEN`). The channel has exactly one accent colour and
-  the sticker should use it rather than introduce a second.
+- **darken first**: brightness x0.72. This is what makes it dark; desaturating
+  and tinting alone can only make art pale and yellow, never darker.
+- desaturate to 65% — enough to calm it, not so much that the icons lose the
+  colour separation that makes them readable at 184px
+- tint 10% toward `#FFD700`, the gold `captions.py` already highlights the
+  spoken word with (`COLOUR_SPOKEN`). The channel has exactly one accent
+  colour and the sticker should use it rather than introduce a second. Ten
+  percent is a warmth, not a coat of paint.
 - outer glow in the same gold, low opacity, to separate it from dark footage
   instead of an outline
 - drop shadow: 4px down, 16px blur, 60% black
+
+These three numbers were chosen by rendering the five shipped icons under five
+candidate combinations and looking at them, not by taste. The first attempt
+(35% saturation, no brightness change, 45% tint) collapsed all five to the same
+flat yellow and made the eye's pupil vanish.
 
 The treatment is also what makes the set cohere: as fetched, the skull is
 bone-grey, DNA and clock are blue/orange, the eye is red/blue. Unifying them
