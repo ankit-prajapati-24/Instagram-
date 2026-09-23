@@ -193,6 +193,43 @@
   }
   .strip figcaption.ph { color: var(--gold); }
 
+  /* clip review: one card per clip, not per beat */
+  .clipgrid {
+    display: grid; gap: 12px; margin-top: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  }
+  .clipcard {
+    border: 1px solid var(--rule); background: var(--card); padding: 8px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .clipcard.swapped { border-color: var(--moss); }
+  .clipcard.gone { border-color: var(--stamp); }
+  .clipcard img {
+    width: 100%; aspect-ratio: 9 / 16; object-fit: cover;
+    background: #0b0f10; display: block; border: 1px solid var(--rule);
+  }
+  .clipcard .slotline {
+    display: flex; justify-content: space-between; font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .clipcard .slotline b { color: var(--paper); font-weight: 600; }
+  .clipcard .prov { font-size: 11px; color: var(--muted); }
+  .clipcard .prov.upload { color: var(--moss); }
+  .clipcard .prov.weak { color: var(--gold); }
+  .clipcard .q {
+    font-size: 11.5px; color: var(--muted); line-height: 1.35;
+    word-break: break-word;
+  }
+  .clipcard label.pick {
+    font-size: 11.5px; border: 1px dashed var(--rule); padding: 5px 6px;
+    text-align: center; cursor: pointer; color: var(--muted);
+  }
+  .clipcard label.pick:hover { border-color: var(--gold); color: var(--paper); }
+  .clipcard input[type=file] { display: none; }
+  .clipcard .said { font-size: 11px; min-height: 13px; }
+  .clipcard .said.bad { color: var(--stamp); }
+  .clipcard .said.ok { color: var(--moss); }
+
   /* light-box */
   .lightbox { display: flex; gap: 22px; flex-wrap: wrap; margin-top: 14px; }
   .lightbox video {
@@ -407,8 +444,31 @@
         </select>
         <button class="go" id="btn-produce">Approve and render</button>
       </div>
+      <label class="hint" style="display:block;cursor:pointer">
+        <input type="checkbox" id="review-clips">
+        Stop after the footage is fetched and let me check every clip first.
+        Stock search gets it wrong often enough that this is usually worth
+        the pause — and it is the only moment a clip can be swapped for
+        free.
+      </label>
       <p class="hint">Rendering takes a few minutes. The log on the left
         shows measured progress.</p>
+    </section>
+
+    <section class="sheet hidden" id="s-review">
+      <h3>Every clip, before it is rendered <em id="review-note"></em></h3>
+      <p class="hint">One card per clip, not per beat — a beat holds
+        several. The query underneath each one is what the search was
+        asked for, which is usually why a wrong clip is wrong. Pick a
+        replacement video or image for any slot; its length does not
+        matter, because the slot is fixed by the narration and the render
+        trims or loops to it. A still gets the Ken Burns move
+        automatically.</p>
+      <div class="clipgrid" id="clipgrid"></div>
+      <div class="entry">
+        <button class="go" id="btn-release">These are right — render</button>
+      </div>
+      <p class="hint" id="release-note"></p>
     </section>
 
     <section class="sheet hidden" id="s-images">
@@ -613,6 +673,161 @@ function renderStrip(plan) {
   show("s-images");
 }
 
+/* ---------------------------------------------------------------------
+   Gate two: every clip, before the render.
+
+   The scene strip above shows one thumbnail per beat. That is what let a
+   European city park through for a script about skeletons in a frozen
+   Himalayan lake: a beat holds several clips and the strip showed the
+   first of each. This board shows every one, with the query that found
+   it, and lets any of them be replaced with a file the user picked.
+   --------------------------------------------------------------------- */
+let REVIEW = null;
+
+async function loadReview() {
+  if (!PLAN) return;
+  const data = await (await fetch(`/api/plan/${PLAN.plan_id}/clips`)).json();
+  REVIEW = data;
+  renderReview();
+}
+
+function renderReview() {
+  const data = REVIEW;
+  if (!data) return;
+  const swapped = data.clips.filter((c) => c.replaced).length;
+  const missing = data.clips.filter((c) => !c.exists).length;
+  $("review-note").textContent =
+    `${data.total} clips across ${data.narration_seconds}s`
+    + (swapped ? ` · ${swapped} replaced by hand` : "")
+    + (missing ? ` · ${missing} missing on disk` : "");
+
+  $("clipgrid").innerHTML = data.clips.map((c) => {
+    const id = `${c.beat_id}-${c.slot}`;
+    const weak = c.provider !== "pexels" && c.provider !== "upload";
+    return `
+    <figure class="clipcard ${c.replaced ? "swapped" : ""}
+                            ${c.exists ? "" : "gone"}" id="card-${id}">
+      <img id="thumb-${id}" alt="${esc(c.beat_id)} slot ${c.slot}"
+           loading="lazy" src="${c.thumb}">
+      <div class="slotline">
+        <b>${esc(c.beat_id)} · slot ${c.slot}</b>
+        <span>${c.duration.toFixed(2)}s</span>
+      </div>
+      <div class="prov ${c.replaced ? "upload" : (weak ? "weak" : "")}">
+        ${esc(c.provider)}${c.kind === "image" ? " · still" : " · video"}
+      </div>
+      <div class="q">${esc(c.query) || "<i>no query recorded</i>"}</div>
+      <label class="pick">
+        Replace
+        <input type="file" accept="video/*,image/*"
+               data-beat="${esc(c.beat_id)}" data-slot="${c.slot}">
+      </label>
+      <div class="said" id="said-${id}"></div>
+    </figure>`;
+  }).join("");
+
+  $("clipgrid").querySelectorAll("input[type=file]").forEach((input) => {
+    input.onchange = () => replaceClip(input);
+  });
+  show("s-review");
+}
+
+async function replaceClip(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const beat = input.dataset.beat;
+  const slot = input.dataset.slot;
+  const id = `${beat}-${slot}`;
+  const said = $("said-" + id);
+  said.className = "said";
+  said.textContent = `sending ${(file.size / 1048576).toFixed(1)} MB…`;
+
+  try {
+    /* The file IS the body. No multipart: the server streams it and stops
+       at the size cap rather than spooling the whole thing first. */
+    const response = await fetch(
+      `/api/plan/${PLAN.plan_id}/clip/${beat}/${slot}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": file.type || "application/octet-stream",
+          /* Validated and then discarded server-side; the stored name is
+             built from the beat and the slot. */
+          "X-Upload-Filename": file.name
+        },
+        body: file
+      });
+    const data = await response.json();
+    if (!response.ok) {
+      said.className = "said bad";
+      said.textContent = String(data.detail || response.status);
+      input.value = "";
+      return;
+    }
+    said.className = "said ok";
+    said.textContent = `${data.kind} · ${data.duration.toFixed(2)}s slot`;
+    $("card-" + id).classList.add("swapped");
+    $("card-" + id).classList.remove("gone");
+    /* Bust the browser's cache: the thumbnail URL has not changed. */
+    $("thumb-" + id).src = `${data.thumb}&t=${Date.now()}`;
+    const row = REVIEW.clips.find(
+      (c) => c.beat_id === beat && String(c.slot) === String(slot));
+    if (row) { row.provider = data.provider; row.replaced = true; }
+  } catch (err) {
+    said.className = "said bad";
+    said.textContent = String(err);
+  }
+  input.value = "";
+}
+
+$("btn-release").onclick = async () => {
+  if (!PLAN) return;
+  $("btn-release").disabled = true;
+  $("release-note").innerHTML =
+    `<span class="spin">Captions, render and inspection. No model is
+     called from here.</span>`;
+  try {
+    const response = await fetch(
+      `/api/plan/${PLAN.plan_id}/clips/approve`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ captions_source: $("captions").value })
+      });
+    if (!response.ok) {
+      const data = await response.json();
+      $("btn-release").disabled = false;
+      $("release-note").textContent = "";
+      banner("Not released: " + esc(String(data.detail)), true);
+      return;
+    }
+    listen(PLAN.plan_id, afterRender);
+  } catch (err) {
+    $("btn-release").disabled = false;
+    $("release-note").textContent = "";
+    banner("Request failed: " + esc(String(err)), true);
+  }
+};
+
+async function afterRender(ev) {
+  $("btn-produce").disabled = false;
+  $("btn-release").disabled = false;
+  $("release-note").textContent = "";
+  if (ev.status === "failed") {
+    banner("Render stopped: " + esc(ev.detail), true);
+    return;
+  }
+  if (ev.status === "review") {
+    PLAN = await (await fetch(`/api/plan/${PLAN.plan_id}`)).json();
+    renderStrip(PLAN);
+    await loadReview();
+    $("s-review").scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  PLAN = await (await fetch(`/api/plan/${PLAN.plan_id}`)).json();
+  hide("s-review");
+  renderStrip(PLAN);
+  renderResult(ev.payload);
+  $("s-video").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 function renderResult(result) {
   const probe = result.probe || {};
   $("player").src = "/media/" + result.video.split(/[\\/]/).pop();
@@ -712,7 +927,8 @@ $("btn-plan").onclick = async () => {
   if (!topic) { $("topic").focus(); return; }
 
   resetSpine();
-  ["s-hooks", "s-script", "s-images", "s-video", "s-qc", "s-publish"]
+  ["s-hooks", "s-script", "s-review", "s-images", "s-video", "s-qc",
+   "s-publish"]
     .forEach(hide);
   $("btn-plan").disabled = true;
   $("plan-note").innerHTML = `<span class="spin">Working through research,
@@ -750,7 +966,7 @@ $("btn-produce").onclick = async () => {
   if (!chosen) return;
 
   $("btn-produce").disabled = true;
-  ["s-images", "s-video", "s-qc", "s-publish"].forEach(hide);
+  ["s-review", "s-images", "s-video", "s-qc", "s-publish"].forEach(hide);
 
   try {
     await fetch(`/api/plan/${PLAN.plan_id}/approve`, {
@@ -760,20 +976,11 @@ $("btn-produce").onclick = async () => {
     await fetch(`/api/plan/${PLAN.plan_id}/produce`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ captions_source: $("captions").value,
-                             use_fake: USE_FAKE })
+                             use_fake: USE_FAKE,
+                             review_clips: $("review-clips").checked })
     });
 
-    listen(PLAN.plan_id, async (ev) => {
-      $("btn-produce").disabled = false;
-      if (ev.status === "failed") {
-        banner("Render stopped: " + esc(ev.detail), true);
-        return;
-      }
-      PLAN = await (await fetch(`/api/plan/${PLAN.plan_id}`)).json();
-      renderStrip(PLAN);
-      renderResult(ev.payload);
-      $("s-video").scrollIntoView({ behavior: "smooth", block: "start" });
-    });
+    listen(PLAN.plan_id, afterRender);
   } catch (err) {
     $("btn-produce").disabled = false;
     banner("Request failed: " + esc(String(err)), true);
@@ -972,7 +1179,8 @@ function collectManual() {
 $("btn-manual").onclick = () => {
   if (!$("topic").value.trim()) { $("topic").focus(); return; }
   resetSpine();
-  ["s-hooks", "s-script", "s-images", "s-video", "s-qc", "s-publish"]
+  ["s-hooks", "s-script", "s-review", "s-images", "s-video", "s-qc",
+   "s-publish"]
     .forEach(hide);
   show("s-manual");
   updateBudget();

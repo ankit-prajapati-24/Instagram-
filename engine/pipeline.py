@@ -559,14 +559,24 @@ def manual_plan_stage(topic_raw: str, beats: list[dict], store, settings, *,
     return plan
 
 
-def produce_stage(plan: ReelPlan, client, store, settings, *,
-                  emit: Emit = _noop,
-                  captions_source: str | None = None,
-                  music_path: str | None = None) -> dict:
-    """Everything after the human gate. Returns the render result."""
+def clips_stage(plan: ReelPlan, client, store, settings, *,
+                emit: Emit = _noop) -> dict:
+    """VOICE -> LENGTH -> CLIPS. Returns the provider counts.
+
+    The first half of produce, and the half that is worth looking at before
+    the second one runs: by the time this returns, every clip that will
+    appear in the video exists on disk, with the query that found it still
+    attached, and nothing expensive has happened to it yet. Stock footage
+    frequently does not match the story — a real run fetched a European
+    city park for a script about skeletons in a frozen Himalayan lake — and
+    the only way a human could see that before was to wait out the render.
+
+    Split here rather than anywhere else because this is the last point at
+    which a clip can be swapped for free. CAPTIONS reads no clip, and
+    RENDER reads every one of them.
+    """
     _check_budget(store, settings)
     settings.ensure_dirs()
-    captions_source = captions_source or settings.captions_source
 
     emit(PipelineEvent(Stage.VOICE, "started",
                        f"{settings.voice_engine}: "
@@ -652,6 +662,41 @@ def produce_stage(plan: ReelPlan, client, store, settings, *,
             Stage.CLIPS, "info", f"{i}/{n} {beat} via {provider}")))
     emit(PipelineEvent(Stage.CLIPS, "done", ", ".join(
         f"{k}:{v}" for k, v in counts.items()), {"providers": counts}))
+    return counts
+
+
+def clip_providers(plan: ReelPlan) -> dict[str, int]:
+    """How many clips each provider supplied, read off the plan itself.
+
+    ``generate_plan_clips`` returns the same tally, but only for the run
+    that fetched them. A clip a human replaced by hand after the review
+    gate never passed through it, so the resumed half counts what the plan
+    actually holds instead of carrying a number that is now a lie.
+    """
+    counts: dict[str, int] = {}
+    for beat in plan.script.beats:
+        for clip in beat.clips:
+            counts[clip.provider] = counts.get(clip.provider, 0) + 1
+    return counts
+
+
+def render_stage(plan: ReelPlan, store, settings, *,
+                 emit: Emit = _noop,
+                 captions_source: str | None = None,
+                 music_path: str | None = None,
+                 providers: dict | None = None) -> dict:
+    """CAPTIONS -> RENDER -> QC. Returns the render result.
+
+    Takes no ``client``, and that is load-bearing rather than tidy, the
+    same way ``manual_plan_stage`` takes none: everything after the clip
+    review gate is ffmpeg and SQLite, so the second half of a reviewed
+    produce cannot reach a model, spend a credit, or re-fetch the footage
+    a human just finished correcting. The budget check lives in
+    ``clips_stage`` for the same reason — this half has nothing to spend.
+    """
+    settings.ensure_dirs()
+    captions_source = captions_source or settings.captions_source
+    counts = providers if providers is not None else clip_providers(plan)
 
     emit(PipelineEvent(Stage.CAPTIONS, "started", captions_source))
     font = (settings.caption_font_devanagari
@@ -711,3 +756,20 @@ def produce_stage(plan: ReelPlan, client, store, settings, *,
             "scorecard": scorecard.to_dict(),
             "cost_usd": store.plan_cost(plan.plan_id),
             "providers": counts}
+
+
+def produce_stage(plan: ReelPlan, client, store, settings, *,
+                  emit: Emit = _noop,
+                  captions_source: str | None = None,
+                  music_path: str | None = None) -> dict:
+    """Everything after the human gate, in one uninterrupted call.
+
+    The one-shot path, kept because a user who does not want to review
+    twenty clips should not be made to. It is literally the two halves back
+    to back — there is no third copy of the stage order — so the reviewed
+    run and the unreviewed one cannot drift apart.
+    """
+    counts = clips_stage(plan, client, store, settings, emit=emit)
+    return render_stage(plan, store, settings, emit=emit,
+                        captions_source=captions_source,
+                        music_path=music_path, providers=counts)

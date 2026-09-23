@@ -3,6 +3,7 @@ import inspect
 import io
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -337,11 +338,35 @@ def test_produce_refuses_a_plan_that_was_never_approved(client):
     assert "not approved" in response.json()["detail"]
 
 
-def test_produce_accepts_an_approved_plan(client):
+def test_produce_accepts_an_approved_plan(client, monkeypatch):
+    """The gate lets an approved plan through, and the work starts.
+
+    ``produce_stage`` is stubbed, and that is not laziness. The route
+    starts a *daemon* thread and returns immediately, so an unstubbed call
+    here leaves a real voice synthesis running for the rest of the pytest
+    session — into later tests, three of which replace ``subprocess.run``
+    with a counting stub. ``monkeypatch.setattr("engine.app.subprocess.
+    run", ...)`` resolves to the shared ``subprocess`` module, so that
+    replacement is process-wide: the leaked thread's ffmpeg calls landed on
+    their counter and those tests failed roughly one run in six, on this
+    branch and before it. Waiting for the stub to be called is what makes
+    the thread finish inside the test that started it.
+    """
+    import engine.app as app_mod
+
+    started = threading.Event()
+
+    def _stub(plan, client_, store_, settings_, **kwargs):
+        started.set()
+        return {"video": "stub.mp4", "probe": {}, "scorecard": {}}
+
+    monkeypatch.setattr(app_mod, "produce_stage", _stub)
+
     store: Store = client.app.state.store
     store.save_plan(make_plan(), status="approved")
     assert client.post("/api/plan/p1/produce",
                        json={"use_fake": True}).status_code == 200
+    assert started.wait(30), "the produce stage was never reached"
 
 
 def test_approve_rejects_an_invalid_motion_instead_of_storing_it(client):

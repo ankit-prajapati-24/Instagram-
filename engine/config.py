@@ -364,6 +364,22 @@ class Settings:
         default_factory=lambda: _env_path("RAHASYA_SFX_DIR",
                                           BASE_DIR / "assets" / "sfx"))
 
+    # --- Clip review uploads -----------------------------------------------
+    # The second human gate lets a user replace a clip the stock search got
+    # wrong with a file of their own, which means one route on this server
+    # accepts arbitrary bytes from a browser, writes them to disk, and then
+    # hands the path to ffmpeg. Every number that bounds that lives here.
+    #
+    # 200 MB: a 4K Pexels clip of a few seconds is ~40 MB and a phone video
+    # of the same length is larger again, so the cap has to clear a real
+    # file a user would actually pick; it is a ceiling on one slot, not a
+    # quota. The route enforces it while streaming the body rather than
+    # after reading it, so an oversized upload is refused at the cap
+    # instead of being spooled to disk first.
+    upload_max_mb: float = field(
+        default_factory=lambda: float(
+            os.getenv("RAHASYA_UPLOAD_MAX_MB", "200")))
+
     # --- Guardrails --------------------------------------------------------
     daily_usd_ceiling: float = field(
         default_factory=lambda: float(

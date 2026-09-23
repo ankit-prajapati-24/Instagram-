@@ -1,11 +1,22 @@
 """FastAPI app: the local control room.
 
-Two routes matter beyond CRUD:
+Four routes matter beyond CRUD, and two of them are human gates:
 
-  ``POST /api/plan/{id}/approve``  the human gate. Nothing renders until this
-                                  has been called with a chosen hook.
-  ``GET  /api/events/{id}``        server-sent progress, so a 45-second render
-                                  is watchable rather than a spinner.
+  ``POST /api/plan/{id}/approve``        gate one. Nothing is produced until
+                                        this has been called with a chosen
+                                        hook.
+  ``POST /api/plan/{id}/produce``        voice, length and clips; then either
+                                        straight on to the render, or a stop
+                                        at gate two when ``review_clips`` is
+                                        set.
+  ``POST /api/plan/{id}/clips/approve``  gate two. The plan sits in
+                                        ``awaiting_clip_review`` until this
+                                        releases it, and only this route can
+                                        start the render half of a reviewed
+                                        run.
+  ``GET  /api/events/{id}``              server-sent progress, so a 45-second
+                                        render is watchable rather than a
+                                        spinner.
 
 There is no publish route. Payload builders are exposed for copy-out only.
 """
@@ -15,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import subprocess
 import tempfile
 import threading
@@ -23,7 +35,7 @@ import traceback
 from pathlib import Path
 from typing import get_args
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -32,13 +44,15 @@ from engine.assembly.render import VIDEO_SUFFIXES
 from engine.config import (Settings, beat_count, beat_word_range,
                            speech_rate, spoken_seconds, word_budget,
                            words_per_beat)
-from engine.contract import (Beat, Claim, Metadata, Motion, Role, Transition)
+from engine.contract import (Beat, Claim, Clip, Metadata, Motion, Role,
+                             Transition)
 from engine.gates.qc import pre_render_range
 from engine.omniroute import OmniRouteClient
 from engine.pipeline import (BudgetError, GateError, ManualScriptError,
                              PipelineEvent, Stage, budget_report,
-                             default_roles, manual_plan_stage, plan_stage,
-                             produce_stage)
+                             clip_providers, clips_stage, default_roles,
+                             manual_plan_stage, plan_stage, produce_stage,
+                             render_stage)
 from engine.publish.payloads import (instagram_payload, publish_checklist,
                                      youtube_payload)
 from engine.store import Store
@@ -111,6 +125,175 @@ def _extract_poster(clip_path: Path, poster_path: Path,
         tmp_path.unlink(missing_ok=True)
 
 
+def _serve_visual(path: Path, roots: list[Path],
+                  settings: Settings) -> FileResponse | None:
+    """One clip's browser-safe picture, or ``None`` if there isn't one.
+
+    A still is served as-is; a video gets the poster frame extracted and
+    cached beside it. Factored out of the frame route so that asking for
+    one *slot* and asking for a beat's first usable visual run exactly the
+    same containment checks and the same cache rules — a second copy of
+    this is how the route would grow a path that skips ``_under_roots``.
+    """
+    if not path.is_file() or not _under_roots(path, roots):
+        return None
+    if path.suffix.lower() not in VIDEO_SUFFIXES:
+        return FileResponse(path)
+    poster_path = _poster_path(path)
+    if not _under_roots(poster_path, roots):
+        return None
+    stale = (poster_path.is_file()
+             and poster_path.stat().st_mtime < path.stat().st_mtime)
+    if not poster_path.is_file() or stale:
+        try:
+            _extract_poster(path, poster_path, settings)
+        except RuntimeError:
+            return None
+    if poster_path.is_file():
+        return FileResponse(poster_path)
+    return None
+
+
+# --- clip replacement uploads ----------------------------------------------
+#
+# This is the one route on this server that takes arbitrary bytes from a
+# browser, writes them to disk and then hands the path to ffmpeg, so every
+# guard on it is written out here rather than spread through the handler.
+#
+# The rules, and why each one:
+#
+#   where        ``work_dir/<plan_id>/uploads/``. Under ``work_dir`` because
+#                that is already one of the two roots ``_under_roots``
+#                admits, so the thumbnail route can serve an upload without
+#                widening its containment check; under the plan id because a
+#                replacement belongs to one plan and is thrown away with it.
+#   the name     built here from the beat id and the slot number, both of
+#                which this server validated against the stored plan before
+#                anything was written. The browser's filename is validated
+#                (below) and then *discarded* — it never reaches a path.
+#   the type     decided by sniffing the first bytes, never by the
+#                extension and never by the declared Content-Type. The
+#                declared type only has to agree about image-vs-video; the
+#                stored extension comes from the sniff, and that extension
+#                is what decides the still branch in ``plan_inputs``.
+#   really media the sniff is eight bytes, so it is also asked to decode:
+#                ffmpeg must read a video frame out of the file before it is
+#                accepted. A PNG header in front of 512 zero bytes sniffs
+#                perfectly and is not a picture.
+#   how big      ``settings.upload_max_mb``, enforced while the body is
+#                streaming, so an oversized upload stops at the cap instead
+#                of being written out in full and measured afterwards.
+
+UPLOAD_KINDS: dict[str, tuple[str, str]] = {
+    "image/png": (".png", "image"),
+    "image/jpeg": (".jpg", "image"),
+    "image/webp": (".webp", "image"),
+    "video/mp4": (".mp4", "video"),
+    "video/quicktime": (".mov", "video"),
+    "video/webm": (".webm", "video"),
+}
+
+# Browsers and operating systems disagree about these. The declared type is
+# only ever used to agree with the bytes, never to name the file, so mapping
+# the common spellings costs nothing and stops a legitimate .jpg being
+# refused because Windows called it image/pjpeg.
+CONTENT_TYPE_ALIASES = {
+    "image/jpg": "image/jpeg",
+    "image/pjpeg": "image/jpeg",
+    "image/x-png": "image/png",
+    "video/x-m4v": "video/mp4",
+    "video/x-quicktime": "video/quicktime",
+    "video/x-matroska": "video/webm",
+    "application/mp4": "video/mp4",
+}
+
+# The provider written onto a replaced clip. Sits alongside "pexels",
+# "keyless" and "placeholder" for exactly the same reason those exist: a
+# clip a human chose must never be indistinguishable from one the search
+# found, in the plan, on the review board or on the publish checklist.
+UPLOAD_PROVIDER = "upload"
+
+# The second gate's parking status, alongside "awaiting_approval". The gate
+# is a row in the store, not a disabled button: a reload, a retry or a curl
+# all meet the same refusal.
+CLIP_REVIEW_STATUS = "awaiting_clip_review"
+
+# A path separator, a drive colon, a control character or a traversal
+# segment. None of these belong in something a browser called a filename.
+_FILENAME_BAD = re.compile(r"[\x00-\x1f\x7f/\\:]")
+
+
+def _normalise_type(raw: str | None) -> str:
+    """The declared Content-Type, lowercased and stripped of parameters."""
+    value = (raw or "").split(";")[0].strip().lower()
+    return CONTENT_TYPE_ALIASES.get(value, value)
+
+
+def _sniff_media(head: bytes) -> str | None:
+    """The media type the bytes themselves claim, or ``None``.
+
+    Signatures only — this is the first of two checks, not the whole of it.
+    """
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    if head[4:8] == b"ftyp":
+        # ISO base media: mp4, m4v and QuickTime all share it, and the
+        # major brand is what separates them.
+        brand = head[8:12]
+        if brand.startswith(b"qt"):
+            return "video/quicktime"
+        return "video/mp4"
+    if head.startswith(b"\x1a\x45\xdf\xa3"):
+        return "video/webm"         # EBML: webm and mkv
+    return None
+
+
+def _safe_client_filename(raw: str | None) -> str:
+    """Refuse an attacker-controlled filename that is shaped like a path.
+
+    Nothing downstream uses the result to build a path — the stored name is
+    made from the beat id and the slot — so this is not sanitisation in the
+    sense of cleaning something up for use. It is a refusal: a browser
+    sending ``../../../../evil.png`` is not a browser picking a file, and
+    quietly basenaming it would hide that.
+    """
+    if raw is None:
+        return ""
+    name = raw.strip()
+    if not name:
+        return ""
+    if (len(name) > 255 or _FILENAME_BAD.search(name) or ".." in name
+            or name in {".", ".."}):
+        raise HTTPException(
+            400, "that filename carries a path separator, a traversal "
+                 "segment or a control character. Uploads are stored under "
+                 "a name this server builds, so nothing was going to use "
+                 "yours — but a name shaped like a path is refused outright "
+                 "rather than quietly cleaned.")
+    return name
+
+
+def _decodes_as_media(path: Path, settings: Settings) -> bool:
+    """Can ffmpeg actually read a video frame out of this file?
+
+    The second half of the media check. A signature is eight bytes and
+    anything can carry one; this is the only question that matters, because
+    the render is going to ask ffmpeg exactly this and a file that fails it
+    would fail the render instead — twelve minutes later, with a filtergraph
+    error nobody can read. A still image is a one-frame video stream to
+    ffmpeg, so the same probe covers both branches.
+    """
+    result = subprocess.run(
+        [settings.ffmpeg, "-hide_banner", "-v", "error", "-i", str(path),
+         "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"],
+        capture_output=True)
+    return result.returncode == 0
+
+
 class PlanRequest(BaseModel):
     topic: str
     use_fake: bool = False
@@ -178,6 +361,26 @@ class ApproveRequest(BaseModel):
 class ProduceRequest(BaseModel):
     captions_source: str = "caption_text"
     use_fake: bool = False
+    # The second human gate, expressed as a flag on the request that starts
+    # the work rather than as a separate "produce half" route.
+    #
+    # Why a flag and not two endpoints for the first half: the caller's
+    # choice is not *which stages to run* — VOICE, LENGTH and CLIPS run
+    # either way — it is only whether the pipeline stops afterwards. Two
+    # near-identical routes for that would be two places to keep the stage
+    # order right, and the stage order going stale in one of two copies is
+    # this repo's most-repeated bug.
+    #
+    # Off by default, because the one-shot path has to stay: a user who
+    # does not want to look at twenty clips must not be made to.
+    review_clips: bool = False
+
+
+class ReleaseRequest(BaseModel):
+    """What the second gate accepts. Everything optional: releasing the
+    review is a decision, not a form."""
+
+    captions_source: str | None = None
 
 
 def create_app(db_path: str | Path | None = None,
@@ -487,10 +690,18 @@ def create_app(db_path: str | Path | None = None,
         if plan is None:
             raise HTTPException(404, "no such plan")
 
-        # The human gate is a constraint, so it is enforced here rather than
-        # only in the browser. Without this, any script, retry or curl could
-        # render and package a plan nobody had looked at.
+        # Both human gates are constraints, so they are enforced here
+        # rather than only in the browser. Without this, any script, retry
+        # or curl could render and package a plan nobody had looked at.
         status = store.plan_status(plan_id)
+        if status == CLIP_REVIEW_STATUS:
+            raise HTTPException(
+                409, f"plan is awaiting clip review, so it cannot be "
+                     f"rendered from here. Look at the clips (GET "
+                     f"/api/plan/{plan_id}/clips), replace any that do not "
+                     f"match, then POST /api/plan/{plan_id}/clips/approve "
+                     f"to release it. Re-running produce would discard the "
+                     f"footage you are reviewing and fetch it again.")
         if status not in {"approved", "produced", "qc_failed"}:
             raise HTTPException(
                 409, f"plan is '{status}', not approved. POST "
@@ -502,6 +713,21 @@ def create_app(db_path: str | Path | None = None,
             client = None
             try:
                 client = client_for(request.use_fake)
+                if request.review_clips:
+                    counts = clips_stage(plan, client, store, settings,
+                                         emit=emit)
+                    # Saved with the clips on it: the review board reads the
+                    # plan back out of the store, and the status is what
+                    # stops anything rendering it in the meantime.
+                    store.save_plan(plan, status=CLIP_REVIEW_STATUS)
+                    total = sum(counts.values()) if counts else 0
+                    emit(PipelineEvent(
+                        "complete", "review",
+                        f"{total} clips ready to review",
+                        {"plan_id": plan_id, "awaiting_review": True,
+                         "providers": counts,
+                         "clips": f"/api/plan/{plan_id}/clips"}))
+                    return
                 result = produce_stage(
                     plan, client, store, settings, emit=emit,
                     captions_source=request.captions_source)
@@ -518,7 +744,255 @@ def create_app(db_path: str | Path | None = None,
                     client.close()
 
         threading.Thread(target=work, daemon=True).start()
-        return {"plan_id": plan_id, "streaming": f"/api/events/{plan_id}"}
+        return {"plan_id": plan_id, "review_clips": request.review_clips,
+                "streaming": f"/api/events/{plan_id}"}
+
+    # -- gate two: the clip review ---------------------------------------
+    @app.post("/api/plan/{plan_id}/clips/approve")
+    def approve_clips(plan_id: str,
+                      request: ReleaseRequest | None = None) -> dict:
+        """Release a reviewed plan and run CAPTIONS -> RENDER -> QC.
+
+        The only way a plan in ``awaiting_clip_review`` reaches the render.
+        ``/produce`` refuses it (above), so a plan parked at this gate stays
+        parked until a human says otherwise.
+
+        No ``client`` is built here, and ``render_stage`` takes none: after
+        the review nothing can call a model or re-fetch the footage the
+        human just finished correcting.
+        """
+        plan = store.get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(404, "no such plan")
+        status = store.plan_status(plan_id)
+        if status != CLIP_REVIEW_STATUS:
+            raise HTTPException(
+                409, f"plan is '{status}', not awaiting clip review. Only a "
+                     f"plan produced with review_clips=true stops here.")
+
+        store.save_plan(plan, status="clips_approved")
+        emit = emitter(plan_id)
+        captions_source = request.captions_source if request else None
+
+        def work() -> None:
+            try:
+                result = render_stage(plan, store, settings, emit=emit,
+                                      captions_source=captions_source)
+                emit(PipelineEvent("complete", "done",
+                                   Path(result["video"]).name, result))
+            except Exception as exc:
+                # Back to the gate rather than stranded in a status nothing
+                # accepts: the clips are still on disk and still correct, so
+                # the user can fix one more and release again.
+                store.save_plan(plan, status=CLIP_REVIEW_STATUS)
+                emit(PipelineEvent("complete", "failed",
+                                   f"{type(exc).__name__}: {exc}",
+                                   {"trace": traceback.format_exc()[-800:]}))
+
+        threading.Thread(target=work, daemon=True).start()
+        return {"plan_id": plan_id, "status": "clips_approved",
+                "streaming": f"/api/events/{plan_id}"}
+
+    # -- the review board -------------------------------------------------
+    @app.get("/api/plan/{plan_id}/clips")
+    def clip_review(plan_id: str) -> dict:
+        """Every clip that will appear in the video, one row each.
+
+        Per clip, not per beat: a beat holds several, and a strip of
+        per-beat thumbnails is exactly what let a wrong clip through — it
+        showed the first slot of each beat and nothing else.
+        """
+        plan = store.get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(404, "no such plan")
+        status = store.plan_status(plan_id)
+        roots = [Path(settings.work_dir), Path(settings.out_dir)]
+
+        rows: list[dict] = []
+        for beat in plan.script.beats:
+            for slot, clip in enumerate(beat.clips):
+                path = Path(clip.path) if clip.path else None
+                rows.append({
+                    "beat_id": beat.beat_id,
+                    "slot": slot,
+                    "duration": round(clip.duration, 3),
+                    "provider": clip.provider,
+                    # Why this clip was chosen. Without it an irrelevant
+                    # clip is a mystery; with it, it is usually obvious.
+                    "query": clip.query,
+                    "visual_prompt": beat.visual_prompt,
+                    "motion": beat.motion,
+                    "role": beat.role,
+                    "source_url": clip.source_url,
+                    "replaced": clip.provider == UPLOAD_PROVIDER,
+                    "kind": ("video" if path and path.suffix.lower()
+                             in VIDEO_SUFFIXES else "image"),
+                    "exists": bool(path and path.is_file()
+                                   and _under_roots(path, roots)),
+                    "thumb": f"/api/frame/{plan_id}/{beat.beat_id}"
+                             f"?slot={slot}",
+                    "replace": f"/api/plan/{plan_id}/clip/"
+                               f"{beat.beat_id}/{slot}",
+                })
+
+        return {
+            "plan_id": plan_id,
+            "status": status,
+            "awaiting_review": status == CLIP_REVIEW_STATUS,
+            "total": len(rows),
+            "narration_seconds": round(plan.duration(), 2),
+            "providers": clip_providers(plan),
+            "accept": sorted(UPLOAD_KINDS),
+            "max_bytes": int(settings.upload_max_mb * 1024 * 1024),
+            "clips": rows,
+        }
+
+    @app.post("/api/plan/{plan_id}/clip/{beat_id}/{slot}")
+    async def replace_clip(plan_id: str, beat_id: str, slot: int,
+                           request: Request) -> dict:
+        """Replace one slot's footage with a file the user picked.
+
+        The body is the file itself, not multipart. That is deliberate: a
+        multipart parser has to buffer or spool the whole body before the
+        handler sees a byte of it, so the size cap would be enforced after
+        the disk write it exists to prevent — and it would add a dependency
+        (``python-multipart``) for a form with one field in it. Streaming
+        the raw body lets the cap be enforced at the cap.
+
+        ``duration`` is not touched. The slot is fixed by the narration
+        timeline and the render trims or loops the source to it (see
+        ``engine.assembly.render``), so a 12-second holiday video and a
+        single JPEG both come out at exactly the 2.1 seconds the voice
+        needs. An image lands on the ``zoompan`` branch and gets the Ken
+        Burns move; a video does not. Which branch it takes is decided by
+        the extension this route stores, which comes from the sniffed
+        bytes.
+        """
+        plan = store.get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(404, "no such plan")
+        status = store.plan_status(plan_id)
+        if status != CLIP_REVIEW_STATUS:
+            raise HTTPException(
+                409, f"plan is '{status}', not awaiting clip review. Clips "
+                     f"are replaceable at the review gate, which is the one "
+                     f"moment the render has not read them yet.")
+
+        beat = next((b for b in plan.script.beats if b.beat_id == beat_id),
+                    None)
+        if beat is None:
+            raise HTTPException(404, f"no such beat: {beat_id}")
+        if not 0 <= slot < len(beat.clips):
+            raise HTTPException(
+                404, f"beat {beat_id!r} has {len(beat.clips)} clip slots, "
+                     f"so there is no slot {slot}")
+
+        # Refused before a byte is read: an attacker-shaped filename is a
+        # fact about the request, not about the file.
+        _safe_client_filename(request.headers.get("x-upload-filename"))
+
+        declared = _normalise_type(request.headers.get("content-type"))
+        if declared not in UPLOAD_KINDS:
+            raise HTTPException(
+                415, f"{declared or 'no content type'} is not something this "
+                     f"slot accepts. Send one of: "
+                     f"{', '.join(sorted(UPLOAD_KINDS))}.")
+
+        limit = int(settings.upload_max_mb * 1024 * 1024)
+        length = request.headers.get("content-length")
+        if length and length.isdigit() and int(length) > limit:
+            raise HTTPException(
+                413, f"that file is {int(length) / 1048576:.1f} MB and the "
+                     f"cap is {settings.upload_max_mb:g} MB "
+                     f"(RAHASYA_UPLOAD_MAX_MB).")
+
+        # Server-built, from values already validated against the stored
+        # plan. The regex is belt and braces: beat ids are generated, but
+        # one arriving from a model's output must still not be able to
+        # shape a path.
+        safe_beat = re.sub(r"[^A-Za-z0-9_-]", "_", beat_id)[:40] or "beat"
+        safe_plan = re.sub(r"[^A-Za-z0-9_-]", "_", plan_id)[:64] or "plan"
+        uploads = Path(settings.work_dir) / safe_plan / "uploads"
+        # Checked BEFORE the mkdir, not after: a containment check that runs
+        # once the directory already exists has already let the filesystem
+        # be touched outside work_dir, which is the whole thing it is for.
+        if not _under_roots(uploads, [Path(settings.work_dir)]):
+            raise HTTPException(500, "upload directory escaped work_dir")
+        uploads.mkdir(parents=True, exist_ok=True)
+        partial = uploads / f"{safe_beat}-{slot:02d}.part"
+
+        written = 0
+        try:
+            with partial.open("wb") as handle:
+                async for chunk in request.stream():
+                    written += len(chunk)
+                    if written > limit:
+                        raise HTTPException(
+                            413, f"the upload passed the "
+                                 f"{settings.upload_max_mb:g} MB cap "
+                                 f"(RAHASYA_UPLOAD_MAX_MB) and was stopped "
+                                 f"there; nothing was kept.")
+                    handle.write(chunk)
+            if written == 0:
+                raise HTTPException(400, "the upload was empty")
+
+            with partial.open("rb") as handle:
+                head = handle.read(32)
+            sniffed = _sniff_media(head)
+            if sniffed is None:
+                raise HTTPException(
+                    415, "those bytes are not any media type this slot "
+                         "accepts. The extension and the Content-Type are "
+                         "not trusted here; the file's own signature is.")
+            suffix, kind = UPLOAD_KINDS[sniffed]
+            if kind != UPLOAD_KINDS[declared][1]:
+                raise HTTPException(
+                    415, f"the upload says it is {declared} but the bytes "
+                         f"are {sniffed}. Send the file you meant to send.")
+            if not _decodes_as_media(partial, settings):
+                raise HTTPException(
+                    415, f"ffmpeg could not read a frame out of that file. "
+                         f"It carries a {sniffed} signature but does not "
+                         f"decode, and the render would have failed on it "
+                         f"long after you had stopped watching.")
+
+            destination = uploads / f"{safe_beat}-{slot:02d}{suffix}"
+            if not _under_roots(destination, [Path(settings.work_dir)]):
+                raise HTTPException(500, "upload path escaped work_dir")
+            # A previous upload into this slot with a different extension
+            # would otherwise sit there orphaned, and its cached poster
+            # with it.
+            for stale in uploads.glob(f"{safe_beat}-{slot:02d}.*"):
+                if stale != destination and stale != partial:
+                    stale.unlink(missing_ok=True)
+            os.replace(partial, destination)
+        finally:
+            partial.unlink(missing_ok=True)
+
+        # The poster cache is keyed on the clip path and only re-extracted
+        # when the clip is newer, which it is — but a replacement that
+        # lands inside the same second would tie. Drop it outright.
+        _poster_path(destination).unlink(missing_ok=True)
+
+        existing = beat.clips[slot]
+        beat.clips[slot] = Clip.model_validate({
+            **existing.model_dump(),
+            "path": str(destination),
+            "provider": UPLOAD_PROVIDER,
+            # Cleared: whatever this came from, it did not come from there.
+            "source_url": None, "pexels_id": None, "author": None,
+            "licence": None,
+            # duration is deliberately absent from this update.
+        })
+        store.save_plan(plan, status=CLIP_REVIEW_STATUS)
+
+        return {
+            "plan_id": plan_id, "beat_id": beat_id, "slot": slot,
+            "provider": UPLOAD_PROVIDER,
+            "duration": beat.clips[slot].duration,
+            "kind": kind, "bytes": written, "media_type": sniffed,
+            "thumb": f"/api/frame/{plan_id}/{beat_id}?slot={slot}",
+        }
 
     @app.get("/api/plan/{plan_id}/publish")
     def publish_preview(plan_id: str) -> dict:
@@ -579,7 +1053,8 @@ def create_app(db_path: str | Path | None = None,
         return FileResponse(target)
 
     @app.get("/api/frame/{plan_id}/{beat_id}")
-    def frame(plan_id: str, beat_id: str) -> FileResponse:
+    def frame(plan_id: str, beat_id: str,
+              slot: int | None = None) -> FileResponse:
         """A thumbnail for the scene strip: the beat's visual, browser-safe.
 
         A beat's visual is now ``beat.clips`` (Pexels footage, or a still
@@ -590,6 +1065,18 @@ def create_app(db_path: str | Path | None = None,
         re-produce of the same plan reuses the same filename in place).
         Beats saved before clips existed have no ``clips`` at all, so those
         still fall back to the legacy ``beat.image_path``.
+
+        ``?slot=N`` narrows it to exactly one of the beat's clips, which is
+        what the clip review board asks for: a beat holds several and the
+        reviewer has to see each one. Extended here rather than added as a
+        second route, because the containment checks, the poster cache and
+        its staleness rule are the part worth having only one of — the
+        route was found trusting a stored path once already.
+
+        With a slot named there is deliberately no fallback: if that slot's
+        file is missing, the answer is 404, not the next clip along. A
+        thumbnail quietly showing a different clip is exactly the failure
+        this gate exists to catch.
 
         Every path here is server-controlled today (deterministic filenames
         under ``work_dir``, no API lets a caller set a beat's clip/image
@@ -607,24 +1094,23 @@ def create_app(db_path: str | Path | None = None,
 
         roots = [Path(settings.work_dir), Path(settings.out_dir)]
 
+        if slot is not None:
+            if not 0 <= slot < len(beat.clips):
+                raise HTTPException(
+                    404, f"beat {beat_id!r} has {len(beat.clips)} clip "
+                         f"slots, so there is no slot {slot}")
+            served = _serve_visual(Path(beat.clips[slot].path), roots,
+                                   settings)
+            if served is None:
+                raise HTTPException(
+                    404, f"slot {slot} of beat {beat_id!r} has no usable "
+                         f"file on disk")
+            return served
+
         for clip in beat.clips:
-            clip_path = Path(clip.path)
-            if not clip_path.is_file() or not _under_roots(clip_path, roots):
-                continue
-            if clip_path.suffix.lower() not in VIDEO_SUFFIXES:
-                return FileResponse(clip_path)
-            poster_path = _poster_path(clip_path)
-            if not _under_roots(poster_path, roots):
-                continue
-            stale = (poster_path.is_file() and poster_path.stat().st_mtime
-                     < clip_path.stat().st_mtime)
-            if not poster_path.is_file() or stale:
-                try:
-                    _extract_poster(clip_path, poster_path, settings)
-                except RuntimeError:
-                    continue
-            if poster_path.is_file():
-                return FileResponse(poster_path)
+            served = _serve_visual(Path(clip.path), roots, settings)
+            if served is not None:
+                return served
 
         if beat.image_path:
             path = Path(beat.image_path)
