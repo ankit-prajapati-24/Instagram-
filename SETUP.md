@@ -157,6 +157,30 @@ narration and levelled to the same loudness, so an uploaded beat does not
 jump out next to a synthesised one. The synthesised original is left on
 disk untouched.
 
+Before that re-encode, the upload goes through a cleanup chain: a highpass
+to clear room rumble, a denoiser for a steady noise floor, a de-clicker for
+mouth noise, and a cap on any silence longer than a natural pause. The raw
+upload — exactly the bytes you handed over — is kept on disk beside the
+cleaned file, and the board plays both: a second player under the beat's
+own audio holds that raw take, and a checkbox next to it switches the beat
+between the cleaned file and the untouched upload, re-measuring the beat's
+length either way. The line under the checkbox says what cleanup actually
+did to that beat — seconds of pause trimmed and the loudness move — read
+off the plan itself, never a fixed number written into the page. If
+cleanup empties a take entirely (nothing left above the noise floor), it
+is abandoned and the raw level is used instead, and the board says that
+plainly rather than reading the same as cleanup being off.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `RAHASYA_VOICE_CLEAN` | `1` | turns the cleanup chain on for uploads; `0` writes the raw upload's own level, the same as switching it off on the board |
+| `RAHASYA_VOICE_HIGHPASS` | `80.0` | highpass cutoff in Hz — below any voiced fundamental in Hinglish narration, above typical room rumble |
+| `RAHASYA_VOICE_DENOISE` | `-25.0` | afftdn's noise floor estimate in dB; more negative trusts more of the signal as speech, less negative denoises harder |
+| `RAHASYA_VOICE_PAUSE_CAP` | `0.35` | no silence in the recording survives longer than this, in seconds, while a natural inter-word gap is left untouched |
+| `RAHASYA_VOICE_SILENCE_DB` | `-45.0` | below this a sample counts as silence to trim; clears typical room noise without eating a soft word |
+
+`RAHASYA_VOICE_PAUSE_CAP` is the number to change if pauses feel clipped.
+
 If the voice simply says a word wrong you do not need a recording at all.
 Both lines are editable in place — the Devanagari one that gets spoken and
 the Roman one that gets burned — and **Say it again** re-speaks *only* that

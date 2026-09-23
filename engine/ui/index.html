@@ -296,6 +296,16 @@
   .beatrow .said { font-size: 11px; min-height: 13px; }
   .beatrow .said.bad { color: var(--stamp); }
   .beatrow .said.ok { color: var(--moss); }
+  /* the raw take, only rendered when there is one to play (Task 4) */
+  .beatrow .cleanblock { display: flex; flex-direction: column; gap: 6px; }
+  .beatrow .cleanblock:empty { display: none; }
+  .beatrow .cleanrow {
+    display: flex; align-items: center; gap: 6px; cursor: pointer;
+    font-size: 11px; color: var(--muted);
+  }
+  .beatrow .cleannote { font-size: 11px; line-height: 1.35; color: var(--muted); }
+  .beatrow .cleannote.done { color: var(--moss); }
+  .beatrow .cleannote.abandoned { color: var(--gold); }
   .lenbar { font-size: 12px; font-variant-numeric: tabular-nums; }
   .lenbar.bad { color: var(--stamp); }
   .lenbar.warn { color: var(--gold); }
@@ -837,20 +847,66 @@ function voiceLengthLine(data) {
   }
 }
 
-function renderVoice() {
-  const data = VOICE;
-  if (!data) return;
-  const swapped = data.beats.filter((b) => b.replaced).length;
-  const missing = data.beats.filter((b) => !b.exists).length;
-  $("voice-note").textContent =
-    `${data.total} beats`
-    + (swapped ? ` · ${swapped} in your own voice` : "")
-    + (missing ? ` · ${missing} missing on disk` : "");
-  voiceLengthLine(data);
+/* What the cleanup chain did to one beat's raw upload, in words —
+   built entirely from ``b.cleanup`` (itself off the plan, never a
+   constant in this page: Global Constraint 5). "cleaned", "cleanup was
+   attempted and abandoned" and "cleanup off" are three different
+   states and must not read the same. */
+function cleanupState(b) {
+  const c = b.cleanup;
+  if (!c) return { cls: "", text: "" };
+  if (c.cleanup_abandoned) {
+    return {
+      cls: "abandoned",
+      text: `cleanup was attempted and removed everything, so the raw `
+        + `level was used — ${c.seconds_after.toFixed(2)}s at `
+        + `${c.loudness_after.toFixed(1)} LUFS.`
+    };
+  }
+  if (!c.filters_applied) {
+    return {
+      cls: "",
+      text: `cleanup is off — the raw take as uploaded, `
+        + `${c.seconds_after.toFixed(2)}s at `
+        + `${c.loudness_after.toFixed(1)} LUFS.`
+    };
+  }
+  const removedSecs = c.seconds_before - c.seconds_after;
+  const loudMove = c.loudness_after - c.loudness_before;
+  const sign = loudMove >= 0 ? "+" : "";
+  return {
+    cls: "done",
+    text: `cleaned up: ${removedSecs.toFixed(2)}s of pauses trimmed `
+      + `(${c.seconds_before.toFixed(2)}s → `
+      + `${c.seconds_after.toFixed(2)}s), loudness ${sign}`
+      + `${loudMove.toFixed(1)} LU (${c.loudness_before.toFixed(1)} → `
+      + `${c.loudness_after.toFixed(1)} LUFS).`
+  };
+}
 
-  $("beatlist").innerHTML = data.beats.map((b) => {
-    const weak = b.engine && b.engine !== "piper" && b.engine !== "upload";
-    return `
+/* The raw-take player and the cleaned/raw switch — only when there is a
+   raw take to play. A beat that was never uploaded and a beat whose
+   upload has since been re-spoken both report ``raw_audio: null`` and
+   both render nothing here; the controller does not tell them apart and
+   neither does this. */
+function renderCleanupBlock(b) {
+  if (!b.raw_audio) return "";
+  const state = cleanupState(b);
+  return `
+    <audio controls preload="none" src="${b.raw_audio}"
+           id="vrawaud-${esc(b.beat_id)}"></audio>
+    <label class="cleanrow" for="vclean-${esc(b.beat_id)}">
+      <input type="checkbox" class="clean-toggle"
+             id="vclean-${esc(b.beat_id)}" ${b.cleaned ? "checked" : ""}>
+      cleaned up (highpass, denoise, de-click, pause cap)
+    </label>
+    <div class="cleannote ${state.cls}"
+         id="vcleannote-${esc(b.beat_id)}">${esc(state.text)}</div>`;
+}
+
+function beatRowHtml(b) {
+  const weak = b.engine && b.engine !== "piper" && b.engine !== "upload";
+  return `
     <div class="beatrow ${b.replaced ? "swapped" : ""}
                         ${b.exists ? "" : "gone"}" id="vrow-${esc(b.beat_id)}">
       <div class="vhead">
@@ -882,25 +938,43 @@ function renderVoice() {
                  data-beat="${esc(b.beat_id)}">
         </label>
         <div class="said" id="vsaid-${esc(b.beat_id)}"></div>
+        <div class="cleanblock" id="vcleanblock-${esc(b.beat_id)}">${renderCleanupBlock(b)}</div>
       </div>
     </div>`;
-  }).join("");
+}
 
-  $("beatlist").querySelectorAll("input[type=file]").forEach((input) => {
-    input.onchange = () => replaceVoice(input);
-  });
+/* Re-draws one beat's raw-take block from the in-memory row, after a
+   response changes it (an upload creates it, a toggle updates it, a
+   respeak clears it). Cheaper than re-rendering the whole row, and it
+   leaves whatever the user is mid-typing in the two textareas alone. */
+function syncCleanupBlock(beatId) {
+  const row = VOICE.beats.find((b) => b.beat_id === beatId);
+  const block = $("vcleanblock-" + beatId);
+  if (!row || !block) return;
+  block.innerHTML = renderCleanupBlock(row);
+  const toggle = $("vclean-" + beatId);
+  if (toggle) toggle.onchange = () => toggleCleanup(beatId, toggle);
+}
+
+function wireBeatRow(beatId) {
+  const row = $("vrow-" + beatId);
+  if (!row) return;
+
+  const fileInput = row.querySelector("input[type=file]");
+  if (fileInput) fileInput.onchange = () => replaceVoice(fileInput);
+
   /* A line the user has started editing is marked, so it is obvious which
      rows have something unsaid in them. */
-  $("beatlist").querySelectorAll("textarea").forEach((box) => {
+  row.querySelectorAll("textarea").forEach((box) => {
     box.oninput = () => {
-      const row = VOICE.beats.find((b) => b.beat_id === box.dataset.beat);
+      const data = VOICE.beats.find((b) => b.beat_id === box.dataset.beat);
       const was = box.classList.contains("vsay")
-        ? row.voice_text : row.caption_text;
+        ? data.voice_text : data.caption_text;
       box.classList.toggle("dirty", box.value !== was);
     };
   });
 
-  $("beatlist").querySelectorAll("button.copy").forEach((button) => {
+  row.querySelectorAll("button.copy").forEach((button) => {
     const beat = button.dataset.beat;
     if (button.dataset.act === "respeak") {
       button.onclick = () => respeakBeat(beat, button);
@@ -918,6 +992,85 @@ function renderVoice() {
       }
     };
   });
+
+  const toggle = row.querySelector("input.clean-toggle");
+  if (toggle) toggle.onchange = () => toggleCleanup(beatId, toggle);
+}
+
+/* Switch a beat between its cleaned take and its raw upload, calling the
+   Task 3 route. Refused with a 409 for a beat whose upload has since been
+   re-spoken -- that beat never shows this control in the first place
+   (``renderCleanupBlock`` renders nothing for it), so the 409 branch here
+   is only ever reached by a stale response to a click made before that
+   happened. */
+async function toggleCleanup(beat, checkbox) {
+  const row = VOICE.beats.find((b) => b.beat_id === beat);
+  if (!row || !row.cleanup_toggle) return;
+  const said = $("vsaid-" + beat);
+  const enabled = checkbox.checked;
+
+  checkbox.disabled = true;
+  said.className = "said";
+  said.textContent = enabled ? "cleaning up…" : "reverting to the raw level…";
+  try {
+    const response = await fetch(row.cleanup_toggle, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      said.className = "said bad";
+      said.textContent = String(data.detail || response.status);
+      checkbox.checked = !enabled;
+      return;
+    }
+
+    said.className = "said ok";
+    said.textContent = (data.cleaned ? "cleaned up — " : "raw level used — ")
+      + `${data.seconds.toFixed(2)}s (was ${data.was_seconds.toFixed(2)}s)`;
+    $("vsecs-" + beat).textContent = data.seconds.toFixed(2) + "s";
+    /* Bust the browser's cache: the audio URL has not changed. */
+    $("vaud-" + beat).src = `${data.audio}?t=${Date.now()}`;
+
+    row.seconds = data.seconds;
+    row.cleaned = data.cleaned;
+    row.cleanup = {
+      seconds_before: data.seconds_before,
+      seconds_after: data.seconds_after,
+      loudness_before: data.loudness_before,
+      loudness_after: data.loudness_after,
+      filters_applied: data.filters_applied,
+      cleanup_abandoned: data.cleanup_abandoned
+    };
+    syncCleanupBlock(beat);
+
+    VOICE.narration_seconds = data.narration_seconds;
+    VOICE.in_gate = data.in_gate;
+    VOICE.in_window = data.in_window;
+    voiceLengthLine(VOICE);
+  } catch (err) {
+    said.className = "said bad";
+    said.textContent = String(err);
+    checkbox.checked = !enabled;
+  } finally {
+    checkbox.disabled = false;
+  }
+}
+
+function renderVoice() {
+  const data = VOICE;
+  if (!data) return;
+  const swapped = data.beats.filter((b) => b.replaced).length;
+  const missing = data.beats.filter((b) => !b.exists).length;
+  $("voice-note").textContent =
+    `${data.total} beats`
+    + (swapped ? ` · ${swapped} in your own voice` : "")
+    + (missing ? ` · ${missing} missing on disk` : "");
+  voiceLengthLine(data);
+
+  $("beatlist").innerHTML = data.beats.map(beatRowHtml).join("");
+  data.beats.forEach((b) => wireBeatRow(b.beat_id));
   show("s-voice");
 }
 
@@ -976,6 +1129,18 @@ async function respeakBeat(beat, button) {
     row.engine = data.engine;
     row.seconds = data.seconds;
     row.replaced = false;
+    if (data.respoken) {
+      /* The beat actually said something new, so whatever raw upload was
+         sitting behind it is now archived history, not the active take --
+         the same ruling the board itself follows (see the docstring on
+         ``/voice``). No control is shown for it; there is nothing to
+         revert to any more. */
+      row.raw_audio = null;
+      row.cleaned = null;
+      row.cleanup = null;
+      row.cleanup_toggle = null;
+      syncCleanupBlock(beat);
+    }
     VOICE.narration_seconds = data.narration_seconds;
     VOICE.in_gate = data.in_gate;
     VOICE.in_window = data.in_window;
@@ -1031,6 +1196,26 @@ async function replaceVoice(input) {
     if (row) {
       row.engine = data.engine; row.replaced = true;
       row.seconds = data.seconds; row.exists = true;
+      /* The raw take and the cleaned/raw switch appear on this row for
+         the first time, or are refreshed if this is a second upload over
+         a beat that already had one. */
+      row.raw_audio = data.raw_audio;
+      row.cleaned = data.cleaned;
+      row.cleanup = {
+        seconds_before: data.seconds_before,
+        seconds_after: data.seconds_after,
+        loudness_before: data.loudness_before,
+        loudness_after: data.loudness_after,
+        filters_applied: data.filters_applied,
+        cleanup_abandoned: data.cleanup_abandoned
+      };
+      row.cleanup_toggle = `/api/plan/${PLAN.plan_id}/voice/${beat}/cleanup`;
+      syncCleanupBlock(beat);
+      if (row.raw_audio) {
+        /* Bust the browser's cache here too: a second upload over an
+           existing raw take writes new bytes behind the same URL. */
+        $("vrawaud-" + beat).src = `${row.raw_audio}?t=${Date.now()}`;
+      }
     }
     $("veng-" + beat).className = "eng upload";
     /* One beat moved, so the total moved with it. */

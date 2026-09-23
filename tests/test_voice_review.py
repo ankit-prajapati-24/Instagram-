@@ -685,12 +685,14 @@ def test_the_panel_calls_routes_that_are_registered(client):
 
     for wanted in ["/api/plan/${PLAN.plan_id}/voice`",
                    "/api/plan/${PLAN.plan_id}/voice/approve`",
-                   "/api/plan/${PLAN.plan_id}/voice/${beat}`"]:
+                   "/api/plan/${PLAN.plan_id}/voice/${beat}`",
+                   "/api/plan/${PLAN.plan_id}/voice/${beat}/cleanup`"]:
         assert wanted in page, f"the panel never calls {wanted}"
 
     assert "/api/plan/{plan_id}/voice" in paths
     assert "/api/plan/{plan_id}/voice/approve" in paths
     assert "/api/audio/{plan_id}/{beat_id}" in paths
+    assert "/api/plan/{plan_id}/voice/{beat_id}/cleanup" in paths
 
     # One path, two verbs: POST is the upload, PATCH is the correction.
     verbs = set()
@@ -699,6 +701,15 @@ def test_the_panel_calls_routes_that_are_registered(client):
             verbs |= set(getattr(route, "methods", []))
     assert {"POST", "PATCH"} <= verbs, verbs
     assert 'method: "PATCH"' in page, "the panel never sends the correction"
+
+    cleanup_verbs = set()
+    for route in client.app.routes:
+        if getattr(route, "path", "") == \
+                "/api/plan/{plan_id}/voice/{beat_id}/cleanup":
+            cleanup_verbs |= set(getattr(route, "methods", []))
+    assert "POST" in cleanup_verbs, cleanup_verbs
+    assert 'body: JSON.stringify({ enabled })' in page, \
+        "the panel never calls the cleanup toggle"
 
 
 def test_narration_too_long_sends_you_back_to_the_gate_not_to_a_dead_end(
