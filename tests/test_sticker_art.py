@@ -238,3 +238,30 @@ def test_the_art_itself_stays_fully_opaque():
     art = matte(_disc(side=96))
     out = ground(art, "punchy")
     assert out.getpixel((48, 48))[3] == 255
+
+
+def test_punchy_gets_an_outline_that_widens_the_silhouette():
+    art = matte(_disc(side=96))
+    out = ground(art, "punchy")
+    # A ring just outside the disc's edge is empty before grounding and
+    # opaque after, on the side the shadow does not fall.
+    probe = (4, 48)
+    assert art.getpixel(probe)[3] == 0
+    assert out.getpixel(probe)[3] > 0
+
+
+def test_dark_gets_a_gold_glow_not_a_hard_edge():
+    art = matte(_disc(side=96))
+    out = ground(art, "dark")
+    probe = (4, 48)
+    assert out.getpixel(probe)[3] > 0, "glow should reach outside the art"
+    red, green, blue, _ = out.getpixel(probe)
+    assert red > blue, f"glow should be warm, got {(red, green, blue)}"
+
+
+def test_the_art_still_covers_its_own_halo():
+    """The halo sits under the art, so the art's own pixels are unchanged."""
+    art = matte(_disc(side=96))
+    for style in STYLES:
+        out = ground(art, style)
+        assert out.getpixel((48, 48))[:3] == art.getpixel((48, 48))[:3]

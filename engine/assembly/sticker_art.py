@@ -189,14 +189,30 @@ _SHADOW = {
     "dark": (4, 16, 153),
 }
 
+# The halo that holds the sticker's shape against whatever is behind it.
+# Punchy gets a hard outline because bright footage competes with the art's
+# own edges; dark gets a soft gold glow instead, because an outline on a
+# dark grade reads as a sticker cut out and pasted on. Both sit under the
+# art and over the shadow.
+_HALO = {
+    # style: (kind, pixels, colour, opacity)
+    "punchy": ("outline", 3, (245, 245, 250), 217),
+    "dark": ("glow", 10, ACCENT, 72),
+}
+
 
 def ground(frame: Image.Image, style: str) -> Image.Image:
-    """``frame`` with a drop shadow under it, on the same canvas.
+    """``frame`` with a drop shadow and halo under it, on the same canvas.
 
     Without this the sticker sits *on* the frame rather than *in* it -- the
     third of the three things that made the emoji read as clipart. The
     shadow is baked rather than drawn by ffmpeg because the renderer's whole
     speed argument rests on the overlay having nothing to compute per frame.
+
+    The halo holds the shape against whatever is behind it. Punchy gets a
+    hard outline to compete with bright footage's edges; dark gets a soft
+    gold glow instead, because an outline on a dark grade reads as cut out
+    and pasted on. Both sit under the art and over the shadow.
 
     Drawn on the existing canvas, not a larger one: the canvas is what the
     overlay pins at a fixed x/y, and growing it here would move every
@@ -215,5 +231,18 @@ def ground(frame: Image.Image, style: str) -> Image.Image:
     shadow = Image.new("RGBA", frame.size, (0, 0, 0, 0))
     shadow.putalpha(shadow_alpha)
 
-    out = Image.alpha_composite(shadow, frame)
+    kind, spread, colour, halo_opacity = _HALO[style]
+    if kind == "outline":
+        # MaxFilter grows the silhouette by (size - 1) // 2 pixels, so a 3px
+        # outline needs a 7-wide window. Odd sizes only.
+        halo_alpha = alpha.filter(ImageFilter.MaxFilter(2 * spread + 1))
+    else:
+        halo_alpha = alpha.filter(ImageFilter.GaussianBlur(spread))
+    halo_alpha = halo_alpha.point(lambda v: v * halo_opacity // 255)
+
+    halo = Image.new("RGBA", frame.size, colour + (0,))
+    halo.putalpha(halo_alpha)
+
+    out = Image.alpha_composite(shadow, halo)
+    out = Image.alpha_composite(out, frame)
     return out
