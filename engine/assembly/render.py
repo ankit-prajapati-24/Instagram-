@@ -522,13 +522,24 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
 
 def build_command(plan: ReelPlan, settings, out_path: Path, *,
                   ass_path: str | None = None,
-                  music_path: str | None = None
+                  music_path: str | None = None,
+                  report: dict | None = None
                   ) -> tuple[list[str], float, str | None]:
     """Assemble the ffmpeg argv. Split out so it can be asserted on.
 
     Returns ``(command, total_seconds, cwd)``. ``cwd`` is the caption
     directory when captions are burned, because a Windows absolute path cannot
     be escaped inside a filtergraph.
+
+    ``report``, if given, is filled in with facts about what this particular
+    command composited — currently just ``attribution``, the credit line the
+    stickers on this timeline oblige us to print. It is an out-parameter
+    rather than a fourth return value because the return tuple is unpacked
+    positionally all over the test suite, and because the caller that wants
+    this (the pipeline, on its way to ``record_render``) must not be tempted
+    to call ``prepare()`` again to find out: a second call reads the
+    filesystem and the settings a second time, which is exactly how the
+    credit drifted away from the video it credits.
     """
     beats = plan.script.beats
     command: list[str] = [settings.ffmpeg, "-hide_banner", "-y"]
@@ -560,6 +571,8 @@ def build_command(plan: ReelPlan, settings, out_path: Path, *,
     # `music_index` are positional into this argv, and appending here is
     # what keeps both of them the numbers they already were.
     prepared = stickers_mod.prepare(plan, settings)
+    if report is not None:
+        report["attribution"] = stickers_mod.attribution_for(prepared)
     sticker_offset = (len(inputs) + len(beats)
                       + (1 if music_index is not None else 0))
     if prepared:
@@ -604,8 +617,13 @@ def build_command(plan: ReelPlan, settings, out_path: Path, *,
 
 def render(plan: ReelPlan, settings, out_path: str | Path, *,
            ass_path: str | None = None, music_path: str | None = None,
-           progress=None) -> str:
-    """Produce the MP4. Returns the output path."""
+           progress=None, report: dict | None = None) -> str:
+    """Produce the MP4. Returns the output path.
+
+    ``report`` is passed straight to ``build_command``; see there. It is how
+    a caller learns what this render actually put on screen without asking
+    the filesystem a second time afterwards.
+    """
     beats = plan.script.beats
     # A beat needs some visual to render, but which kind no longer matters:
     # clips are the normal case now and image_path is the fallback (see
@@ -623,7 +641,8 @@ def render(plan: ReelPlan, settings, out_path: str | Path, *,
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     command, total, run_cwd = build_command(
-        plan, settings, out_path, ass_path=ass_path, music_path=music_path)
+        plan, settings, out_path, ass_path=ass_path, music_path=music_path,
+        report=report)
 
     process = subprocess.Popen(command, stdout=subprocess.DEVNULL,
                                stderr=subprocess.PIPE, text=True,

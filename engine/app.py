@@ -56,7 +56,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from engine.agents import latin_words
-from engine.assembly import stickers as stickers_mod
 from engine.assembly.render import VIDEO_SUFFIXES
 from engine.config import (Settings, beat_count, beat_word_range,
                            speech_rate, spoken_seconds, word_budget,
@@ -1634,15 +1633,21 @@ def create_app(db_path: str | Path | None = None,
                     if r["plan_id"] == plan_id), {})
         video = row.get("video") or ""
         rendered = store.render_duration(plan_id)
-        # Recomputed here rather than threaded through from the render: this
-        # route only has the stored plan, not the in-flight render's sticker
-        # list, and prepare() is pure lookup over the bake once it exists.
-        prepared = stickers_mod.prepare(plan, settings)
+        # Read back from the render that made this MP4, never recomputed.
+        # prepare() answers "what would a render started right now use?",
+        # which is a different question: RAHASYA_STICKERS, the sticker scale
+        # and the contents of engine/data/stickers/ all move independently of
+        # a file that was written days ago. Asking it here put the Lordicon
+        # credit on six stored plans whose videos predate any baked art, and
+        # would equally have stripped it from a reel that is full of it the
+        # moment stickers were switched off. NULL means no credit, which is
+        # exactly what a render from before this was recorded knows.
+        credit = store.render_attribution(plan_id)
         return {
-            "youtube": youtube_payload(plan, video, stickers=prepared),
+            "youtube": youtube_payload(plan, video, attribution=credit),
             "instagram": instagram_payload(
                 plan, "https://REPLACE-WITH-PUBLIC-URL/video.mp4",
-                stickers=prepared),
+                attribution=credit),
             "checklist": publish_checklist(plan, video,
                                            actual_duration=rendered),
             "note": ("Nothing here has been published. Run the upload "

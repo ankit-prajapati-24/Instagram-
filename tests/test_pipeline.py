@@ -29,7 +29,8 @@ import pytest
 from engine.config import Settings
 from engine.contract import Clip
 from engine.gates import qc
-from engine.pipeline import GateError, PipelineEvent, produce_stage
+from engine.pipeline import (GateError, PipelineEvent, produce_stage,
+                             render_stage)
 from engine.store import Store
 from tests.factories import make_plan
 
@@ -237,6 +238,56 @@ def test_the_gate_refusal_names_both_bands(tmp_path, monkeypatch):
     assert "42" in detail and "57" in detail        # what QC publishes
     assert "66" in detail                           # what the gate accepts
     assert "15%" in detail                          # and the margin between
+
+
+# --- what the render did is what gets recorded -----------------------------
+
+
+def _attribution_harness(tmp_path, monkeypatch, credit):
+    """A harness whose fake render reports ``credit`` the way a real
+    one does."""
+    plan, store, settings, _clips, events = _harness(
+        tmp_path, monkeypatch, seconds_per_beat=4.0)
+
+    def fake_render(plan_, settings_, out_path, *, report=None, **kwargs):
+        from pathlib import Path as _Path
+        _Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        _Path(out_path).write_bytes(b"x")
+        if report is not None:
+            report["attribution"] = credit
+
+    monkeypatch.setattr("engine.pipeline.render", fake_render)
+    for beat in plan.script.beats:
+        beat.measured_seconds = 4.0
+        beat.audio_path = "a.mp3"
+    return plan, store, settings, events
+
+
+def test_the_render_stage_records_the_credit_the_render_reported(
+        tmp_path, monkeypatch):
+    """The wire between the render and the render record.
+
+    Without it the publish route has nothing true to read, and the only
+    remaining way to answer "does this MP4 owe Lordicon a credit?" is to
+    guess from today's settings -- which is the defect.
+    """
+    credit = "Animated icons by Lordicon.com"
+    plan, store, settings, _ = _attribution_harness(
+        tmp_path, monkeypatch, credit)
+
+    render_stage(plan, store, settings)
+
+    assert store.render_attribution(plan.plan_id) == credit
+
+
+def test_a_render_with_no_designed_art_records_no_credit(tmp_path,
+                                                         monkeypatch):
+    plan, store, settings, _ = _attribution_harness(tmp_path, monkeypatch,
+                                                    None)
+
+    render_stage(plan, store, settings)
+
+    assert store.render_attribution(plan.plan_id) is None
 
 
 def test_the_length_stage_runs_between_voice_and_clips():

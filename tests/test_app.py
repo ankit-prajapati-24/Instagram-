@@ -167,6 +167,65 @@ def test_publish_preview_builds_payloads_without_uploading(client):
     assert "Nothing here has been published" in body["note"]
 
 
+def test_publish_preview_credits_lordicon_when_the_render_recorded_it(client):
+    """The credit follows the render record, not today's filesystem.
+
+    Drives the real route rather than the payload builders, because the
+    defect this guards lived in the route: it called stickers_mod.prepare()
+    and credited whatever a render started *now* would use.
+    """
+    from engine.assembly import stickers as stk
+    store = _seed(client)
+    store.record_render("p1", "render:p1:v1", "done", output_path="o.mp4",
+                        duration_s=50.0, attribution=stk.ATTRIBUTION)
+
+    body = client.get("/api/plan/p1/publish").json()
+
+    assert stk.ATTRIBUTION in body["youtube"]["snippet"]["description"]
+    assert stk.ATTRIBUTION in body["instagram"]["caption"]
+
+
+def test_publish_preview_stays_silent_when_the_render_recorded_nothing(
+        client, monkeypatch):
+    """The regression, and the licence-relevant half of it.
+
+    This plan's render recorded NULL -- it is one of the six in the live
+    engine.db whose MP4 was written on 2026-09-17/18, before any baked art
+    existed. prepare() is forced to return a baked sticker here, so the only
+    way the credit can stay out of these payloads is if the route reads the
+    record instead of recomputing. Before the fix this test fails on both
+    payloads.
+    """
+    from engine.assembly import stickers as stk
+    store = _seed(client)
+    store.record_render("p1", "render:p1:v1", "done", output_path="o.mp4",
+                        duration_s=50.0)          # NULL attribution
+
+    baked = [stk.Sticker(
+        name="death", emoji="💀", word="kankaal", beat_index=0,
+        start=1.0, slot=0, style="dark", baked=True, size=184, canvas=232,
+        frames=42, pattern="x-%03d.png", png="x-041.png")]
+    # Patched on the module itself, so it bites whether the route holds a
+    # reference to stickers_mod or imports prepare directly.
+    monkeypatch.setattr(stk, "prepare", lambda *a, **k: baked)
+
+    body = client.get("/api/plan/p1/publish").json()
+
+    assert stk.ATTRIBUTION not in body["youtube"]["snippet"]["description"], (
+        "credited Lordicon on a video rendered before any baked art existed")
+    assert stk.ATTRIBUTION not in body["instagram"]["caption"], (
+        "credited Lordicon on a video rendered before any baked art existed")
+
+
+def test_publish_preview_stays_silent_when_there_was_no_render(client):
+    """No render row at all -- the same NULL, reached another way."""
+    from engine.assembly import stickers as stk
+    _seed(client)
+    body = client.get("/api/plan/p1/publish").json()
+    assert stk.ATTRIBUTION not in body["youtube"]["snippet"]["description"]
+    assert stk.ATTRIBUTION not in body["instagram"]["caption"]
+
+
 def test_publish_preview_needs_metadata(client):
     store: Store = client.app.state.store
     store.save_plan(make_plan(plan_id="p2", with_metadata=False),
@@ -232,8 +291,10 @@ def test_both_payloads_carry_the_lordicon_credit_when_art_rendered():
         frames=48, pattern="x-%03d.png", png="x-047.png")]
     plan = make_plan()
 
-    yt = payloads.youtube_payload(plan, "out.mp4", stickers=baked)
-    ig = payloads.instagram_payload(plan, "https://x/v.mp4", stickers=baked)
+    credit = stk.attribution_for(baked)
+    yt = payloads.youtube_payload(plan, "out.mp4", attribution=credit)
+    ig = payloads.instagram_payload(plan, "https://x/v.mp4",
+                                    attribution=credit)
     assert stk.ATTRIBUTION in yt["snippet"]["description"]
     assert stk.ATTRIBUTION in ig["caption"]
 
@@ -246,9 +307,11 @@ def test_both_payloads_carry_the_lordicon_credit_when_art_rendered():
         name="water", emoji="\U0001f4a7", word="paani", beat_index=0,
         start=1.0, slot=0, style="punchy", baked=False, size=60, canvas=76,
         frames=7, pattern="e-%03d.png", png="e-006.png")]
-    yt_emoji = payloads.youtube_payload(plan, "out.mp4", stickers=unbaked)
+    emoji_credit = stk.attribution_for(unbaked)
+    yt_emoji = payloads.youtube_payload(plan, "out.mp4",
+                                        attribution=emoji_credit)
     ig_emoji = payloads.instagram_payload(plan, "https://x/v.mp4",
-                                          stickers=unbaked)
+                                          attribution=emoji_credit)
     assert stk.ATTRIBUTION not in yt_emoji["snippet"]["description"]
     assert stk.ATTRIBUTION not in ig_emoji["caption"]
 
@@ -269,7 +332,7 @@ def test_a_long_caption_loses_its_own_tail_not_the_lordicon_credit():
     plan.metadata.ig_caption = "x" * 3000
 
     body = payloads.instagram_payload(
-        plan, "https://x/v.mp4", stickers=baked)
+        plan, "https://x/v.mp4", attribution=stk.attribution_for(baked))
 
     assert len(body["caption"]) <= payloads.MAX_IG_CAPTION
     assert body["caption"].endswith(stk.ATTRIBUTION)

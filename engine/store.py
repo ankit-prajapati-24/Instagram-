@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS renders (
   output_path TEXT,
   duration_s REAL,
   error_log TEXT,
+  attribution TEXT,
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS publications (
@@ -125,6 +126,31 @@ CREATE INDEX IF NOT EXISTS idx_entities_entity ON entities(entity);
 """
 
 
+# Columns added to a table after this database first existed. ``CREATE TABLE
+# IF NOT EXISTS`` does nothing to a table that is already there, so every
+# clone that has ever been rendered against still carries the old shape and
+# something has to widen it. Guarded by ``PRAGMA table_info`` rather than by
+# swallowing sqlite's duplicate-column error, so it runs exactly once and is a
+# no-op on a fresh database and on every later start.
+#
+# Every one of these must be nullable and must mean something sane when NULL,
+# because the rows written before the column existed keep that NULL forever
+# and are deliberately never backfilled: a render from before ``attribution``
+# was recorded genuinely does not know what it used, and guessing on its
+# behalf is the bug this column exists to remove.
+ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("renders", "attribution", "TEXT"),
+)
+
+
+def _apply_added_columns(conn: sqlite3.Connection) -> None:
+    for table, column, decl in ADDED_COLUMNS:
+        present = {row["name"]
+                   for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in present:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 # A plan only blocks its own topic once it actually became something. Gate
 # rejections stay in the table for the audit trail without poisoning retries.
 COUNTED_STATUSES = ("approved", "produced", "published")
@@ -150,6 +176,7 @@ class Store:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as conn:
             conn.executescript(SCHEMA)
+            _apply_added_columns(conn)
 
     # -- plans ------------------------------------------------------------
     def save_plan(self, plan: ReelPlan, status: str = "draft") -> None:
@@ -279,19 +306,37 @@ class Store:
     def record_render(self, plan_id: str, idempotency_key: str, status: str,
                       output_path: str | None = None,
                       duration_s: float | None = None,
-                      error_log: str | None = None) -> None:
+                      error_log: str | None = None,
+                      attribution: str | None = None) -> None:
+        """Write what this render did. ``attribution`` is the credit line the
+        stickers it actually composited oblige us to print.
+
+        It is stored rather than worked out later because the only honest
+        answer to "does this MP4 owe Lordicon a credit?" is what was on the
+        timeline when ffmpeg ran. Re-deriving it at publish time reads
+        today's settings and today's baked art against a file that may be
+        days old, which gets it wrong in both directions: a credit on a reel
+        made before any art existed, and — the licence-breaking one — no
+        credit on a reel full of it after ``RAHASYA_STICKERS`` was turned off
+        or the bake was re-made at another size.
+
+        ``None`` means "this render owes no credit", and a row written before
+        this column existed means the same thing, which is why it is nullable
+        and why nothing backfills it.
+        """
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO renders(plan_id, idempotency_key, status, "
-                "attempts, output_path, duration_s, error_log, created_at) "
-                "VALUES(?,?,?,1,?,?,?,?) "
+                "attempts, output_path, duration_s, error_log, attribution, "
+                "created_at) VALUES(?,?,?,1,?,?,?,?,?) "
                 "ON CONFLICT(idempotency_key) DO UPDATE SET "
                 "status=excluded.status, attempts=renders.attempts+1, "
                 "output_path=excluded.output_path, "
                 "duration_s=excluded.duration_s, "
-                "error_log=excluded.error_log",
+                "error_log=excluded.error_log, "
+                "attribution=excluded.attribution",
                 (plan_id, idempotency_key, status, output_path, duration_s,
-                 error_log, _now()))
+                 error_log, attribution, _now()))
 
     def render_duration(self, plan_id: str) -> float | None:
         """Probed length of the latest successful render, if there is one."""
@@ -301,6 +346,20 @@ class Store:
                 "AND status='done' AND duration_s IS NOT NULL "
                 "ORDER BY id DESC LIMIT 1", (plan_id,)).fetchone()
         return float(row["duration_s"]) if row else None
+
+    def render_attribution(self, plan_id: str) -> str | None:
+        """The credit line the latest successful render recorded, if any.
+
+        NULL — no row, a row from before the column existed, or a render that
+        composited no designed art — all mean the same thing: this video owes
+        no credit. Publishing must not look any further than this.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT attribution FROM renders WHERE plan_id=? "
+                "AND status='done' ORDER BY id DESC LIMIT 1",
+                (plan_id,)).fetchone()
+        return row["attribution"] if row else None
 
     # -- dedup support ----------------------------------------------------
     def save_embedding(self, plan_id: str, vector: list[float]) -> None:

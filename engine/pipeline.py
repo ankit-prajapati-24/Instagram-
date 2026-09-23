@@ -767,9 +767,14 @@ def render_stage(plan: ReelPlan, store, settings, *,
                        else "music: none (assets/music/ is empty)"))
     out_path = Path(settings.out_dir) / f"{plan.topic.slug}-{plan.plan_id[:8]}.mp4"
     key = f"render:{plan.plan_id}:v1"
+    # Filled in by the render with what it actually composited. The Lordicon
+    # credit is recorded from here rather than re-derived at publish time,
+    # because by then the settings, the baked art and the code may all have
+    # moved on while the MP4 has not.
+    used: dict = {}
     try:
         render(plan, settings, out_path, ass_path=ass_path,
-               music_path=music_path,
+               music_path=music_path, report=used,
                progress=lambda frac: emit(PipelineEvent(
                    Stage.RENDER, "info", f"{frac * 100:.0f}%")))
     except Exception as exc:
@@ -779,7 +784,8 @@ def render_stage(plan: ReelPlan, store, settings, *,
         raise
     info = probe_video(out_path, settings.ffmpeg)
     store.record_render(plan.plan_id, key, "done", output_path=str(out_path),
-                        duration_s=info.get("duration"))
+                        duration_s=info.get("duration"),
+                        attribution=used.get("attribution"))
     emit(PipelineEvent(Stage.RENDER, "done",
                        f"{info.get('duration', 0):.1f}s, "
                        f"{info.get('bytes', 0) // 1024}KB", info))

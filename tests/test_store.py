@@ -4,6 +4,8 @@ from engine.omniroute import CostRecord
 from engine.store import Store
 from tests.factories import make_plan
 
+CREDIT = "Animated icons by Lordicon.com"
+
 
 @pytest.fixture()
 def store(tmp_path):
@@ -108,6 +110,58 @@ def test_render_upsert_keeps_latest_output(store):
     store.record_render("p1", "render:p1:v1", "done", output_path="o.mp4",
                         duration_s=44.0)
     assert store.list_plans()[0]["video"] == "o.mp4"
+
+
+def test_the_attribution_column_is_added_to_a_database_that_predates_it(
+        tmp_path):
+    """The renders table is created with CREATE TABLE IF NOT EXISTS, which
+    does nothing to a table that already exists. Without an explicit widen,
+    every clone that had ever rendered would raise "no such column" on the
+    publish route -- including the live engine.db this was found in.
+
+    Also asserts init() is safe to run twice, because it runs on every app
+    start, and that the pre-existing row keeps the NULL that makes it mean
+    "this video owes no credit".
+    """
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    old = Store(db)
+    old.init()
+    # Put the table back in its pre-column shape, with a row in it, exactly
+    # as a database rendered against before this change looks.
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TABLE renders")
+        conn.execute(
+            "CREATE TABLE renders (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "plan_id TEXT NOT NULL, idempotency_key TEXT UNIQUE, "
+            "status TEXT NOT NULL, attempts INTEGER DEFAULT 0, "
+            "output_path TEXT, duration_s REAL, error_log TEXT, "
+            "created_at TEXT NOT NULL)")
+        conn.execute(
+            "INSERT INTO renders(plan_id, idempotency_key, status, "
+            "output_path, created_at) VALUES('p1','render:p1:v1','done',"
+            "'o.mp4','2026-09-18T08:51:03+00:00')")
+
+    reopened = Store(db)
+    reopened.init()
+    reopened.init()                      # every app start runs this
+
+    assert reopened.render_attribution("p1") is None
+    reopened.record_render("p1", "render:p1:v2", "done", output_path="n.mp4",
+                           attribution=CREDIT)
+    assert reopened.render_attribution("p1") == CREDIT
+
+
+def test_a_failed_retry_does_not_leave_a_stale_credit_behind(store):
+    """The upsert shares one row per plan, so a re-render that fails must
+    not leave the previous success's credit sitting on it."""
+    store.save_plan(make_plan(), status="draft")
+    store.record_render("p1", "render:p1:v1", "done", output_path="o.mp4",
+                        attribution=CREDIT)
+    assert store.render_attribution("p1")
+    store.record_render("p1", "render:p1:v1", "failed", error_log="boom")
+    assert store.render_attribution("p1") is None
 
 
 def test_list_plans_reports_cost(store):

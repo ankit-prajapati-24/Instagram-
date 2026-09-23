@@ -17,7 +17,6 @@ code can arrange.
 
 from __future__ import annotations
 
-from engine.assembly import stickers as stickers_mod
 from engine.contract import ReelPlan
 
 YOUTUBE_CATEGORY_PEOPLE_BLOGS = "22"
@@ -42,15 +41,17 @@ def _sources_block(plan: ReelPlan) -> str:
 
 
 def youtube_payload(plan: ReelPlan, video_path: str, *,
-                    stickers: list | None = None) -> dict:
+                    attribution: str | None = None) -> dict:
     """Body for ``youtube.videos.insert``, plus the local file to upload.
 
     Privacy is ``private`` on purpose: the upload lands unlisted so a human
     flips it public after watching it back.
 
-    ``stickers`` is the prepared list the render used. It is optional and
-    defaults to none so every existing caller keeps working unchanged; pass
-    it to get the Lordicon credit when designed art actually rendered.
+    ``attribution`` is the credit line the render recorded when it ran (see
+    ``Store.record_render``), or None. It is a stored fact about the MP4, not
+    something worked out here: deriving it from today's settings and today's
+    baked art would put the credit on videos that contain no designed art and
+    — the licence-breaking direction — take it off videos that do.
     """
     if not plan.metadata:
         raise ValueError("plan has no metadata; run the metadata agent first")
@@ -62,7 +63,7 @@ def youtube_payload(plan: ReelPlan, video_path: str, *,
     tags_line = _hashtag_block(plan, 8)
     if tags_line:
         description_parts.append(tags_line)
-    credit = stickers_mod.attribution_for(stickers or [])
+    credit = attribution
     if credit:
         description_parts.append(credit)
 
@@ -88,15 +89,17 @@ def youtube_payload(plan: ReelPlan, video_path: str, *,
 
 
 def instagram_payload(plan: ReelPlan, video_url: str, *,
-                      stickers: list | None = None) -> dict:
+                      attribution: str | None = None) -> dict:
     """Body for the Instagram Content Publishing API container step.
 
     ``video_url`` must be publicly reachable — the API fetches it rather than
     accepting an upload.
 
-    ``stickers`` is the prepared list the render used. It is optional and
-    defaults to none so every existing caller keeps working unchanged; pass
-    it to get the Lordicon credit when designed art actually rendered.
+    ``attribution`` is the credit line the render recorded when it ran (see
+    ``Store.record_render``), or None. It is a stored fact about the MP4, not
+    something worked out here: deriving it from today's settings and today's
+    baked art would put the credit on videos that contain no designed art and
+    — the licence-breaking direction — take it off videos that do.
     """
     if not plan.metadata:
         raise ValueError("plan has no metadata; run the metadata agent first")
@@ -111,7 +114,7 @@ def instagram_payload(plan: ReelPlan, video_url: str, *,
     # it the other way round silently drops the credit on exactly the
     # captions long enough to need trimming -- which are the hashtag-heavy
     # ones this channel actually writes.
-    credit = stickers_mod.attribution_for(stickers or [])
+    credit = attribution
     if credit:
         caption = caption[:MAX_IG_CAPTION - len(credit) - 2].rstrip()
         caption = f"{caption}\n\n{credit}"
