@@ -21,18 +21,24 @@ import threading
 import time
 import traceback
 from pathlib import Path
+from typing import get_args
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from engine.assembly.render import VIDEO_SUFFIXES
-from engine.config import Settings
-from engine.contract import Beat, Motion, Transition
+from engine.config import (Settings, beat_count, beat_word_range,
+                           speech_rate, spoken_seconds, word_budget,
+                           words_per_beat)
+from engine.contract import (Beat, Claim, Metadata, Motion, Role, Transition)
+from engine.gates.qc import pre_render_range
 from engine.omniroute import OmniRouteClient
-from engine.pipeline import (BudgetError, GateError, PipelineEvent,
-                             Stage, plan_stage, produce_stage)
+from engine.pipeline import (BudgetError, GateError, ManualScriptError,
+                             PipelineEvent, Stage, budget_report,
+                             default_roles, manual_plan_stage, plan_stage,
+                             produce_stage)
 from engine.publish.payloads import (instagram_payload, publish_checklist,
                                      youtube_payload)
 from engine.store import Store
@@ -127,6 +133,41 @@ class BeatEdit(BaseModel):
     visual_prompt: str
     motion: Motion
     transition: Transition
+
+
+class ManualBeat(BaseModel):
+    """One row of the blank authoring form.
+
+    Same Literal types as ``BeatEdit``, and for the same reason: a bad
+    motion posted here would be persisted unvalidated by any later
+    ``model_copy`` and brick the plan. FastAPI refuses it with a 422 before
+    it reaches the builder.
+    """
+
+    role: Role
+    voice_text: str
+    caption_text: str
+    on_screen_text: str | None = None
+    visual_prompt: str
+    motion: Motion = "zoom_in"
+    transition: Transition = "fade"
+
+
+class ManualPlanRequest(BaseModel):
+    """A script a human wrote, instead of one a model wrote.
+
+    ``sources`` are the contract's own ``Claim`` objects, not a parallel
+    shape — they land in ``plan.provenance.claims`` untouched, which is what
+    QC and the publish payloads already read. ``metadata`` is likewise the
+    contract's ``Metadata``: omitted or left blank, the plan simply has none.
+    """
+
+    topic: str
+    beats: list[ManualBeat]
+    entities: list[str] = Field(default_factory=list)
+    sources: list[Claim] = Field(default_factory=list)
+    acknowledge_unsourced: bool = False
+    metadata: Metadata | None = None
 
 
 class ApproveRequest(BaseModel):
@@ -311,6 +352,83 @@ def create_app(db_path: str | Path | None = None,
 
         threading.Thread(target=work, daemon=True).start()
         return {"job_id": job_id}
+
+    @app.get("/api/authoring")
+    def authoring() -> dict:
+        """Every number the blank authoring form needs, from the server.
+
+        The panel must not carry a copy of the beat count, the word budget
+        or the speech rate — stale copies of exactly these numbers caused
+        two separate bugs, which is why ``engine.config`` holds one
+        definition each. So the panel holds none: it fetches this and
+        renders the form, the live budget meter and the duration windows
+        from what comes back.
+        """
+        budget = word_budget(settings)
+        count = beat_count(settings)
+        per_beat = words_per_beat(budget, count, settings)
+        beat_words_min, beat_words_max = beat_word_range(per_beat, settings)
+        gate_min, gate_max = pre_render_range(settings.duration_min,
+                                              settings.duration_max)
+        from engine.agents import LATIN_LETTERS_RE, WORD_TOLERANCE
+
+        return {
+            "beat_count": count,
+            "word_budget": budget,
+            "word_tolerance": WORD_TOLERANCE,
+            "word_min": round(budget * (1 - WORD_TOLERANCE)),
+            "word_max": round(budget * (1 + WORD_TOLERANCE)),
+            "words_per_beat": per_beat,
+            "beat_words_min": beat_words_min,
+            "beat_words_max": beat_words_max,
+            "speech_rate": speech_rate(settings),
+            "predicted_seconds": spoken_seconds(budget, settings),
+            "target_seconds": settings.target_seconds,
+            "duration_min": settings.duration_min,
+            "duration_max": settings.duration_max,
+            "gate_min": gate_min,
+            "gate_max": gate_max,
+            "default_roles": default_roles(count, settings),
+            "roles": list(get_args(Role)),
+            "motions": list(get_args(Motion)),
+            "transitions": list(get_args(Transition)),
+            # The Devanagari rule's own regex, so the panel's live warning
+            # cannot disagree with the server's refusal.
+            "latin_pattern": LATIN_LETTERS_RE.pattern,
+            "topic_max": TOPIC_MAX,
+        }
+
+    @app.post("/api/plan/manual")
+    def create_manual_plan(request: ManualPlanRequest) -> dict:
+        """The second entry path: a script the user wrote.
+
+        Synchronous, unlike ``/api/plan/async``, because there is nothing to
+        wait for — no model is called, so the whole thing is validation and
+        one SQLite write. The stage events come back in the response so the
+        panel can paint the same evidence log without an SSE channel.
+        """
+        check_topic(request.topic)
+        events: list[dict] = []
+        try:
+            plan = manual_plan_stage(
+                request.topic, [b.model_dump() for b in request.beats],
+                store, settings,
+                entities=request.entities,
+                claims=request.sources,
+                metadata=request.metadata,
+                acknowledge_unsourced=request.acknowledge_unsourced,
+                emit=lambda event: events.append(event.to_dict()))
+        except ManualScriptError as exc:
+            # 400, not 409: this is the form being wrong, not a gate
+            # refusing an otherwise valid plan.
+            raise HTTPException(400, "\n".join(exc.problems)) from exc
+        except GateError as exc:
+            raise HTTPException(409, f"{exc.gate}: {exc.detail}") from exc
+        return {
+            "plan": json.loads(plan.model_dump_json()),
+            "budget": budget_report(plan.script, settings),
+            "events": events,
+        }
 
     @app.post("/api/plan/{plan_id}/approve")
     def approve(plan_id: str, request: ApproveRequest) -> dict:

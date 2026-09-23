@@ -250,6 +250,35 @@
   }
   .banner a { color: var(--gold); }
 
+  /* live word budget, on the authoring form */
+  .meter {
+    border: 1px solid var(--rule); border-left: 3px solid var(--rule);
+    background: var(--card); padding: 11px 14px; margin: 14px 0;
+    font-size: 13px; line-height: 1.6; font-variant-numeric: tabular-nums;
+    color: var(--muted);
+  }
+  .meter.good { border-left-color: var(--moss); }
+  .meter.warn { border-left-color: var(--gold); }
+  .meter.bad  { border-left-color: var(--stamp); }
+  .meter b { color: var(--paper); font-weight: 500; }
+  .bad-text  { color: var(--stamp); }
+  .warn-text { color: var(--gold); }
+
+  .deva-warn { font-size: 12px; margin-top: 5px; }
+  .deva-warn.bad { color: var(--stamp); }
+  select.rolepick {
+    font-size: 11.5px; padding: 3px 4px; margin-top: 5px; width: 100%;
+  }
+  .srcrow {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+    margin-bottom: 8px;
+  }
+  .tick {
+    display: flex; align-items: center; gap: 8px; font-size: 13px;
+    color: var(--muted);
+  }
+  .tick input { accent-color: var(--gold); width: auto; }
+
   .hidden { display: none !important; }
   .spin { color: var(--gold); }
 
@@ -292,9 +321,65 @@
         <input type="text" id="topic"
                placeholder="Roopkund jheel ke 500 kankaal"
                autocomplete="off">
-        <button class="go" id="btn-plan">Write the script</button>
+        <button class="go" id="btn-plan">Generate with AI</button>
+        <button id="btn-manual">Write my own</button>
       </div>
-      <p class="hint" id="plan-note"></p>
+      <p class="hint" id="plan-note">Both routes end at the same approve
+        gate and the same render. Writing your own calls no model at all,
+        so it works with every provider down.</p>
+    </section>
+
+    <section class="sheet hidden" id="s-manual">
+      <h3>Your script <em id="manual-shape"></em></h3>
+      <p class="hint">Nothing on this path is sent to a model — not the
+        script, not research, not the metadata. Devanagari is what the voice
+        reads; Roman Hinglish is what gets burned on screen.</p>
+
+      <div class="meter" id="budget"></div>
+
+      <table class="ledger">
+        <thead>
+          <tr><th>Beat</th><th>Spoken and burned text</th><th>Scene</th>
+            <th>Words</th></tr>
+        </thead>
+        <tbody id="manual-beats"></tbody>
+      </table>
+
+      <h3 style="margin-top:30px">Sources <em>research did not run</em></h3>
+      <p class="hint">Every factual claim carries a source URL, or the claim
+        is cut. A claim with no URL is refused here, because the inspection
+        scorecard would otherwise refuse it after a ten-minute render.</p>
+      <div id="sources"></div>
+      <div class="entry">
+        <button id="btn-add-source">Add a source</button>
+        <label class="tick"><input type="checkbox" id="no-sources">
+          I am asserting nothing that needs a source</label>
+      </div>
+
+      <h3 style="margin-top:30px">Optional <em>leave any of this blank</em></h3>
+      <div class="copy">
+        <div><label>Entities — comma separated. These drive the 45-day
+          cooldown; with none, that layer has nothing to compare.</label>
+          <input type="text" id="m-entities"
+                 placeholder="Roopkund, Uttarakhand"></div>
+        <div><label>YouTube title</label>
+          <input type="text" id="m-title"></div>
+        <div><label>YouTube description</label>
+          <textarea id="m-desc" rows="2"></textarea></div>
+        <div><label>Instagram caption</label>
+          <textarea id="m-ig" rows="2"></textarea></div>
+        <div><label>Pinned comment</label>
+          <textarea id="m-pin" rows="2"></textarea></div>
+        <div><label>Hashtags — comma separated</label>
+          <input type="text" id="m-tags"></div>
+      </div>
+      <p class="hint">Leave the metadata empty and the plan simply has none;
+        the publishing sheet says so when you get there.</p>
+
+      <div class="entry">
+        <button class="go" id="btn-manual-build">Build the plan</button>
+      </div>
+      <p class="hint" id="manual-note"></p>
     </section>
 
     <section class="sheet hidden" id="s-hooks">
@@ -429,12 +514,14 @@ async function health() {
     if (h.omniroute !== "ready") {
       USE_FAKE = true;
       banner(
-        `<b>No provider is reachable, so scripts will come from the built-in ` +
-        `sample instead of a model.</b><br>` +
-        `Everything after the script is real: voice, captions, render, ` +
-        `inspection. To use a real model, add one provider key to ` +
-        `<code>~/.omniroute/.env</code> and restart the gateway — ` +
-        `see <code>docs/omniroute-setup.md</code>.`, false);
+        `<b>No provider is reachable.</b> "Generate with AI" will fall back ` +
+        `to the built-in sample script instead of a model.<br>` +
+        `<b>"Write my own" still works completely</b> — it calls no model ` +
+        `at any stage — and everything after the script is real either ` +
+        `way: voice, captions, render, inspection. To use a real model, ` +
+        `add one provider key to <code>~/.omniroute/.env</code> and ` +
+        `restart the gateway — see <code>docs/omniroute-setup.md</code>.`,
+        false);
     } else {
       USE_FAKE = false;
       $("banner").classList.add("hidden");
@@ -693,12 +780,251 @@ $("btn-produce").onclick = async () => {
   }
 };
 
+/* ---------------------------------------------------------------------
+   The second entry path: a script the user writes.
+
+   Every number below — the beat count, the word budget, the tolerance
+   band, the speech rate, both duration windows, even the regex behind the
+   Devanagari rule — comes from /api/authoring, which reads them from
+   engine/config.py and engine/gates/qc.py. There is deliberately not one
+   of them written down here: stale copies of exactly these numbers have
+   caused two bugs already, and a panel that warned against a different
+   band than the server enforces would be a third.
+   --------------------------------------------------------------------- */
+let AUTHORING = null;
+
+async function loadAuthoring() {
+  try {
+    AUTHORING = await (await fetch("/api/authoring")).json();
+    buildManualForm();
+  } catch (err) {
+    $("btn-manual").disabled = true;
+  }
+}
+
+const wordCount = (text) => {
+  const t = (text || "").trim();
+  return t ? t.split(/\s+/).length : 0;
+};
+
+const latinRuns = (text) =>
+  (text || "").match(new RegExp(AUTHORING.latin_pattern, "g")) || [];
+
+function buildManualForm() {
+  const A = AUTHORING;
+  $("manual-shape").textContent =
+    `${A.beat_count} beats · ${A.word_budget} words · `
+    + `~${A.predicted_seconds.toFixed(1)}s · `
+    + `${A.beat_words_min}-${A.beat_words_max} words a beat`;
+
+  const rows = [];
+  for (let i = 0; i < A.beat_count; i++) {
+    const id = "b" + (i + 1);
+    const role = A.default_roles[i];
+    rows.push(`
+      <tr data-beat="${id}">
+        <td class="beat">${id}
+          <select class="rolepick" data-f="role">${A.roles.map((r) =>
+            `<option ${r === role ? "selected" : ""}>${r}</option>`
+          ).join("")}</select>
+        </td>
+        <td>
+          <div class="twin">
+            <textarea class="deva" rows="2" data-f="voice_text"
+              placeholder="Devanagari only — the voice reads this"></textarea>
+            <textarea rows="2" data-f="caption_text"
+              placeholder="Roman Hinglish — this is burned on screen"></textarea>
+            <input type="text" data-f="on_screen_text"
+              placeholder="punch card, 2-4 words, optional">
+          </div>
+          <div class="deva-warn" id="warn-${id}"></div>
+        </td>
+        <td>
+          <textarea rows="3" data-f="visual_prompt"
+            placeholder="English — what the stock footage should show"></textarea>
+          <div class="mini">
+            <select data-f="motion">${A.motions.map((m) =>
+              `<option>${m}</option>`).join("")}</select>
+            <select data-f="transition">${A.transitions.map((t) =>
+              `<option>${t}</option>`).join("")}</select>
+          </div>
+        </td>
+        <td class="secs" id="w-${id}">0</td>
+      </tr>`);
+  }
+  $("manual-beats").innerHTML = rows.join("");
+  $("manual-beats").addEventListener("input", updateBudget);
+  addSource();
+  updateBudget();
+}
+
+function updateBudget() {
+  if (!AUTHORING) return;
+  const A = AUTHORING;
+  let total = 0;
+  let latin = 0;
+
+  document.querySelectorAll("#manual-beats tr").forEach((row) => {
+    const id = row.dataset.beat;
+    const voice = row.querySelector('[data-f="voice_text"]').value;
+    const n = wordCount(voice);
+    total += n;
+    $("w-" + id).textContent = n;
+
+    const bad = latinRuns(voice);
+    const warn = $("warn-" + id);
+    if (bad.length) {
+      latin += bad.length;
+      warn.className = "deva-warn bad";
+      warn.textContent = "Latin script in the spoken line: "
+        + [...new Set(bad)].join(", ")
+        + " — transliterate it, or the voice mispronounces it.";
+    } else {
+      warn.className = "deva-warn";
+      warn.textContent = "";
+    }
+  });
+
+  const secs = total / A.speech_rate;
+  const inBand = total >= A.word_min && total <= A.word_max;
+  const renderable = secs >= A.gate_min && secs <= A.gate_max;
+  const pct = (A.word_tolerance * 100).toFixed(0);
+  const qcWindow = `${A.duration_min.toFixed(0)}–${A.duration_max.toFixed(0)}s`;
+  const gate = `${A.gate_min.toFixed(0)}–${A.gate_max.toFixed(0)}s`;
+
+  let note = "";
+  if (latin) {
+    note += `<br><span class="bad-text">${latin} Latin-script run(s) in the `
+      + `spoken lines. This is refused on submit — it is the same rule the `
+      + `script agent is held to.</span>`;
+  }
+  if (total && !renderable) {
+    note += `<br><span class="bad-text">Outside ${gate}, which is what the `
+      + `pre-render length gate accepts. Submitting is refused now rather `
+      + `than after a full voice pass.</span>`;
+  } else if (total && !inBand) {
+    note += `<br><span class="warn-text">Outside the ±${pct}% band the `
+      + `script agent is held to. It will render, but the finished file is `
+      + `scored against ${qcWindow}.</span>`;
+  }
+
+  $("budget").className = "meter "
+    + (!total ? "" : (latin || !renderable) ? "bad" : (inBand ? "good" : "warn"));
+  $("budget").innerHTML =
+    `<b>${total}</b> of <b>${A.word_budget}</b> words `
+    + `(the ±${pct}% band is ${A.word_min}–${A.word_max}) · `
+    + `predicted <b>${secs.toFixed(1)}s</b> at ${A.speech_rate} words/sec · `
+    + `a finished video must land in <b>${qcWindow}</b> · `
+    + `refused before render outside ${gate}`
+    + note;
+
+  $("btn-manual-build").disabled = !total || latin > 0 || !renderable;
+}
+
+function addSource() {
+  const row = document.createElement("div");
+  row.className = "srcrow";
+  row.innerHTML =
+    `<input type="text" data-s="text" placeholder="the claim, as you say it">`
+    + `<input type="text" data-s="source_url" placeholder="https://…">`;
+  $("sources").appendChild(row);
+}
+
+function collectManual() {
+  const beats = [...document.querySelectorAll("#manual-beats tr")]
+    .map((row) => {
+      const out = {};
+      row.querySelectorAll("[data-f]").forEach((el) => {
+        out[el.dataset.f] = el.value;
+      });
+      return out;
+    });
+
+  const sources = [...document.querySelectorAll("#sources .srcrow")]
+    .map((row) => ({
+      text: row.querySelector('[data-s="text"]').value.trim(),
+      source_url: row.querySelector('[data-s="source_url"]').value.trim(),
+    }))
+    .filter((s) => s.text || s.source_url);
+
+  const list = (v) => v.split(",").map((s) => s.trim()).filter(Boolean);
+  const metadata = {
+    yt_title: $("m-title").value.trim(),
+    yt_description: $("m-desc").value.trim(),
+    ig_caption: $("m-ig").value.trim(),
+    pinned_comment: $("m-pin").value.trim(),
+    hashtags: list($("m-tags").value),
+  };
+  const wrote = metadata.yt_title || metadata.yt_description
+    || metadata.ig_caption || metadata.pinned_comment
+    || metadata.hashtags.length;
+
+  return {
+    topic: $("topic").value.trim(),
+    beats,
+    sources,
+    entities: list($("m-entities").value),
+    acknowledge_unsourced: $("no-sources").checked,
+    metadata: wrote ? metadata : null,
+  };
+}
+
+$("btn-manual").onclick = () => {
+  if (!$("topic").value.trim()) { $("topic").focus(); return; }
+  resetSpine();
+  ["s-hooks", "s-script", "s-images", "s-video", "s-qc", "s-publish"]
+    .forEach(hide);
+  show("s-manual");
+  updateBudget();
+  $("s-manual").scrollIntoView({ behavior: "smooth", block: "start" });
+};
+
+$("btn-add-source").onclick = addSource;
+
+$("btn-manual-build").onclick = async () => {
+  const body = collectManual();
+  if (!body.topic) { $("topic").focus(); return; }
+
+  $("btn-manual-build").disabled = true;
+  $("manual-note").innerHTML = `<span class="spin">Building the plan.
+    Nothing is sent to a model.</span>`;
+  try {
+    const response = await fetch("/api/plan/manual", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const data = await response.json();
+    $("manual-note").textContent = "";
+    if (!response.ok) {
+      banner("Not built:<br>"
+        + esc(String(data.detail || response.status)).replace(/\n/g, "<br>"),
+        true);
+      updateBudget();
+      return;
+    }
+    (data.events || []).forEach(
+      (ev) => markStage(ev.stage, ev.status, ev.detail));
+    $("banner").classList.add("hidden");
+    PLAN = data.plan;
+    hide("s-manual");
+    renderHooks(PLAN);
+    renderBeats(PLAN);
+    $("s-hooks").scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (err) {
+    $("manual-note").textContent = "";
+    banner("Request failed: " + esc(String(err)), true);
+  } finally {
+    updateBudget();
+  }
+};
+
 $("topic").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("btn-plan").click();
 });
 
 buildSpine();
 health();
+loadAuthoring();
 loadRecent();
 </script>
 </body>

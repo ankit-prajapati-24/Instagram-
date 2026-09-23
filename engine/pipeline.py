@@ -24,13 +24,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from engine.agents import (AgentError, run_hooks, run_metadata, run_research,
-                           run_script)
+from engine.agents import (WORD_TOLERANCE, AgentError, latin_violations,
+                           run_hooks, run_metadata, run_research, run_script,
+                           script_words)
 from engine.assembly import audio
 from engine.assembly.captions import write_ass
 from engine.assembly.render import probe_video, render
-from engine.config import beat_count, word_budget
-from engine.contract import ReelPlan, Script, Topic
+from engine.config import (beat_count, speech_rate, spoken_seconds,
+                           word_budget)
+from engine.contract import (Beat, Hook, Metadata, Provenance, ReelPlan,
+                             Safety, Script, Topic)
 from engine.gates import dedup
 from engine.gates.qc import (PRE_RENDER_MARGIN, duration_in_range,
                              pre_render_range, run_qc)
@@ -222,6 +225,336 @@ def plan_stage(topic_raw: str, client, store, settings, *,
     emit(PipelineEvent(Stage.DEDUP, "done", result.detail))
 
     plan.cost.usd = store.plan_cost(plan.plan_id)
+    store.save_plan(plan, status="awaiting_approval")
+    return plan
+
+
+# --- the hand-written path --------------------------------------------------
+#
+# Same destination as ``plan_stage``, reached without a model. Every provider
+# behind the gateway can be quota-blocked, keyless or 402 and this still
+# produces a plan, because nothing below this line takes a client, makes an
+# HTTP request or imports one that would. That is the feature: the function
+# signature is the guarantee, not a promise in a docstring.
+#
+# What it skips, and why each skip is safe:
+#
+#   research    The user supplies the sources, or says out loud that there
+#               are none. Never silently empty -- QC hard-fails an unsourced
+#               claim, and discovering that after a ten-minute render is the
+#               exact failure this path exists to avoid, so it is discovered
+#               at the form instead.
+#   hooks       Beat 1 IS the hook on a hand-written script. One Hook is
+#               synthesised from it so the approve gate has something to
+#               choose, and re-seeding beat 1 from it is then a no-op.
+#   script      This is the thing the human wrote.
+#   metadata    Optional. Left blank, the plan has none and the existing
+#               publish-preview 409 says so at the only moment it matters.
+#   moderation  Not run, and recorded as not run (see MANUAL_NOT_MODERATED)
+#               so QC and the publish checklist both say NOT CHECKED. A
+#               manual plan must never look moderated.
+#   dedup       Layers 1, 2 and 4 need no model and all run. Layer 3 is the
+#               embedding call, and ``dedup.check`` already skips it when it
+#               is handed no client -- deliberately, so a missing gateway
+#               cannot silently disable the cheap layers.
+#
+# The daily spend ceiling is deliberately NOT checked here: this path spends
+# nothing, so a spend ceiling has no jurisdiction over it, and blocking the
+# one route that still works on a day the ceiling was hit would be exactly
+# backwards. ``produce_stage`` still checks it, because that stage does spend.
+
+MANUAL_NOT_MODERATED = (
+    "no moderation call was made — this script was written by hand and the "
+    "manual path never sends it to a checker")
+
+# The arc the blank form pre-fills. Not a rule: the role of every beat is a
+# dropdown the user can change. hook first and cta last whatever the count.
+MANUAL_ROLE_ARC = ("setup", "escalation", "reveal", "twist", "escalation",
+                   "reveal", "twist", "cliffhanger")
+
+
+class ManualScriptError(ValueError):
+    """A hand-written script that cannot become a plan as typed.
+
+    Carries every problem at once rather than the first one: a person
+    retyping ten beats should be told about all ten, not made to resubmit
+    ten times.
+    """
+
+    def __init__(self, problems: list[str]):
+        super().__init__(" ".join(problems))
+        self.problems = list(problems)
+
+
+def default_roles(count: int | None = None, settings=None) -> list[str]:
+    """Roles for a blank form of ``count`` beats. Opens on the hook, ends
+    on the cta, cycles the middle."""
+    from engine.config import settings as configured
+
+    total = count or beat_count(settings or configured)
+    if total <= 0:
+        return []
+    if total == 1:
+        return ["hook"]
+    if total == 2:
+        return ["hook", "cta"]
+    middle = [MANUAL_ROLE_ARC[i % len(MANUAL_ROLE_ARC)]
+              for i in range(total - 2)]
+    return ["hook", *middle, "cta"]
+
+
+def budget_report(script: Script, settings) -> dict:
+    """What the word count means, in one place, for the panel and the gate.
+
+    Every number is derived from ``engine.config`` — ``word_budget()``,
+    ``speech_rate()``, ``spoken_seconds()`` — and from the two gates' own
+    constants (``WORD_TOLERANCE``, ``pre_render_range``). Nothing here is a
+    literal, which is why the panel can render a live budget meter without
+    knowing a single one of these numbers itself.
+    """
+    budget = word_budget(settings)
+    words = script_words(script)
+    drift = (words - budget) / budget if budget else 0.0
+    band_min = round(budget * (1 - WORD_TOLERANCE))
+    band_max = round(budget * (1 + WORD_TOLERANCE))
+    in_band = abs(drift) <= WORD_TOLERANCE
+    predicted = spoken_seconds(words, settings)
+    gate_min, gate_max = pre_render_range(settings.duration_min,
+                                          settings.duration_max)
+    warning = ""
+    if not in_band:
+        warning = (
+            f"{words} words is {drift * 100:+.0f}% off the {budget}-word "
+            f"budget, outside the ±{WORD_TOLERANCE:.0%} band the script "
+            f"agent is held to ({band_min}-{band_max} words). It will still "
+            f"render — at {predicted:.1f}s it is inside the "
+            f"{gate_min:.0f}-{gate_max:.0f}s the pre-render length gate "
+            f"accepts — but QC scores the finished file against "
+            f"{settings.duration_min:.0f}-{settings.duration_max:.0f}s.")
+    return {
+        "words": words,
+        "budget": budget,
+        "band_min": band_min,
+        "band_max": band_max,
+        "drift": round(drift, 4),
+        "in_band": in_band,
+        "tolerance": WORD_TOLERANCE,
+        "speech_rate": speech_rate(settings),
+        "predicted_seconds": predicted,
+        "duration_min": settings.duration_min,
+        "duration_max": settings.duration_max,
+        "gate_min": round(gate_min, 1),
+        "gate_max": round(gate_max, 1),
+        "renderable": duration_in_range(predicted, gate_min, gate_max),
+        "warning": warning,
+    }
+
+
+def build_manual_script(beats: list[dict], settings) -> Script:
+    """Turn the form's rows into a validated ``Script``, or say why not.
+
+    ``target_seconds`` is derived from the words at ``speech_rate()``,
+    exactly as ``run_script``'s parser derives it for the model's output —
+    it is a hint ``measured_seconds`` overrides later, and a hand-typed one
+    would be the same seconds-first sizing that made the model overshoot.
+    """
+    rows = [dict(row) for row in beats]
+    problems: list[str] = []
+
+    if not rows:
+        raise ManualScriptError(["the script has no beats at all."])
+
+    low, high = settings.beats_min, settings.beats_max
+    if not low <= len(rows) <= high:
+        problems.append(
+            f"{len(rows)} beats: this pipeline renders {low}-{high} of them "
+            f"and the blank form starts at {beat_count(settings)}, which is "
+            f"what the word budget is divided across.")
+
+    for index, row in enumerate(rows, start=1):
+        for field in ("voice_text", "caption_text", "visual_prompt"):
+            if not str(row.get(field) or "").strip():
+                problems.append(f"b{index}: {field} is empty and is required.")
+    if problems:
+        raise ManualScriptError(problems)
+
+    rate = speech_rate(settings)
+    built: list[Beat] = []
+    for index, row in enumerate(rows, start=1):
+        voice = str(row["voice_text"]).strip()
+        built.append(Beat.model_validate({
+            "beat_id": f"b{index}",
+            "role": row.get("role") or "setup",
+            "voice_text": voice,
+            "caption_text": str(row["caption_text"]).strip(),
+            "on_screen_text": (str(row.get("on_screen_text") or "").strip()
+                               or None),
+            "visual_prompt": str(row["visual_prompt"]).strip(),
+            "motion": row.get("motion") or "zoom_in",
+            "transition": row.get("transition") or "fade",
+            "target_seconds": round(max(len(voice.split()), 1) / rate, 2),
+        }))
+
+    script = Script(total_seconds=settings.target_seconds,
+                    chosen_hook="h1", beats=built)
+
+    # The rule the model is held to, held to here by the same function. Not
+    # a second copy of the regex: see engine.agents.latin_violations.
+    violations = latin_violations(script)
+    if violations:
+        raise ManualScriptError([
+            "voice_text is fed straight to the Hindi voice and its spelling "
+            "decides the pronunciation, so it has to be Devanagari only. "
+            "ASCII digits, punctuation and ॰ are fine; Latin letters are "
+            "not.",
+            *(f"{beat_id}: Latin script in voice_text — "
+              f"{', '.join(sorted(set(words)))}"
+              for beat_id, words in violations),
+            "Transliterate them (DNA → डीएनए, report → रिपोर्ट) and submit "
+            "again. caption_text stays Roman Hinglish on purpose and is "
+            "never checked.",
+        ])
+
+    report = budget_report(script, settings)
+    if not report["renderable"]:
+        raise ManualScriptError([
+            f"{report['words']} spoken words reads as "
+            f"{report['predicted_seconds']:.1f}s at "
+            f"{report['speech_rate']:g} words/sec, outside the "
+            f"{report['gate_min']:.0f}-{report['gate_max']:.0f}s the "
+            f"pre-render length gate accepts.",
+            "That gate runs after voice synthesis and nothing downstream "
+            "changes a script's length, so it is asked here instead — at "
+            "the form, for free, rather than after a full voice pass.",
+            f"The budget is {report['budget']} words "
+            f"({report['band_min']}-{report['band_max']} inside the "
+            f"±{WORD_TOLERANCE:.0%} band).",
+        ])
+    return script
+
+
+def manual_plan_stage(topic_raw: str, beats: list[dict], store, settings, *,
+                      entities: list[str] | None = None,
+                      claims: list | None = None,
+                      metadata=None,
+                      acknowledge_unsourced: bool = False,
+                      emit: Emit = _noop) -> ReelPlan:
+    """A plan from a script a human typed. Makes zero LLM calls.
+
+    There is no ``client`` parameter, and that is load-bearing rather than
+    tidy: this function is unable to reach a model because it is never given
+    anything that could. ``tests/test_manual.py`` asserts that, and drives
+    the whole path with the gateway pointed at a dead port and every agent
+    entry point replaced by a raise.
+
+    Returns the same ``ReelPlan``, saved with the same
+    ``awaiting_approval`` status, as ``plan_stage`` does. From the approve
+    gate onwards nothing can tell the two apart, and nothing should try.
+    """
+    script = build_manual_script(beats, settings)
+    emit(PipelineEvent(Stage.SCRIPT, "done",
+                       f"{len(script.beats)} beats written by hand, "
+                       f"{script_words(script)} words"))
+
+    # --- provenance ------------------------------------------------------
+    # The stated constraint is "every factual claim carries a source URL, or
+    # the claim is cut". Research is what normally collects them, and it did
+    # not run, so the choice is handed to the person who wrote the script —
+    # at the form, where it costs nothing, instead of at QC, where it costs
+    # the render. A claim with no URL is refused; no claims at all is
+    # allowed only when it was said out loud, and is then honest: a plan
+    # that asserts nothing has nothing unsourced, so QC's claim_provenance
+    # check passes rather than being bypassed.
+    supplied = list(claims or [])
+    unsourced = [c for c in supplied if not str(
+        getattr(c, "source_url", None) or "").strip()]
+    if unsourced:
+        raise ManualScriptError([
+            "every factual claim carries a source URL, or the claim is cut. "
+            "QC hard-fails an unsourced claim, and it does that after the "
+            "render — so these are refused now instead.",
+            *(f"no source URL: {str(getattr(c, 'text', c))[:70]}"
+              for c in unsourced),
+        ])
+    if not supplied and not acknowledge_unsourced:
+        raise ManualScriptError([
+            "no sources were supplied, and the research stage that normally "
+            "collects them did not run on this path.",
+            "Either give each factual claim a source URL, or say explicitly "
+            "that you are proceeding without sources — asserting nothing "
+            "that needs one.",
+        ])
+    provenance = Provenance(claims=supplied, searched_queries=[],
+                            entities=[e.strip() for e in (entities or [])
+                                      if str(e).strip()])
+    emit(PipelineEvent(
+        Stage.RESEARCH, "info",
+        f"NOT RUN — {len(provenance.claims)} source(s) supplied by hand"
+        if provenance.claims
+        else "NOT RUN — proceeding with no sources, acknowledged"))
+
+    # --- the hook --------------------------------------------------------
+    # Beat 1 is the hook on a hand-written script, so the "variants" stage
+    # has nothing to choose between. One Hook is still created, because the
+    # approve gate requires a known chosen_hook and re-seeds beat 1 from it
+    # — which, with the hook taken from beat 1, is a no-op.
+    first = script.beats[0]
+    style = ("question" if first.caption_text.rstrip().endswith("?")
+             else "claim")
+    hook = Hook(variant_id="h1", voice_text=first.voice_text,
+                caption_text=first.caption_text, style=style,
+                seconds=first.target_seconds)
+    script.chosen_hook = hook.variant_id
+    emit(PipelineEvent(Stage.HOOKS, "info",
+                       "NOT RUN — beat 1 is the hook"))
+
+    # --- metadata --------------------------------------------------------
+    # Optional, and blank is a real answer: nothing between here and the
+    # finished file reads it, and the publish preview already 409s without
+    # it, at the only moment it actually matters.
+    written = None
+    if metadata is not None:
+        candidate = (metadata if isinstance(metadata, Metadata)
+                     else Metadata.model_validate(metadata))
+        if any([candidate.yt_title.strip(), candidate.yt_description.strip(),
+                candidate.ig_caption.strip(),
+                candidate.pinned_comment.strip(), candidate.hashtags,
+                candidate.thumbnail_prompt.strip()]):
+            written = candidate
+    emit(PipelineEvent(
+        Stage.METADATA, "done" if written else "info",
+        written.yt_title if written
+        else "NOT RUN — left blank; the publish preview will 409"))
+
+    topic = Topic.make(topic_raw, entities=provenance.entities)
+    plan = ReelPlan(topic=topic, hooks=[hook], script=script,
+                    metadata=written, provenance=provenance,
+                    safety=Safety(moderation_passed=False, flags=[],
+                                  moderation_unavailable=MANUAL_NOT_MODERATED))
+    emit(PipelineEvent(Stage.MODERATION, "info",
+                       f"NOT CHECKED - {MANUAL_NOT_MODERATED}"))
+
+    # --- dedup -----------------------------------------------------------
+    # client=None on purpose: layers 1, 2 and 4 are pure SQL and run in
+    # full; layer 3 is the embedding call and dedup.check already skips it
+    # rather than failing when it has nothing to call. Layer 4 keys off
+    # topic.entities, which on this path are whatever the user typed — none
+    # means the cooldown layer has nothing to compare and is inert, not
+    # bypassed, and approve then records nothing for future cooldowns
+    # either.
+    emit(PipelineEvent(Stage.DEDUP, "started",
+                       "exact, trigram and cooldown layers "
+                       "(semantic needs an embedding provider)"))
+    result = dedup.check(topic, store, None,
+                         trigram_threshold=settings.dedup_trigram,
+                         cooldown_days=settings.entity_cooldown_days)
+    if not result.passed:
+        emit(PipelineEvent(Stage.DEDUP, "failed", result.detail,
+                           {"layer": result.layer}))
+        raise GateError("dedup", f"[{result.layer}] {result.detail}")
+    emit(PipelineEvent(Stage.DEDUP, "done",
+                       f"{result.detail} (semantic layer skipped: no model)"))
+
     store.save_plan(plan, status="awaiting_approval")
     return plan
 

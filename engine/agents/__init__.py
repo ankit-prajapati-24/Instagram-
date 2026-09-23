@@ -177,6 +177,27 @@ def _latin_violations(script: Script) -> list[tuple[str, list[str]]]:
     return out
 
 
+def latin_violations(script: Script) -> list[tuple[str, list[str]]]:
+    """The Devanagari rule, as one callable, for anything that needs it.
+
+    The rule above is enforced on the LLM path by ``_fix_latin_script``. The
+    hand-written path (``engine.pipeline.manual_plan_stage``) has to hold a
+    human to exactly the same rule -- Piper mispronounces Latin script
+    whoever typed it -- and the one thing that must never happen is a second
+    copy of "what counts as a violation" drifting from this one. So the
+    manual path imports THIS function rather than re-deriving the regex, and
+    ``tests/test_manual.py`` asserts the identity of the two names.
+
+    Returns ``(beat_id, latin_words)`` per offending beat; empty means clean.
+    """
+    return _latin_violations(script)
+
+
+def latin_words(text) -> list[str]:
+    """Latin-script runs inside one field. Public for the same reason."""
+    return _latin_words(text)
+
+
 def _latin_repair_message(script: Script, violations) -> str:
     """Tell the model plainly which beats and which words, in the same
     vocabulary script.txt already uses for the rule.
@@ -759,4 +780,5 @@ def dump_prompt(stage: str, **kwargs) -> str:
 
 __all__ = ["AgentError", "load_prompt", "dump_prompt", "run_research",
            "run_hooks", "run_script", "run_metadata", "script_words",
+           "latin_violations", "latin_words", "LATIN_LETTERS_RE",
            "WORD_TOLERANCE", "json"]
