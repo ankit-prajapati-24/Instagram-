@@ -146,3 +146,37 @@ def test_a_single_output_frame_does_not_divide_by_zero():
 
 def test_a_single_source_frame_fills_the_window():
     assert resample_indices(1, 5) == [0, 0, 0, 0, 0]
+
+
+from engine.assembly.sticker_art import STYLES, apply_style
+
+
+def _saturation(im):
+    hsv = im.convert("RGB").convert("HSV")
+    pixels = [p for p, a in zip(hsv.getdata(1), im.getdata(3)) if a > 200]
+    return sum(pixels) / max(len(pixels), 1)
+
+
+def test_both_styles_exist():
+    assert STYLES == ("punchy", "dark")
+
+
+def test_dark_is_less_saturated_than_punchy():
+    art = matte(_disc(fg=(200, 40, 40)))
+    assert _saturation(apply_style(art, "dark")) < \
+        _saturation(apply_style(art, "punchy"))
+
+
+def test_neither_style_disturbs_the_matte():
+    art = matte(_disc())
+    for style in STYLES:
+        out = apply_style(art, style)
+        assert out.mode == "RGBA"
+        assert out.size == art.size
+        assert out.getpixel((0, 0))[3] == 0, \
+            f"{style} must not paint over transparent background"
+
+
+def test_an_unknown_style_is_refused():
+    with pytest.raises(ValueError, match="style"):
+        apply_style(matte(_disc()), "neon")

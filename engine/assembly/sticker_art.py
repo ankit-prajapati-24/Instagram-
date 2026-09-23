@@ -13,7 +13,7 @@ rather than read, and that is the first thing here.
 
 from __future__ import annotations
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter
 
 # A pixel is background-white when every channel is above this. Measured on
 # the shipped icons: the art's lightest real tone is (235, 230, 239), so 238
@@ -107,16 +107,67 @@ def has_trapped_background(frame: Image.Image, *,
 def resample_indices(n_src: int, frames_out: int) -> list[int]:
     """Which source frame each output frame comes from.
 
-    The source animations run 2.5-4.1s; a sticker lives 1.6s. Truncating
+    The source animations run 2.5-4.1s; a sticker lives 1.40s. Truncating
     would cut them mid-motion, which reads as a glitch rather than as a
     beat, so the whole arc is played faster instead. First and last output
     frames land exactly on the first and last source frames.
 
-    ``max(..., 1)`` guards the one-output-frame case, where there is no
-    span to divide across.
+    The early return when ``frames_out <= 1`` guards the case where
+    output is a single frame, where there is no span to divide across.
     """
     if frames_out <= 1:
         return [0]
     last = max(n_src - 1, 0)
     span = frames_out - 1
     return [round(i * last / span) for i in range(frames_out)]
+
+
+STYLES = ("punchy", "dark")
+
+# The gold captions.py already highlights the spoken word with
+# (COLOUR_SPOKEN = &H0000D7FF, which is #FFD700 in RGB). The channel has one
+# accent colour; a sticker that introduced a second would read as a
+# different video's asset dropped into this one.
+ACCENT = (255, 215, 0)
+
+# How far the dark grade pulls toward ACCENT, and how much colour it keeps.
+_DARK_SATURATION = 0.35
+_DARK_TINT = 0.45
+_PUNCHY_SATURATION = 1.15
+
+
+def _tint(frame: Image.Image, colour: tuple[int, int, int],
+          amount: float) -> Image.Image:
+    """Blend the RGB toward ``colour``, leaving alpha exactly as it was."""
+    rgb = frame.convert("RGB")
+    flat = Image.new("RGB", frame.size, colour)
+    blended = Image.blend(rgb, flat, amount)
+    blended.putalpha(frame.getchannel("A"))
+    return blended
+
+
+def apply_style(frame: Image.Image, style: str) -> Image.Image:
+    """One matted frame, graded for the beat role it will land on.
+
+    Punchy keeps most of the source colour on purpose: hook and cta are
+    where loudness earns its place. Dark drains and tints instead, so a
+    reveal or a twist gets emphasis without the tonal clash a bright
+    cartoon makes against this channel's footage.
+
+    Alpha is carried through untouched by both. Grading must never move the
+    matte -- Task 3 already decided which pixels exist.
+    """
+    if style not in STYLES:
+        raise ValueError(f"unknown style {style!r}; expected one of {STYLES}")
+    alpha = frame.getchannel("A")
+    if style == "punchy":
+        out = ImageEnhance.Color(frame.convert("RGB")).enhance(
+            _PUNCHY_SATURATION)
+        out = out.convert("RGBA")
+        out.putalpha(alpha)
+        return out
+
+    drained = ImageEnhance.Color(frame.convert("RGB")).enhance(
+        _DARK_SATURATION).convert("RGBA")
+    drained.putalpha(alpha)
+    return _tint(drained, ACCENT, _DARK_TINT)
