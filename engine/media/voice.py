@@ -39,6 +39,7 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from engine.contract import ReelPlan, WordTiming
@@ -196,6 +197,77 @@ class UploadRejected(Exception):
     the user can act on rather than a 500 that reads like a bug in the
     engine. Every message is written to be shown to whoever picked the file.
     """
+
+
+@dataclass
+class CleanupReport:
+    """What the cleanup chain did to one upload.
+
+    Nothing about an upload changes silently -- this is the record of it,
+    the same rule ``voice_engine``, ``Clip.provider`` and
+    ``word_timing_source`` already follow for their own transforms. A plain
+    dataclass, not a pydantic model: it never crosses the contract/store
+    boundary, only lives inside one ingest call.
+    """
+
+    seconds_before: float
+    seconds_after: float
+    loudness_before: float
+    loudness_after: float
+    filters_applied: str
+
+
+def cleanup_filters(settings) -> str:
+    """The cleanup filter fragment for one upload, or ``""`` when cleanup is
+    off.
+
+    Comma-joined ahead of ``loudnorm`` by the caller (Task 2); returns a
+    fragment with no leading or trailing comma so it can be joined
+    unconditionally, and returns ``""`` rather than ``None`` for the same
+    reason.
+
+    Order: a highpass to clear room rumble under any voiced fundamental,
+    ``afftdn`` to pull down a steady noise floor, ``adeclick`` for mouth
+    clicks and mic bumps, then ``silenceremove`` to cap how long any pause
+    survives.
+
+    ``silenceremove``'s parameters were verified against ffmpeg on
+    2026-09-23, not assumed, per this task's brief:
+
+      * ``start_silence``/``stop_silence`` are the *maximum duration of
+        silence kept after trimming*, not a trigger duration. Measured: a
+        2.0s internal gap between two tones, with ``pause_cap=0.35``, came
+        out to ~0.37s kept (``silencedetect`` on the result) and the file's
+        total duration dropped from 4.00s to 2.37s -- almost exactly
+        ``4.0 - (2.0 - 0.35)``. A run of 0.2s natural gaps (already under
+        the cap) passed through a 3.40s file untouched, still 3.40s.
+        Leading/trailing silence is capped the same way: 1s of silence on
+        each side of a 2s tone came out to 0.35s on each side, 2.70s total.
+      * ``start_threshold``/``stop_threshold`` need an explicit ``dB``
+        suffix. The brief's template writes the bare number; passed as a
+        bare negative value ffmpeg rejects it outright ("Value -45.000000
+        ... out of range [0 - 1.79769e+308]") because unsuffixed the
+        parameter is an amplitude ratio, which cannot be negative. The
+        fragment below appends ``dB`` to make the configured threshold a
+        dB value, which is what every other number in this task assumes it
+        is.
+    """
+    if not settings.voice_clean:
+        return ""
+    pause_cap = settings.voice_pause_cap
+    threshold_db = f"{settings.voice_silence_threshold}dB"
+    return (
+        f"highpass=f={settings.voice_clean_highpass},"
+        f"afftdn=nf={settings.voice_clean_denoise},"
+        f"adeclick,"
+        f"silenceremove=start_periods=1"
+        f":start_silence={pause_cap}"
+        f":start_threshold={threshold_db}"
+        f":stop_periods=-1"
+        f":stop_silence={pause_cap}"
+        f":stop_threshold={threshold_db}"
+        f":detection=peak"
+    )
 
 
 def _loudnorm_measurement(path: Path, settings) -> dict:

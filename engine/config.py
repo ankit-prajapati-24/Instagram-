@@ -143,6 +143,44 @@ class Settings:
     voice_pitch: str = field(
         default_factory=lambda: os.getenv("RAHASYA_VOICE_PITCH", "-6Hz"))
 
+    # --- Voice cleanup (human-recorded uploads) -----------------------------
+    # A human's own recording carries room noise, clicks and pauses Piper
+    # never has, so an upload goes through a cleanup filter chain before it
+    # is measured and re-encoded (see engine/media/voice.py::cleanup_filters).
+    # On by default, off with RAHASYA_VOICE_CLEAN=0 -- and off is a complete
+    # off, the same shape as video_grade and music.
+    voice_clean: bool = field(
+        default_factory=lambda: os.getenv(
+            "RAHASYA_VOICE_CLEAN", "1").strip().lower()
+        not in {"0", "false", "no", "off"})
+    # highpass cutoff in Hz. 80 sits below any voiced fundamental in Hinglish
+    # narration and above the room rumble / handling noise a phone mic picks
+    # up.
+    voice_clean_highpass: float = field(
+        default_factory=lambda: float(
+            os.getenv("RAHASYA_VOICE_HIGHPASS", "80.0")))
+    # afftdn's noise floor estimate in dB. -25 is a middle-of-the-road level
+    # for a quiet room recording; more negative trusts more of the signal as
+    # speech, less negative denoises harder at the risk of eating breath
+    # sounds.
+    voice_clean_denoise: float = field(
+        default_factory=lambda: float(
+            os.getenv("RAHASYA_VOICE_DENOISE", "-25.0")))
+    # The one number that matters to a user: no silence in the recording
+    # survives longer than this, in seconds, while a natural inter-word gap
+    # (0.1-0.3s) falls below it and is left untouched -- see
+    # cleanup_filters's silenceremove verification for the measurements this
+    # was checked against.
+    voice_pause_cap: float = field(
+        default_factory=lambda: float(
+            os.getenv("RAHASYA_VOICE_PAUSE_CAP", "0.35")))
+    # silenceremove's threshold in dB: below this a sample counts as
+    # silence. -45 clears typical room noise floor without also trimming a
+    # softly-spoken word.
+    voice_silence_threshold: float = field(
+        default_factory=lambda: float(
+            os.getenv("RAHASYA_VOICE_SILENCE_DB", "-45.0")))
+
     # --- Caption word alignment --------------------------------------------
     # Measure the caption word timings from the synthesised audio with
     # faster-whisper instead of interpolating them across the beat by
