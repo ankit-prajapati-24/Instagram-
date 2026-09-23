@@ -721,6 +721,53 @@ def test_a_real_render_with_stickers_still_equals_the_narration_total(
     assert probe["has_audio"]
 
 
+def test_render_not_just_build_command_hands_back_the_credit(tmp_path,
+                                                              monkeypatch):
+    """The render() -> build_command() hand-off, not just build_command().
+
+    ``test_the_render_reports_the_credit_it_owes_for_its_own_stickers``
+    above calls ``build_command`` directly with its own ``report`` dict, so
+    it would stay green even if ``render`` stopped forwarding its caller's
+    ``report`` argument down to ``build_command`` at all -- exactly the
+    hand-off ``engine.pipeline``'s render stage depends on to learn what a
+    render put on screen without reading the filesystem a second time. This
+    test goes in through ``render()``, the only door a real caller uses, so
+    it is the one test that notices if that hand-off is cut.
+
+    Needs a sticker that actually resolves to baked art, not just any
+    sticker: ``attribution_for`` only owes Lordicon a credit for baked
+    stickers. ``baked_sequence`` refuses a bake made for another size, and
+    ``_render_settings`` renders 360 wide while the committed art is baked
+    at 184px, so the art is rebaked here at the render's own size -- same
+    fixture ``test_the_baked_sticker_actually_moves_while_it_is_on_screen``
+    uses, for the same reason.
+    """
+    from scripts.bake_stickers import bake_one
+
+    settings = _render_settings(tmp_path)
+    plan = _sticker_plan(tmp_path, settings)
+
+    # `_sticker_plan`'s first caption carries "kankaal" -> the `death`
+    # trigger, which ships art.
+    size = stk.sticker_size(settings.width, settings.sticker_scale)
+    baked_root = tmp_path / "baked"
+    source = Path("assets/lordicon/death.gif")
+    if not source.exists():                      # pragma: no cover - env
+        pytest.skip("run scripts/fetch_sticker_art.py first")
+    bake_one(source, baked_root / "death" / "punchy", style="punchy",
+             size=size, fps=int(settings.fps))
+    monkeypatch.setattr(stk, "BAKED_ROOT", baked_root)
+
+    prepared = stk.prepare(plan, settings)
+    assert any(s.baked for s in prepared), "expected a baked sticker"
+
+    out = tmp_path / "credited.mp4"
+    report: dict = {}
+    render(plan, settings, out, report=report)
+
+    assert report["attribution"] == stk.ATTRIBUTION
+
+
 def test_the_sticker_is_actually_visible_at_its_trigger_word(tmp_path):
     """Pixels, not strings.
 
