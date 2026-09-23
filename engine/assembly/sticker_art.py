@@ -22,6 +22,13 @@ WHITE_CUTOFF = 238
 # The value the flood fill writes. Neither 0 nor 255, so it cannot be
 # confused with the mask it is filling.
 _FILLED = 128
+# Interior white above this fraction of the frame is a pocket of background
+# the fill could not reach; below it, it is a highlight inside the art. A
+# bright highlight is white and is meant to be -- 2130-skull-poison has 363
+# such pixels where the bones cross and renders correctly -- while a real
+# trapped pocket is an order of magnitude bigger: 3.15% of the frame against
+# 0.23% for that highlight.
+MAX_INTERIOR_WHITE_FRACTION = 0.01
 
 
 def _white_mask(rgb: Image.Image, cutoff: int) -> Image.Image:
@@ -81,3 +88,15 @@ def interior_white(frame: Image.Image, *,
     reached = _background(rgb, cutoff)
     trapped = ImageChops.subtract(white, reached)
     return sum(1 for value in trapped.getdata() if value > 0)
+
+
+def has_trapped_background(frame: Image.Image, *,
+                           cutoff: int = WHITE_CUTOFF) -> bool:
+    """True when enough white is trapped inside the art to read as a blob.
+
+    The count alone cannot tell a highlight from a hole; the share of the
+    frame can.
+    """
+    width, height = frame.size
+    trapped = interior_white(frame, cutoff=cutoff)
+    return trapped > MAX_INTERIOR_WHITE_FRACTION * width * height

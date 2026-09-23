@@ -63,7 +63,7 @@ def test_a_single_frame_gif_is_refused(tmp_path):
         verify_gif(path)
 
 
-from engine.assembly.sticker_art import interior_white, matte
+from engine.assembly.sticker_art import has_trapped_background, interior_white, matte
 
 
 def _disc(side=64, bg=(255, 255, 255), fg=(20, 30, 40), hole=None):
@@ -104,5 +104,19 @@ def test_every_shipped_icon_mattes_without_holes():
         with Image.open(path) as im:
             im.seek(im.n_frames // 2)
             frame = im.convert("RGB")
-        assert interior_white(frame) == 0, \
-            f"{path.name} has white inside the art; choose another icon"
+        assert not has_trapped_background(frame), \
+            f"{path.name} has a pocket of white inside the art; choose another icon"
+
+
+def test_a_highlight_inside_the_art_is_not_mistaken_for_a_hole():
+    """The threshold has to separate two real cases, not just admit one.
+
+    A trapped pocket of background and a bright highlight are both white
+    inside the silhouette; only their size tells them apart.
+    """
+    pocket = _disc(hole=(26, 26, 38, 38))
+    assert has_trapped_background(pocket)
+
+    speck = _disc(hole=(31, 31, 33, 33))
+    assert interior_white(speck) > 0, "fixture should trap a few pixels"
+    assert not has_trapped_background(speck)
