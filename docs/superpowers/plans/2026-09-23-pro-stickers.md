@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - **No new runtime dependency.** Pillow and `imageio-ffmpeg` are already in `requirements.txt`; nothing else may be added. GIF was chosen over Lottie JSON precisely to avoid `rlottie-python`, whose wheels stop at cp312 and cannot install on this project's Python 3.14.
-- **`WINDOW_SECONDS = 1.60`** — exactly today's `POP_SECONDS (0.20) + HOLD_SECONDS (1.40)`. This change alters what is on screen, never how long.
+- **`WINDOW_SECONDS = HOLD_SECONDS` (1.40)** — *not* `POP_SECONDS + HOLD_SECONDS`. `sticker_chain` emits `trim=duration=HOLD_SECONDS` and gates `enable` to `start .. start + HOLD_SECONDS`, so 1.40s is a sticker's entire visible life. A longer bake would have its tail trimmed away and never reach its final frame. This change alters what is on screen, never how long. At 30fps that is **42 frames**.
 - **The trigger map stays data.** `test_a_new_trigger_needs_no_code_change` must keep passing; adding a trigger *with* art must also need no code change.
 - **A missing decoration must never cost a render.** `prepare()` returns `[]` rather than raising, at every new failure point.
 - **The overlay must not touch the MAIN branch's PTS.** Every emitted label re-declares `settb=1/fps`, as every label in that graph already does.
@@ -26,7 +26,7 @@
 
 1. **An icon with white inside the art** — the flood fill cannot reach it, so it would render with holes. Bake must fail loudly and name the icon. *(Task 3)*
 2. **A source GIF with fewer frames than the output window needs** — resampling must repeat frames cleanly, not divide by zero or drop the tail. *(Task 4)*
-3. **`fps` other than 30** — `sticker_scale` and `fps` are both configurable, so the baked frame count must follow the configured fps rather than a baked-in 48. *(Task 7)*
+3. **`fps` other than 30** — `sticker_scale` and `fps` are both configurable, so the baked frame count must follow the configured fps rather than a baked-in 42. *(Task 7)*
 4. **A baked directory that exists but is short a frame** — a partially written bake must fall back to the emoji path, not composite a truncated animation. *(Task 8)*
 5. **A slug that 404s or returns HTML** — the fetch script must refuse to write a file that is not a decodable multi-frame GIF, rather than leave a broken artefact for the bake to trip over. *(Task 2)*
 
@@ -866,7 +866,7 @@ git commit -m "feat: ground the sticker with a baked drop shadow"
 
 **Interfaces:**
 - Consumes: `matte`, `interior_white`, `resample_indices`, `apply_style`, `ground`, `STYLES`.
-- Produces: `WINDOW_SECONDS = 1.60`, `frame_count(fps: int) -> int`, `bake_one(gif: Path, out_dir: Path, *, style: str, size: int, fps: int) -> int`. Writes `frame-%03d.png` plus `meta.json`. Task 8 reads that layout.
+- Produces: `WINDOW_SECONDS = HOLD_SECONDS` (1.40), `frame_count(fps: int) -> int`, `bake_one(gif: Path, out_dir: Path, *, style: str, size: int, fps: int) -> int`. Writes `frame-%03d.png` plus `meta.json`. Task 8 reads that layout.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -878,16 +878,17 @@ import json as _json
 from scripts.bake_stickers import WINDOW_SECONDS, bake_one, frame_count
 
 
-def test_the_window_matches_the_pop_plus_hold_it_replaces():
+def test_the_window_is_exactly_the_span_the_chain_lets_through():
+    """The chain trims to HOLD_SECONDS and gates `enable` to the same span,
+    so a bake longer than that would have its tail cut and never finish."""
     from engine.assembly import stickers as stk
-    assert WINDOW_SECONDS == pytest.approx(
-        stk.POP_SECONDS + stk.HOLD_SECONDS)
+    assert WINDOW_SECONDS == pytest.approx(stk.HOLD_SECONDS)
 
 
 def test_the_frame_count_follows_the_configured_fps():
-    assert frame_count(30) == 48
-    assert frame_count(60) == 96
-    assert frame_count(24) == 38
+    assert frame_count(30) == 42
+    assert frame_count(60) == 84
+    assert frame_count(24) == 34
 
 
 def test_baking_writes_one_png_per_output_frame_and_a_meta(tmp_path):
@@ -977,7 +978,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from engine.assembly.sticker_art import (        # noqa: E402
     STYLES, apply_style, ground, interior_white, matte, resample_indices)
 from engine.assembly.stickers import (           # noqa: E402
-    HOLD_SECONDS, POP_SECONDS, load_triggers, sticker_canvas, sticker_size)
+    HOLD_SECONDS, load_triggers, sticker_canvas, sticker_size)
 
 ART_DIR = Path(__file__).resolve().parent.parent / "assets" / "lordicon"
 BAKED_DIR = (Path(__file__).resolve().parent.parent / "engine" / "data"
@@ -986,7 +987,13 @@ BAKED_DIR = (Path(__file__).resolve().parent.parent / "engine" / "data"
 # Exactly the visible life the emoji sticker already had, so this change
 # alters what is on screen and never how long. Every timing test that passes
 # today keeps passing.
-WINDOW_SECONDS = POP_SECONDS + HOLD_SECONDS
+#
+# HOLD_SECONDS, not POP_SECONDS + HOLD_SECONDS: sticker_chain emits
+# `trim=duration=HOLD_SECONDS` and gates `enable` to the same span, so 1.40s
+# is the whole of it. Baking longer would put frames after the trim, and the
+# animation would never reach its last one -- which is the exact failure
+# this file exists to remove.
+WINDOW_SECONDS = HOLD_SECONDS
 
 LICENCE = "Animated icons by Lordicon.com"
 
@@ -1022,9 +1029,16 @@ def bake_one(gif: Path, out_dir: Path, *, style: str, size: int,
     for old in out_dir.glob("frame-*.png"):
         old.unlink()
 
+    # Matte each distinct source frame once. resample_indices repeats source
+    # frames whenever the window needs more frames than the source has
+    # spare, and the flood fill is the expensive part of this loop.
+    matted: dict[int, Image.Image] = {}
+
     for out_index, src_index in enumerate(
             resample_indices(len(sources), frames_out)):
-        art = ground(apply_style(matte(sources[src_index]), style), style)
+        if src_index not in matted:
+            matted[src_index] = matte(sources[src_index])
+        art = ground(apply_style(matted[src_index], style), style)
         art = art.resize((size, size), Image.LANCZOS)
         # Centred on the same square the emoji pop uses, so the overlay can
         # keep pinning a fixed x/y and geometry tests keep their meaning.
@@ -1082,7 +1096,7 @@ Expected: PASS, 25 tests.
 - [ ] **Step 5: Bake the real art**
 
 Run: `python scripts/bake_stickers.py`
-Expected: ten lines — five triggers × two styles — each reporting 48 frames. Confirm `engine/data/stickers/death/dark/frame-000.png` exists.
+Expected: ten lines — five triggers × two styles — each reporting 42 frames. Confirm `engine/data/stickers/death/dark/frame-000.png` exists.
 
 - [ ] **Step 6: Look at one, with your own eyes**
 
@@ -1093,7 +1107,7 @@ python -c "
 from PIL import Image
 bg = Image.new('RGBA', (900, 260), (18, 20, 26, 255))
 for i, name in enumerate(['death','question','science','time','witness']):
-    f = Image.open(f'engine/data/stickers/{name}/dark/frame-024.png')
+    f = Image.open(f'engine/data/stickers/{name}/dark/frame-021.png')
     bg.alpha_composite(f, (20 + i*176, 20))
 bg.convert('RGB').save('outputs/_stickers/baked_dark.png')
 print('wrote outputs/_stickers/baked_dark.png')
@@ -1146,7 +1160,7 @@ def test_a_shipped_trigger_resolves_to_its_baked_frames():
     found = stk.baked_sequence("death", "dark", fps=30, size=SHIPPED_SIZE)
     assert found is not None
     pattern, frames, canvas = found
-    assert frames == 48
+    assert frames == 42
     assert canvas == stk.sticker_canvas(SHIPPED_SIZE)
     assert Path(pattern % 0).exists()
 
@@ -1373,10 +1387,11 @@ def test_the_baked_sticker_actually_moves_while_it_is_on_screen(tmp_path,
                                                                 monkeypatch):
     """The whole point of this feature.
 
-    The old sticker popped in over 0.20s and then held a single unchanging
-    picture for 1.22 of its 1.60 visible seconds. A graph that composites a
-    frozen frame and one that composites an animation produce the *same*
-    filtergraph string, so this reads pixels out of a real render.
+    The old sticker popped in over its first 7 frames and then held a single
+    unchanging picture for 0.987 of its 1.40 visible seconds. A graph that
+    composites a frozen frame and one that composites an animation produce
+    the *same* filtergraph string, so this reads pixels out of a real
+    render.
 
     The bake is done here, at the render's own size, rather than reusing the
     committed 184px one: `_render_settings` renders 360 wide, and

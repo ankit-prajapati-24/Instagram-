@@ -12,9 +12,11 @@ clipart pasted on the frame rather than as part of the edit:
 
 1. **The art is a system icon.** It is the same glyph the viewer sees in
    WhatsApp. Nothing about it belongs to this channel.
-2. **It is frozen for ~75% of its life.** 1.22 of its 1.60 visible seconds
-   are a single unchanging picture. This is the largest single contributor,
-   and it is true no matter what art is used.
+2. **It is frozen for 70% of its life.** A sticker is on screen for 1.40s —
+   `sticker_chain` trims to `HOLD_SECONDS` and gates `enable` to the same
+   span. The 7-frame pop ends at 0.233s and the fade begins at 1.22s, so
+   0.987 of those 1.40 seconds are a single unchanging picture. This is the
+   largest single contributor, and it is true no matter what art is used.
 3. **It is not grounded.** No shadow, no stroke, no glow, so it sits *on* the
    frame instead of *in* it.
 
@@ -149,14 +151,21 @@ The baked sequence is therefore **resampled across the whole window** so the
 source animation plays its complete arc in the time available:
 
 ```
-WINDOW_SECONDS = 1.60          # = the current POP_SECONDS + HOLD_SECONDS
-frames_out     = round(WINDOW_SECONDS * fps)          # 48 at 30fps
+WINDOW_SECONDS = HOLD_SECONDS  # 1.40, today's full visible life
+frames_out     = round(WINDOW_SECONDS * fps)          # 42 at 30fps
 src_index      = round(i * (n_src - 1) / max(frames_out - 1, 1))
 ```
 
-`WINDOW_SECONDS` is set to exactly today's visible life — 0.20 + 1.40 — so
-this change alters *what is on screen*, never *how long*. Every timing test
-that passes now keeps passing. The static hold is deleted outright. `FADE_OUT_SECONDS` stays, applied by the existing `fade`
+`WINDOW_SECONDS` is `HOLD_SECONDS`, not `POP_SECONDS + HOLD_SECONDS`.
+`sticker_chain` trims the input to `HOLD_SECONDS` and gates `enable` to
+`start .. start + HOLD_SECONDS`, so 1.40s is the whole of a sticker's
+visible life and a longer bake would simply have its tail trimmed away —
+the animation would never reach its final frame, which is the failure this
+change exists to remove.
+
+So the visible duration is byte-identical to today's: this alters *what is
+on screen*, never *how long*. Every timing test that passes now keeps
+passing. The static hold is deleted outright. `FADE_OUT_SECONDS` stays, applied by the existing `fade`
 filter, so the exit is unchanged.
 
 `sticker_chain` no longer needs
