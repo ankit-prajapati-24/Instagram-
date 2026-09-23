@@ -220,6 +220,39 @@ def test_title_is_truncated_to_the_platform_limit():
         == 100
 
 
+def test_both_payloads_carry_the_lordicon_credit_when_art_rendered():
+    """Proves both directions: the credit must show up when baked art
+    rendered, and must NOT show up when it did not -- a suite that only
+    checked the positive case would let a video with zero Lordicon art
+    ship with a Lordicon credit on it, which is its own kind of wrong."""
+    from engine.assembly import stickers as stk
+    baked = [stk.Sticker(
+        name="death", emoji="\U0001f480", word="kankaal", beat_index=0,
+        start=1.0, slot=0, style="punchy", baked=True, size=60, canvas=76,
+        frames=48, pattern="x-%03d.png", png="x-047.png")]
+    plan = make_plan()
+
+    yt = payloads.youtube_payload(plan, "out.mp4", stickers=baked)
+    ig = payloads.instagram_payload(plan, "https://x/v.mp4", stickers=baked)
+    assert stk.ATTRIBUTION in yt["snippet"]["description"]
+    assert stk.ATTRIBUTION in ig["caption"]
+
+    plain = payloads.youtube_payload(plan, "out.mp4")
+    assert stk.ATTRIBUTION not in plain["snippet"]["description"]
+    plain_ig = payloads.instagram_payload(plan, "https://x/v.mp4")
+    assert stk.ATTRIBUTION not in plain_ig["caption"]
+
+    unbaked = [stk.Sticker(
+        name="water", emoji="\U0001f4a7", word="paani", beat_index=0,
+        start=1.0, slot=0, style="punchy", baked=False, size=60, canvas=76,
+        frames=7, pattern="e-%03d.png", png="e-006.png")]
+    yt_emoji = payloads.youtube_payload(plan, "out.mp4", stickers=unbaked)
+    ig_emoji = payloads.instagram_payload(plan, "https://x/v.mp4",
+                                          stickers=unbaked)
+    assert stk.ATTRIBUTION not in yt_emoji["snippet"]["description"]
+    assert stk.ATTRIBUTION not in ig_emoji["caption"]
+
+
 def test_checklist_flags_placeholder_visuals():
     """Every beat's clips are placeholder-provider — the worst case, where
     the render leaned on blank gradient frames for the whole video."""

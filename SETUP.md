@@ -368,6 +368,18 @@ three: ten beats is nine cuts, and a sound on every cut stops meaning
 `RAHASYA_SFX_WHOOSH_MAX` raises the cap if you disagree; `RAHASYA_SFX=0`
 removes the layer entirely.
 
+### Sticker art
+
+The designed stickers are committed as baked PNG sequences, so a normal
+render needs nothing here. Only when the art or the grade changes:
+
+    python scripts/fetch_sticker_art.py    # download source GIFs
+    python scripts/bake_stickers.py        # bake both styles
+
+The art comes from Lordicon under its free licence, which requires a visible
+credit. The panel puts `Animated icons by Lordicon.com` in the metadata
+whenever a designed sticker rendered — paste it into the post description.
+
 ---
 
 ## When something breaks

@@ -17,6 +17,7 @@ code can arrange.
 
 from __future__ import annotations
 
+from engine.assembly import stickers as stickers_mod
 from engine.contract import ReelPlan
 
 YOUTUBE_CATEGORY_PEOPLE_BLOGS = "22"
@@ -40,11 +41,16 @@ def _sources_block(plan: ReelPlan) -> str:
     return "Sources:\n" + "\n".join(urls)
 
 
-def youtube_payload(plan: ReelPlan, video_path: str) -> dict:
+def youtube_payload(plan: ReelPlan, video_path: str, *,
+                    stickers: list | None = None) -> dict:
     """Body for ``youtube.videos.insert``, plus the local file to upload.
 
     Privacy is ``private`` on purpose: the upload lands unlisted so a human
     flips it public after watching it back.
+
+    ``stickers`` is the prepared list the render used. It is optional and
+    defaults to none so every existing caller keeps working unchanged; pass
+    it to get the Lordicon credit when designed art actually rendered.
     """
     if not plan.metadata:
         raise ValueError("plan has no metadata; run the metadata agent first")
@@ -56,6 +62,9 @@ def youtube_payload(plan: ReelPlan, video_path: str) -> dict:
     tags_line = _hashtag_block(plan, 8)
     if tags_line:
         description_parts.append(tags_line)
+    credit = stickers_mod.attribution_for(stickers or [])
+    if credit:
+        description_parts.append(credit)
 
     return {
         "_video_file": video_path,
@@ -78,11 +87,16 @@ def youtube_payload(plan: ReelPlan, video_path: str) -> dict:
     }
 
 
-def instagram_payload(plan: ReelPlan, video_url: str) -> dict:
+def instagram_payload(plan: ReelPlan, video_url: str, *,
+                      stickers: list | None = None) -> dict:
     """Body for the Instagram Content Publishing API container step.
 
     ``video_url`` must be publicly reachable — the API fetches it rather than
     accepting an upload.
+
+    ``stickers`` is the prepared list the render used. It is optional and
+    defaults to none so every existing caller keeps working unchanged; pass
+    it to get the Lordicon credit when designed art actually rendered.
     """
     if not plan.metadata:
         raise ValueError("plan has no metadata; run the metadata agent first")
@@ -91,6 +105,9 @@ def instagram_payload(plan: ReelPlan, video_url: str) -> dict:
     tags_line = _hashtag_block(plan, 8)
     if tags_line:
         caption = f"{caption}\n\n{tags_line}"
+    credit = stickers_mod.attribution_for(stickers or [])
+    if credit:
+        caption = f"{caption}\n\n{credit}"
 
     return {
         "_pinned_comment": plan.metadata.pinned_comment,

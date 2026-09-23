@@ -581,3 +581,17 @@ def sticker_chain(stickers: list[Sticker], video_label: str,
             f"settb=1/{fps}[sk{offset}]")
         current = f"sk{offset}"
     return parts, current
+
+
+# --- attribution -------------------------------------------------------
+
+# Lordicon's free licence requires a visible credit wherever the icons are
+# used. It is derived from the stickers that actually rendered, not set as a
+# flag someone has to remember, so the credit and the thing it credits
+# cannot drift apart.
+ATTRIBUTION = "Animated icons by Lordicon.com"
+
+
+def attribution_for(stickers: list["Sticker"]) -> str | None:
+    """The credit line this render owes, or None if it owes none."""
+    return ATTRIBUTION if any(s.baked for s in stickers) else None

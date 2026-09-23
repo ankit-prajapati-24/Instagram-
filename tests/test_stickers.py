@@ -837,3 +837,22 @@ def test_an_emoji_sticker_still_holds_for_its_whole_window(tmp_path):
         "what happens if `loop` stops holding its last frame")
     assert span[0] >= x - 3 and span[1] <= x + w + 3, (
         f"the sticker is outside its box: changed {span}, box x={x} w={w}")
+
+
+# --- Lordicon attribution ----------------------------------------------
+
+def test_the_credit_string_is_exactly_what_the_licence_requires():
+    assert stk.ATTRIBUTION == "Animated icons by Lordicon.com"
+
+
+def test_the_credit_is_owed_only_when_designed_art_rendered():
+    def fake(baked):
+        return stk.Sticker(
+            name="death", emoji="\U0001f480", word="kankaal", beat_index=0,
+            start=1.0, slot=0, style="punchy", baked=baked, size=60,
+            canvas=76, frames=48, pattern="x-%03d.png", png="x-047.png")
+
+    assert stk.attribution_for([fake(True)]) == stk.ATTRIBUTION
+    assert stk.attribution_for([fake(False)]) is None
+    assert stk.attribution_for([fake(False), fake(True)]) == stk.ATTRIBUTION
+    assert stk.attribution_for([]) is None
