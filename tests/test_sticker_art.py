@@ -180,3 +180,35 @@ def test_neither_style_disturbs_the_matte():
 def test_an_unknown_style_is_refused():
     with pytest.raises(ValueError, match="style"):
         apply_style(matte(_disc()), "neon")
+
+
+def test_dark_is_actually_darker_not_merely_paler():
+    """The first dark grade desaturated and tinted without reducing
+    luminance, so it came out flat yellow and *lighter* than the source.
+    Saturation alone cannot catch that; brightness can."""
+    art = matte(_disc(fg=(200, 40, 40)))
+    dark = apply_style(art, "dark")
+
+    def luminance(im):
+        grey = im.convert("RGB").convert("L")
+        vals = [v for v, a in zip(grey.getdata(), im.getdata(3)) if a > 200]
+        return sum(vals) / max(len(vals), 1)
+
+    assert luminance(dark) < luminance(art)
+
+
+def test_dark_keeps_enough_colour_to_stay_legible():
+    """Two differently coloured regions must still differ after grading.
+    The first attempt flattened everything toward one gold, which is how
+    the eye's pupil vanished into the eyeball around it."""
+    from PIL import ImageDraw
+    im = Image.new("RGB", (64, 64), (255, 255, 255))
+    d = ImageDraw.Draw(im)
+    d.ellipse((8, 8, 56, 56), fill=(200, 60, 40))
+    d.ellipse((26, 26, 38, 38), fill=(40, 90, 200))
+    graded = apply_style(matte(im), "dark").convert("RGB")
+
+    outer = graded.getpixel((16, 32))
+    inner = graded.getpixel((32, 32))
+    spread = sum(abs(a - b) for a, b in zip(outer, inner))
+    assert spread > 60, f"regions collapsed toward one colour (spread {spread})"

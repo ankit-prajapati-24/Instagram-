@@ -130,9 +130,15 @@ STYLES = ("punchy", "dark")
 # different video's asset dropped into this one.
 ACCENT = (255, 215, 0)
 
-# How far the dark grade pulls toward ACCENT, and how much colour it keeps.
-_DARK_SATURATION = 0.35
-_DARK_TINT = 0.45
+# The dark grade, in the order it is applied. Brightness is what actually
+# makes it dark -- desaturating and tinting alone can only make art pale and
+# yellow. Saturation stays high enough that the icons keep the colour
+# separation that makes them readable at 184px, and the tint is a warmth
+# rather than a coat of paint. Chosen by rendering the five shipped icons
+# under five candidate combinations and looking at them.
+_DARK_BRIGHTNESS = 0.72
+_DARK_SATURATION = 0.65
+_DARK_TINT = 0.10
 _PUNCHY_SATURATION = 1.15
 
 
@@ -167,7 +173,9 @@ def apply_style(frame: Image.Image, style: str) -> Image.Image:
         out.putalpha(alpha)
         return out
 
-    drained = ImageEnhance.Color(frame.convert("RGB")).enhance(
+    darkened = ImageEnhance.Brightness(
+        frame.convert("RGB")).enhance(_DARK_BRIGHTNESS)
+    drained = ImageEnhance.Color(darkened).enhance(
         _DARK_SATURATION).convert("RGBA")
     drained.putalpha(alpha)
     return _tint(drained, ACCENT, _DARK_TINT)
