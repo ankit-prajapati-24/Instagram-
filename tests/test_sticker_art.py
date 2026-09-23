@@ -61,3 +61,48 @@ def test_a_single_frame_gif_is_refused(tmp_path):
     path = _write_gif(tmp_path / "still.gif", frames=1)
     with pytest.raises(ValueError, match="single frame"):
         verify_gif(path)
+
+
+from engine.assembly.sticker_art import interior_white, matte
+
+
+def _disc(side=64, bg=(255, 255, 255), fg=(20, 30, 40), hole=None):
+    """A solid disc on a background, optionally with a white hole in it."""
+    from PIL import ImageDraw
+    im = Image.new("RGB", (side, side), bg)
+    d = ImageDraw.Draw(im)
+    d.ellipse((8, 8, side - 8, side - 8), fill=fg)
+    if hole:
+        d.ellipse(hole, fill=(255, 255, 255))
+    return im
+
+
+def test_the_background_becomes_transparent_and_the_art_does_not():
+    out = matte(_disc())
+    assert out.mode == "RGBA"
+    assert out.getpixel((0, 0))[3] == 0, "corner should be cut away"
+    assert out.getpixel((32, 32))[3] == 255, "centre should survive"
+
+
+def test_white_enclosed_by_the_art_is_reported_not_silently_removed():
+    art = _disc(hole=(26, 26, 38, 38))
+    out = matte(art)
+    assert out.getpixel((32, 32))[3] == 255, \
+        "an enclosed hole must stay opaque, not be punched through"
+    assert interior_white(art) > 0
+
+
+def test_a_clean_icon_reports_no_interior_white():
+    assert interior_white(_disc()) == 0
+
+
+def test_every_shipped_icon_mattes_without_holes():
+    art_dir = Path("assets/lordicon")
+    gifs = sorted(art_dir.glob("*.gif"))
+    assert gifs, "run scripts/fetch_sticker_art.py first"
+    for path in gifs:
+        with Image.open(path) as im:
+            im.seek(im.n_frames // 2)
+            frame = im.convert("RGB")
+        assert interior_white(frame) == 0, \
+            f"{path.name} has white inside the art; choose another icon"
