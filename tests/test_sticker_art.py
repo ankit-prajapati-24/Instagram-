@@ -120,3 +120,29 @@ def test_a_highlight_inside_the_art_is_not_mistaken_for_a_hole():
     speck = _disc(hole=(31, 31, 33, 33))
     assert interior_white(speck) > 0, "fixture should trap a few pixels"
     assert not has_trapped_background(speck)
+
+
+from engine.assembly.sticker_art import resample_indices
+
+
+def test_the_whole_source_animation_is_covered_end_to_end():
+    out = resample_indices(101, 48)
+    assert len(out) == 48
+    assert out[0] == 0
+    assert out[-1] == 100
+    assert out == sorted(out), "time must not run backwards"
+
+
+def test_a_short_source_repeats_frames_instead_of_ending_early():
+    out = resample_indices(6, 48)
+    assert len(out) == 48
+    assert out[0] == 0 and out[-1] == 5
+    assert set(out) == set(range(6))
+
+
+def test_a_single_output_frame_does_not_divide_by_zero():
+    assert resample_indices(101, 1) == [0]
+
+
+def test_a_single_source_frame_fills_the_window():
+    assert resample_indices(1, 5) == [0, 0, 0, 0, 0]

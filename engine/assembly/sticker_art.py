@@ -87,7 +87,9 @@ def interior_white(frame: Image.Image, *,
     white = _white_mask(rgb, cutoff)
     reached = _background(rgb, cutoff)
     trapped = ImageChops.subtract(white, reached)
-    return sum(1 for value in trapped.getdata() if value > 0)
+    # histogram[i] is the count of pixels with value i; sum of buckets 1-255
+    # is the count of all non-zero pixels, no deprecation warning.
+    return sum(trapped.histogram()[1:])
 
 
 def has_trapped_background(frame: Image.Image, *,
@@ -100,3 +102,21 @@ def has_trapped_background(frame: Image.Image, *,
     width, height = frame.size
     trapped = interior_white(frame, cutoff=cutoff)
     return trapped > MAX_INTERIOR_WHITE_FRACTION * width * height
+
+
+def resample_indices(n_src: int, frames_out: int) -> list[int]:
+    """Which source frame each output frame comes from.
+
+    The source animations run 2.5-4.1s; a sticker lives 1.6s. Truncating
+    would cut them mid-motion, which reads as a glitch rather than as a
+    beat, so the whole arc is played faster instead. First and last output
+    frames land exactly on the first and last source frames.
+
+    ``max(..., 1)`` guards the one-output-frame case, where there is no
+    span to divide across.
+    """
+    if frames_out <= 1:
+        return [0]
+    last = max(n_src - 1, 0)
+    span = frames_out - 1
+    return [round(i * last / span) for i in range(frames_out)]
