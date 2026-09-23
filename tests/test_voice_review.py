@@ -24,9 +24,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from engine.app import create_app
+from engine.app import _cleanup_info, create_app
 from engine.config import Settings
 from engine.contract import Clip
+from engine.media.voice import CleanupReport
 from engine.store import Store
 from tests.factories import make_plan
 
@@ -848,6 +849,31 @@ def test_changing_only_the_caption_does_not_re_speak_anything(
     assert [w.word for w in beat.words] == ["meri", "fees", "maaf", "kardo"]
 
 
+def test_the_panel_only_clears_upload_styling_on_a_real_respeak(client):
+    """A caption-only edit does not change the audio or ``voice_engine``,
+    so it must not clear the "swapped" class or the upload engine styling
+    either -- that used to run unconditionally, right after any PATCH
+    response, and left a beat still saying its uploaded take looking as
+    though it no longer was, hiding the cleaned/raw switch only an upload
+    gets (final review, Minor 8). This can't be exercised end to end
+    without a browser, so it's pinned the same way
+    ``test_the_panel_only_reaches_for_ids_that_exist`` pins other panel
+    behaviour: against the page's own source.
+    """
+    import re as _re
+
+    page = (Path(__file__).resolve().parents[1] / "engine" / "ui"
+            / "index.html").read_text(encoding="utf-8")
+
+    assert _re.search(
+        r'if \(data\.respoken\) \{[^}]*'
+        r'\$\("veng-" \+ beat\)\.className = "eng";[^}]*'
+        r'\$\("vrow-" \+ beat\)\.classList\.remove\("swapped", "gone"\);',
+        page, _re.S), (
+        "the upload styling clear in respeakBeat is not gated on "
+        "data.respoken any more")
+
+
 def test_latin_script_in_the_voice_line_is_refused_with_the_words(
         client, monkeypatch):
     """The same rule the script gate enforces, through the same function:
@@ -1074,6 +1100,35 @@ def test_uploading_stores_a_raw_copy_the_board_can_point_at(
     assert board["beats"][1]["cleanup"] is None
 
 
+def test_a_report_with_non_finite_loudness_still_round_trips_through_the_store(
+        client, tmp_path):
+    """loudnorm reports "-inf" for anything under its ~400ms gating block.
+    A ``CleanupInfo`` built with that literal float used to serialise to
+    JSON ``null`` and then fail ``model_validate_json`` on the very next
+    ``get_plan`` -- every route touching that plan 500ing from then on,
+    permanently, with no way out from the UI (final review, Minor 4)."""
+    plan = _seed(client, beats=2, seconds=4.0)
+    beat = plan.script.beats[0]
+    beat.raw_audio_path = str(tmp_path / "raw.wav")
+    beat.cleanup = _cleanup_info(CleanupReport(
+        seconds_before=1.0, seconds_after=0.05,
+        loudness_before=-30.0, loudness_after=float("-inf"),
+        filters_applied="highpass=f=80.0", cleanup_abandoned=True))
+    _store(client).save_plan(plan, status=VOICE_REVIEW)
+
+    reloaded = _store(client).get_plan(plan.plan_id)
+
+    assert reloaded is not None, (
+        "the plan failed to reload -- exactly the permanent 500 this "
+        "fix exists to prevent")
+    assert reloaded.script.beats[0].cleanup.loudness_after is None
+    assert reloaded.script.beats[0].cleanup.loudness_before == -30.0
+
+    # The board itself must survive the read too, not just the store.
+    response = client.get(f"/api/plan/{plan.plan_id}/voice")
+    assert response.status_code == 200
+
+
 def test_reverting_to_raw_measures_like_the_raw_and_is_not_cleaned(
         client, tmp_path):
     """Upload with cleanup on, then ask for cleanup off: the written file
@@ -1198,11 +1253,39 @@ def test_a_raw_path_outside_the_work_dir_is_never_served(client, tmp_path):
     outside = tmp_path / "elsewhere" / "secret-raw.wav"
     _tone(_settings(client), outside, seconds=1.0)
     plan = _seed(client, beats=2, seconds=4.0)
+    # ``voice_engine`` set to "upload" deliberately: otherwise the
+    # voice_engine gate (final review, Minor 6) would 404 this on its own,
+    # and the assertion below would stop actually exercising the
+    # containment check it names.
+    plan.script.beats[0].voice_engine = "upload"
     plan.script.beats[0].raw_audio_path = str(outside)
     _store(client).save_plan(plan, status=VOICE_REVIEW)
 
     assert client.get("/api/audio/p1/b0",
                       params={"raw": 1}).status_code == 404
+
+
+def test_raw_equals_one_refuses_an_archived_raw_after_a_respeak(
+        client, monkeypatch, tmp_path):
+    """The board and ``toggle_cleanup`` both refuse to acknowledge a raw
+    upload once the beat has been re-spoken over it -- ``?raw=1`` used to
+    be the one reader of ``raw_audio_path`` that did not apply that rule,
+    serving the archived bytes to anyone who hand-built the URL (final
+    review, Minor 6)."""
+    settings = _settings(client)
+    settings.voice_clean = True
+    _seed(client, beats=2, seconds=4.0)
+    assert _upload(client, "b0",
+                   _gap_tone(settings, tmp_path / "gapped.wav")
+                   ).status_code == 200
+
+    _fake_engine(monkeypatch, settings)
+    respeak = client.patch("/api/plan/p1/voice/b0",
+                           json={"voice_text": "नया पाठ"})
+    assert respeak.status_code == 200, respeak.text
+
+    response = client.get("/api/audio/p1/b0", params={"raw": 1})
+    assert response.status_code == 404
 
 
 # --- a respeak must not be discardable by the toggle (fix round 1) ---------

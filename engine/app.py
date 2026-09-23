@@ -39,6 +39,7 @@ There is no publish route. Payload builders are exposed for copy-out only.
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
 import re
@@ -394,6 +395,20 @@ def _decodes_as_media(path: Path, settings: Settings) -> bool:
     return result.returncode == 0
 
 
+def _finite_or_none(value: float) -> float | None:
+    """``value``, unless it is ``-inf``/``+inf``/``nan``, in which case
+    ``None``.
+
+    loudnorm reports ``-inf`` for anything under its ~400ms gating block,
+    and that literal float serialises to JSON ``null`` under this
+    project's pydantic version, which then fails to validate back into a
+    required ``float`` field on the very next read. ``None`` is the
+    version of "not measurable" that survives the round trip (final
+    review, Minor 4).
+    """
+    return value if math.isfinite(value) else None
+
+
 def _cleanup_info(report) -> CleanupInfo:
     """Copy a ``CleanupReport`` (a plain dataclass, private to one ingest
     call) onto the pydantic shape that is allowed to sit on a beat and
@@ -403,8 +418,8 @@ def _cleanup_info(report) -> CleanupInfo:
     return CleanupInfo(
         seconds_before=report.seconds_before,
         seconds_after=report.seconds_after,
-        loudness_before=report.loudness_before,
-        loudness_after=report.loudness_after,
+        loudness_before=_finite_or_none(report.loudness_before),
+        loudness_after=_finite_or_none(report.loudness_after),
         filters_applied=report.filters_applied,
         cleanup_abandoned=report.cleanup_abandoned,
     )
@@ -1067,6 +1082,13 @@ def create_app(db_path: str | Path | None = None,
             raise HTTPException(404, "no such plan")
         status = store.plan_status(plan_id)
         roots = [Path(settings.work_dir), Path(settings.out_dir)]
+        # Narrower than ``roots``: the upload route only ever writes a raw
+        # copy under ``work_dir`` (never ``out_dir``), and ``toggle_cleanup``
+        # only ever accepts a raw path there too. Checked against the same
+        # single root here so the board never advertises a
+        # ``cleanup_toggle`` URL for a raw file the toggle route itself
+        # would 404 on (final review, Minor 5).
+        raw_roots = [Path(settings.work_dir)]
 
         rows: list[dict] = []
         for beat in plan.script.beats:
@@ -1082,7 +1104,7 @@ def create_app(db_path: str | Path | None = None,
             # refuses it for exactly this reason, so the board must not
             # advertise a revert control it will be refused for.
             raw_exists = bool(raw_path and raw_path.is_file()
-                              and _under_roots(raw_path, roots)
+                              and _under_roots(raw_path, raw_roots)
                               and replaced)
             rows.append({
                 "beat_id": beat.beat_id,
@@ -1592,6 +1614,13 @@ def create_app(db_path: str | Path | None = None,
         cleaned file when no raw is stored: a player quietly serving a
         different take than the one asked for is exactly the failure this
         gate exists to catch, so that is a 404 instead.
+
+        Gated on ``voice_engine`` the same way the board and
+        ``toggle_cleanup`` already are: a beat that was uploaded and then
+        re-spoken keeps its raw file on disk (Global Constraint 3), but it
+        is archived history, not the active take, and this was the one
+        reader of ``raw_audio_path`` that did not apply that rule (final
+        review, Minor 6).
         """
         plan = store.get_plan(plan_id)
         if plan is None:
@@ -1602,13 +1631,17 @@ def create_app(db_path: str | Path | None = None,
             raise HTTPException(404, f"no such beat: {beat_id}")
 
         if raw:
-            if not beat.raw_audio_path:
+            if not beat.raw_audio_path or beat.voice_engine != UPLOAD_ENGINE:
                 raise HTTPException(
                     404, f"beat {beat_id!r} has no raw upload stored")
             raw_path = Path(beat.raw_audio_path)
+            # Narrower than the cleaned-audio check below: a raw upload is
+            # only ever written under ``work_dir`` (see the upload route),
+            # and the board and ``toggle_cleanup`` check it against that
+            # one root -- agreeing with them here rather than accepting a
+            # wider set this route would never actually see a file under.
             if not raw_path.is_file() or not _under_roots(
-                    raw_path,
-                    [Path(settings.work_dir), Path(settings.out_dir)]):
+                    raw_path, [Path(settings.work_dir)]):
                 raise HTTPException(
                     404, f"beat {beat_id!r}'s raw upload is not on disk "
                          f"any more")

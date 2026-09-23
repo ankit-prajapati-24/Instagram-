@@ -98,8 +98,15 @@ class CleanupInfo(BaseModel):
 
     seconds_before: float
     seconds_after: float
-    loudness_before: float
-    loudness_after: float
+    # ``None`` rather than a literal ``-inf``: loudnorm reports "-inf" for
+    # anything under its ~400ms gating block (an emptied-by-cleanup
+    # recording, or a beat trimmed very short), and pydantic 2's default
+    # JSON mode serialises that float as ``null`` -- which then fails
+    # ``model_validate_json`` on the very next read, 500ing every route
+    # that touches the plan from then on (final review, Minor 4). ``None``
+    # here is the honest, round-trippable way to say "not measurable".
+    loudness_before: float | None
+    loudness_after: float | None
     filters_applied: str
     cleanup_abandoned: bool = False
 

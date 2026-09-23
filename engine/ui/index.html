@@ -847,6 +847,15 @@ function voiceLengthLine(data) {
   }
 }
 
+/* loudnorm reports "-inf" for anything under its ~400ms gating block, and
+   that comes back here as ``null`` (final review, Minor 4 -- ``-inf``
+   itself cannot survive a stored plan's round trip). "n/a" is the honest
+   way to show a beat where nothing was measurable, rather than throwing
+   on ``null.toFixed``. */
+function fmtLufs(v) {
+  return (v === null || v === undefined) ? "n/a" : `${v.toFixed(1)} LUFS`;
+}
+
 /* What the cleanup chain did to one beat's raw upload, in words —
    built entirely from ``b.cleanup`` (itself off the plan, never a
    constant in this page: Global Constraint 5). "cleaned", "cleanup was
@@ -860,7 +869,7 @@ function cleanupState(b) {
       cls: "abandoned",
       text: `cleanup was attempted and removed everything, so the raw `
         + `level was used — ${c.seconds_after.toFixed(2)}s at `
-        + `${c.loudness_after.toFixed(1)} LUFS.`
+        + `${fmtLufs(c.loudness_after)}.`
     };
   }
   if (!c.filters_applied) {
@@ -868,19 +877,23 @@ function cleanupState(b) {
       cls: "",
       text: `cleanup is off — the raw take as uploaded, `
         + `${c.seconds_after.toFixed(2)}s at `
-        + `${c.loudness_after.toFixed(1)} LUFS.`
+        + `${fmtLufs(c.loudness_after)}.`
     };
   }
   const removedSecs = c.seconds_before - c.seconds_after;
-  const loudMove = c.loudness_after - c.loudness_before;
-  const sign = loudMove >= 0 ? "+" : "";
+  const haveMove = typeof c.loudness_before === "number"
+    && typeof c.loudness_after === "number";
+  const loudMove = haveMove ? c.loudness_after - c.loudness_before : null;
+  const sign = (loudMove !== null && loudMove >= 0) ? "+" : "";
+  const moveText = loudMove !== null
+    ? `${sign}${loudMove.toFixed(1)} LU`
+    : `n/a`;
   return {
     cls: "done",
     text: `cleaned up: ${removedSecs.toFixed(2)}s of pauses trimmed `
       + `(${c.seconds_before.toFixed(2)}s → `
-      + `${c.seconds_after.toFixed(2)}s), loudness ${sign}`
-      + `${loudMove.toFixed(1)} LU (${c.loudness_before.toFixed(1)} → `
-      + `${c.loudness_after.toFixed(1)} LUFS).`
+      + `${c.seconds_after.toFixed(2)}s), loudness ${moveText} `
+      + `(${fmtLufs(c.loudness_before)} → ${fmtLufs(c.loudness_after)}).`
   };
 }
 
@@ -1118,8 +1131,18 @@ async function respeakBeat(beat, button) {
       : `caption re-timed across ${data.seconds.toFixed(2)}s`;
     $("vsecs-" + beat).textContent = data.seconds.toFixed(2) + "s";
     $("veng-" + beat).textContent = data.engine;
-    $("veng-" + beat).className = "eng";
-    $("vrow-" + beat).classList.remove("swapped", "gone");
+    if (data.respoken) {
+      /* Only a real re-speak changes what this row's engine badge and
+         "swapped" styling mean -- a caption-only edit leaves the audio,
+         and therefore ``voice_engine``, exactly as it was (final review,
+         Minor 8). Clearing these unconditionally used to leave a beat
+         still saying its uploaded take styled as if it no longer were,
+         hiding the cleaned/raw switch only an upload gets. */
+      $("veng-" + beat).className = "eng";
+      $("vrow-" + beat).classList.remove("swapped", "gone");
+    } else {
+      $("vrow-" + beat).classList.remove("gone");
+    }
     $("vaud-" + beat).src = `${data.audio}?t=${Date.now()}`;
     $("vsay-" + beat).classList.remove("dirty");
     $("vcap-" + beat).classList.remove("dirty");
@@ -1128,13 +1151,14 @@ async function respeakBeat(beat, button) {
     row.caption_text = data.caption_text;
     row.engine = data.engine;
     row.seconds = data.seconds;
-    row.replaced = false;
     if (data.respoken) {
-      /* The beat actually said something new, so whatever raw upload was
-         sitting behind it is now archived history, not the active take --
-         the same ruling the board itself follows (see the docstring on
-         ``/voice``). No control is shown for it; there is nothing to
-         revert to any more. */
+      // A real re-speak, not a caption-only edit: the upload it replaced
+      // is no longer the active take (final review, Minor 8), so whatever
+      // raw upload was sitting behind it is now archived history -- the
+      // same ruling the board itself follows (see the docstring on
+      // ``/voice``). No control is shown for it; there is nothing to
+      // revert to any more.
+      row.replaced = false;
       row.raw_audio = null;
       row.cleaned = null;
       row.cleanup = null;

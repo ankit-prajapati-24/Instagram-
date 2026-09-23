@@ -397,50 +397,68 @@ def ingest_narration(source: str | Path, target: str | Path, settings, *,
             f"LUFS). It would render as a gap the length of the beat, with "
             f"the captions scrolling over nothing.")
 
+    raw_partial: Path | None = None
     if raw_target is not None:
         raw_target = Path(raw_target)
         raw_target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, raw_target)
+        # Copied to a scratch path now, moved onto ``raw_target`` only once
+        # the write pass below has actually succeeded (final review,
+        # Important 1). ``raw_target`` is a deterministic per-beat path: a
+        # second upload that clears every refusal above but then fails the
+        # measure or write pass further down must not already have
+        # clobbered the byte-identical raw copy the beat's *previous*
+        # upload left there. Same discipline the transcode itself uses a
+        # few lines below.
+        raw_partial = raw_target.with_suffix(raw_target.suffix + ".part")
+        shutil.copyfile(source, raw_partial)
 
     effective = (settings if clean is None
                 else replace(settings, voice_clean=clean))
     requested_filters = cleanup_filters(effective)
 
-    # Global Constraint 2: the same filter chain has to appear in the
-    # measure pass and the write pass, so the measured values describe the
-    # signal that ends up written. ``pipeline`` is that chain -- cleanup
-    # plus the format conversion below -- and it is empty when cleanup is
-    # off, in which case ``measured`` reuses the single raw measurement
-    # taken above rather than running a second ffmpeg invocation.
-    pipeline = ""
-    if requested_filters:
-        # Verified against ffmpeg on 2026-09-23, and re-verified against
-        # this repository's own ``settings.ffmpeg`` while fixing review
-        # round 1: chaining ``silenceremove`` into ``loudnorm`` on a file
-        # with no internal gap for ``silenceremove`` to actually trim (a
-        # plain continuous tone, reproduced on both mono and stereo),
-        # while ffmpeg also resamples/downmixes the *output* (the plain
-        # ``-ar``/``-ac`` flags below, all the cleanup-off path has ever
-        # needed), crashes with "Assertion best_input >= 0 failed" in
-        # ffmpeg_filter.c. A file with an actual gap for silenceremove to
-        # trim does not trigger it, which is presumably why review round 1
-        # could not reproduce it on gapped fixtures alone. Doing the
-        # resample and channel mix explicitly, inside the filter graph and
-        # ahead of ``loudnorm``, avoids it -- and doing it identically in
-        # *both* passes, not just the write, is what review round 1 also
-        # asked for: measuring a cleaned-but-still-stereo signal and then
-        # downmixing only on write measured 3+ dB off target on a
-        # genuinely decorrelated (hard-panned) two-channel recording,
-        # because loudnorm's gain was computed for a different signal than
-        # the one it was applied to.
-        pipeline = (f"{requested_filters},aresample={NARRATION_SAMPLE_RATE},"
-                   f"aformat=channel_layouts=mono")
+    # The resample/downmix fragment every write goes through now, on
+    # *every* call -- cleanup on or off (final review, Important 2).
+    # Review round 1 (Critical 1, below) found that folding it into the
+    # write pass only, and leaving the cleanup-off path to reach the same
+    # format with the plain output-side ``-ar``/``-ac`` flags instead,
+    # computes loudnorm's gain for a different signal than the one that
+    # downmix actually produces: a decorrelated stereo upload measured 3+
+    # dB off target with cleanup off. Global Constraint 8 ("cleanup off
+    # behaves exactly as today") is about not regressing the off path, not
+    # about preserving a mismatch that predates this feature, so the off
+    # path now goes through the identical ``aresample``/``aformat``
+    # fragment, ahead of ``loudnorm``, that the on path already needed.
+    format_pipeline = (f"aresample={NARRATION_SAMPLE_RATE},"
+                       f"aformat=channel_layouts=mono")
+    pipeline = (f"{requested_filters},{format_pipeline}" if requested_filters
+               else format_pipeline)
+    # Verified against ffmpeg on 2026-09-23, and re-verified against this
+    # repository's own ``settings.ffmpeg`` while fixing review round 1:
+    # chaining ``silenceremove`` into ``loudnorm`` on a file with no
+    # internal gap for ``silenceremove`` to actually trim (a plain
+    # continuous tone, reproduced on both mono and stereo), while ffmpeg
+    # also resamples/downmixes the *output* (the plain ``-ar``/``-ac``
+    # flags below), crashes with "Assertion best_input >= 0 failed" in
+    # ffmpeg_filter.c. A file with an actual gap for silenceremove to trim
+    # does not trigger it. Review round 1's own repro covered five
+    # fixtures, two of them gap-free continuous tones, and still came back
+    # all green; re-running the exact same five fixtures here reproduced
+    # the crash on both gap-free ones. So the crash is real and was
+    # independently reproduced twice -- round 1's own repro simply did not
+    # catch it, not because its fixtures were all gapped. Doing the
+    # resample and channel mix explicitly, inside the filter graph and
+    # ahead of ``loudnorm``, avoids it -- and doing it identically in
+    # *both* passes, not just the write, is what review round 1 also
+    # asked for: measuring a cleaned-but-still-stereo signal and then
+    # downmixing only on write measured 3+ dB off target on a genuinely
+    # decorrelated (hard-panned) two-channel recording, because loudnorm's
+    # gain was computed for a different signal than the one it was applied
+    # to.
 
-    measured = raw_measured if not pipeline else _loudnorm_measurement(
-        source, settings, pipeline)
+    measured = _loudnorm_measurement(source, settings, pipeline)
 
     cleanup_abandoned = False
-    if pipeline and not math.isfinite(_input_i(measured)):
+    if requested_filters and not math.isfinite(_input_i(measured)):
         # Cleanup emptied the file outright: silenceremove trimmed every
         # sample once the denoiser had already pulled the whole thing below
         # its threshold, which is exactly what a recording that is nothing
@@ -448,15 +466,16 @@ def ingest_narration(source: str | Path, target: str | Path, settings, *,
         # raw silence check above; loudnorm's ``measured_I`` cannot take a
         # literal ``-inf`` (ffmpeg: "Value -inf for parameter 'measured_I'
         # out of range"), and there is nothing left to encode besides. So
-        # cleanup is skipped for this one write and the raw signal is
+        # cleanup is skipped for this one write and the raw signal --
+        # resampled/downmixed the same way the off path always is now -- is
         # normalised instead -- an honest fallback, not a silent one:
         # ``cleanup_abandoned`` on the report says so, and
         # ``filters_applied`` still names what was attempted rather than
         # being overwritten with "", which would read identically to
         # cleanup never having been requested at all.
         cleanup_abandoned = True
-        pipeline = ""
-        measured = raw_measured
+        pipeline = format_pipeline
+        measured = _loudnorm_measurement(source, settings, pipeline)
 
     # Linear mode with the measured values: one gain for the whole beat and
     # no riding. ffmpeg drops back to dynamic by itself if the requested
@@ -469,7 +488,7 @@ def ingest_narration(source: str | Path, target: str | Path, settings, *,
                f":measured_thresh={measured['input_thresh']}"
                f":offset={measured.get('target_offset', 0)}"
                f":linear=true")
-    write_filters = f"{pipeline},{applied}" if pipeline else applied
+    write_filters = f"{pipeline},{applied}"
 
     partial = target.with_suffix(target.suffix + ".part")
     try:
@@ -495,8 +514,17 @@ def ingest_narration(source: str | Path, target: str | Path, settings, *,
         # off the source: the written file is what the timeline measures.
         written = probe_duration(partial, settings.ffmpeg)
         os.replace(partial, target)
+        # Only now, with the cleaned file itself safely in place, does the
+        # raw copy replace whatever this beat's raw currently is (final
+        # review, Important 1): a write-pass failure never reaches this
+        # line, so the beat's previously stored raw survives a refused
+        # re-upload byte for byte.
+        if raw_partial is not None:
+            os.replace(raw_partial, raw_target)
     finally:
         Path(partial).unlink(missing_ok=True)
+        if raw_partial is not None:
+            raw_partial.unlink(missing_ok=True)
 
     # Read-only probe off the file that was actually written. Not a third
     # transform pass -- nothing here feeds back into what was encoded --
@@ -506,7 +534,15 @@ def ingest_narration(source: str | Path, target: str | Path, settings, *,
     report = CleanupReport(
         seconds_before=seconds_before,
         seconds_after=written,
-        loudness_before=_input_i(measured),
+        # The raw signal's own measurement, not whichever pipeline ended up
+        # driving the write (final review, Minor 3): ``measured`` is the
+        # cleaned-and-resampled signal when cleanup ran, so using it here
+        # named two different signals "before" depending on state, and the
+        # same beat toggled between cleaned and raw reported two numbers
+        # that were not comparable. ``raw_measured`` means the same thing
+        # in every state: what the upload measured before this call did
+        # anything to it.
+        loudness_before=_input_i(raw_measured),
         loudness_after=_input_i(final_measured),
         # The fragment requested, not ``pipeline``: "" when cleanup was
         # off, the cleanup chain when it was requested -- whether it ran

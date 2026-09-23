@@ -163,14 +163,24 @@ def _decorrelated_stereo(settings, path: Path, *,
 # --- the ingest ------------------------------------------------------------
 
 
+@pytest.mark.parametrize("voice_clean", [True, False])
 def test_an_upload_is_rewritten_into_the_format_the_concat_demuxer_needs(
-        settings, tmp_path):
+        settings, tmp_path, voice_clean):
     """44.1 kHz stereo in, 24 kHz mono mp3 out — Piper's exact format.
 
     Not cosmetic: ``stitch_narration`` uses the concat demuxer, and a beat
     that disagrees about sample rate or channel count either fails the
     concat or plays at the wrong speed.
+
+    Parametrised over ``voice_clean`` (final review, Minor 7): the cleaned
+    path reaches this format through ``aresample``/``aformat`` inside the
+    filter graph; the off path used to reach it through the output-side
+    ``-ar``/``-ac`` flags instead -- two different mechanisms, previously
+    pinned by one assertion running under whichever ``Settings()`` default
+    the developer's environment happened to read. Both are pinned here
+    regardless of that ambient default.
     """
+    settings.voice_clean = voice_clean
     source = _tone(settings, tmp_path / "in.wav", seconds=2.0,
                    rate=44100, channels=2)
     target = tmp_path / "out.mp3"
@@ -544,3 +554,143 @@ def test_report_loudness_matches_what_the_written_file_measures(
 
     real_after = _loudness(settings, target)
     assert abs(report.loudness_after - real_after) < 0.5
+
+
+# --- final whole-feature review ---------------------------------------------
+
+
+def test_a_failed_reupload_does_not_destroy_the_raw_the_beat_still_points_at(
+        settings, tmp_path, monkeypatch):
+    """Important 1: a good upload's raw copy must survive a second upload
+    that clears every refusal (it decodes, it is not silent) but then
+    fails during its own measure/write pass -- the documented
+    ``silenceremove``+resample ffmpeg assertion, or a full disk, are the
+    real-world versions of this. ``shutil.copyfile`` onto the deterministic
+    per-beat ``raw_target`` used to run before that pass, so a failure
+    there left the beat's stored raw already overwritten with the bytes of
+    the take that was about to be refused.
+    """
+    settings.voice_clean = True
+    raw_target = tmp_path / "raw" / "b0-upload.raw.wav"
+    target = tmp_path / "out.mp3"
+
+    first_source = _tone(settings, tmp_path / "first.wav", seconds=3.0,
+                        hz=220)
+    ingest_narration(first_source, target, settings, raw_target=raw_target)
+    good_raw_bytes = raw_target.read_bytes()
+    good_target_bytes = target.read_bytes()
+    assert good_raw_bytes == first_source.read_bytes()
+
+    second_source = _tone(settings, tmp_path / "second.wav", seconds=3.0,
+                         hz=440)
+    assert second_source.read_bytes() != first_source.read_bytes(), \
+        "the fixture must actually be different bytes from the first take"
+
+    import engine.media.voice as voice_mod
+    real_run = voice_mod.subprocess.run
+
+    def _write_pass_blows_up(args, **kwargs):
+        # Only the write pass's ffmpeg invocation drops video with -vn;
+        # the measure passes and probe_duration never do. Simulates a
+        # write-pass failure (a full disk, the documented assertion)
+        # without faking away any audio measurement.
+        if "-vn" in args:
+            raise OSError("simulated: no space left on device")
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(voice_mod.subprocess, "run", _write_pass_blows_up)
+
+    with pytest.raises(OSError):
+        ingest_narration(second_source, target, settings,
+                        raw_target=raw_target)
+
+    assert raw_target.read_bytes() == good_raw_bytes, (
+        "the second upload's bytes clobbered the beat's stored raw before "
+        "its own write pass was known to have succeeded")
+    assert target.read_bytes() == good_target_bytes, (
+        "the beat's cleaned audio was touched by a write that failed")
+    # No orphan scratch file left behind under work_dir either.
+    assert not raw_target.with_suffix(raw_target.suffix + ".part").exists()
+
+
+def test_a_failed_first_upload_leaves_no_orphan_raw_behind(
+        settings, tmp_path, monkeypatch):
+    """The other half of Important 1: when there was no previous raw to
+    protect, a failed write must not leave a stray ``.part`` copy sitting
+    under ``work_dir`` either."""
+    settings.voice_clean = True
+    raw_target = tmp_path / "raw" / "b0-upload.raw.wav"
+    target = tmp_path / "out.mp3"
+    source = _tone(settings, tmp_path / "in.wav", seconds=3.0)
+
+    import engine.media.voice as voice_mod
+    real_run = voice_mod.subprocess.run
+
+    def _write_pass_blows_up(args, **kwargs):
+        if "-vn" in args:
+            raise OSError("simulated: no space left on device")
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(voice_mod.subprocess, "run", _write_pass_blows_up)
+
+    with pytest.raises(OSError):
+        ingest_narration(source, target, settings, raw_target=raw_target)
+
+    assert not raw_target.exists()
+    assert not raw_target.with_suffix(raw_target.suffix + ".part").exists()
+    assert not target.exists()
+
+
+def test_cleanup_off_a_decorrelated_stereo_upload_still_lands_in_the_band(
+        settings, tmp_path):
+    """Important 2: with cleanup off, the write pass used to pass only
+    ``loudnorm`` through ``-af`` and do the downmix with the output-side
+    ``-ar``/``-ac`` flags *after* the filter graph, so loudnorm's linear
+    gain was computed for the stereo signal and applied to a mono downmix
+    of it -- the same defect fix round 1 corrected for the cleaned path.
+    ``_tone``'s stereo fixture duplicates one channel to both, which is
+    why this never showed up here before; genuinely decorrelated stereo
+    (``_decorrelated_stereo``) measured 3.1 dB off target on the pre-fix
+    code. The controller ruling: put the resample/downmix ahead of
+    ``loudnorm`` unconditionally, in both passes, so the off path gets the
+    same treatment as the on path -- this is the model test for it, the
+    same 1.5 dB band ``test_cleanup_on_a_decorrelated_stereo_upload_
+    still_lands_in_the_band`` already holds the on path to.
+    """
+    settings.voice_clean = False
+    source = _decorrelated_stereo(settings, tmp_path / "panned.wav")
+    probed = _probe(settings, source)
+    assert not probed["mono"], "fixture must be genuinely two-channel"
+
+    target = tmp_path / "out.mp3"
+    seconds, report = ingest_narration(source, target, settings)
+
+    after = _loudness(settings, target)
+    assert abs(after - UPLOAD_LOUDNESS) <= 1.5, (
+        f"normalised to {after} LUFS, wanted within 1.5 dB of "
+        f"{UPLOAD_LOUDNESS}")
+    assert report.filters_applied == ""
+    assert report.cleanup_abandoned is False
+
+
+def test_loudness_before_means_the_raw_signal_in_every_cleanup_state(
+        settings, tmp_path):
+    """Minor 3: ``loudness_before`` used to be whichever pipeline's own
+    ``input_i`` ended up driving the write -- the cleaned-and-resampled
+    signal's loudness when cleanup ran, the raw signal's when it did not
+    -- so the same beat toggled between cleaned and raw reported two
+    numbers that were not comparable, even though the panel presents the
+    delta as "what cleanup did to the loudness". It has to mean the same
+    thing -- the upload's own loudness before this call did anything to it
+    -- in every state.
+    """
+    source = _noisy_tone(settings, tmp_path / "in.wav")
+    raw_loudness = _loudness(settings, source)
+
+    _, cleaned_report = ingest_narration(
+        source, tmp_path / "on.mp3", settings, clean=True)
+    _, off_report = ingest_narration(
+        source, tmp_path / "off.mp3", settings, clean=False)
+
+    assert cleaned_report.loudness_before == off_report.loudness_before
+    assert abs(cleaned_report.loudness_before - raw_loudness) < 0.5
