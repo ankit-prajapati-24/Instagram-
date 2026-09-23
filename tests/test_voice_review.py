@@ -999,5 +999,196 @@ def test_a_failed_re_speak_leaves_no_scratch_file_behind(
     monkeypatch.setattr(voice_mod, "synth_beat_piper", dies)
     monkeypatch.setattr(voice_mod, "synth_beat_edge", dies)
     client.patch("/api/plan/p1/voice/b0", json={"voice_text": "नया"})
-
     assert {p.name for p in audio_dir.iterdir()} == before
+
+
+# --- the cleanup toggle and the raw revert (Task 3) --------------------------
+#
+# Global Constraint 3 keeps the raw upload on disk beside whatever is
+# written; this is the route that reads it back. Every claim here is
+# measured off a real file, per Global Constraint 7 -- a beat with an
+# internal 2s gap is uploaded once, and the two cleanup states are told
+# apart by how long the *written* file actually is, not by inspecting a
+# filter string.
+
+
+def _gap_tone(settings, path: Path) -> Path:
+    """tone / 2s silence / tone. Cleanup's ``silenceremove`` caps the gap
+    at ``voice_pause_cap`` (0.35s by default), so the written file measures
+    shorter with cleanup on than with it off -- the one difference these
+    tests can tell apart without decoding samples."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [settings.ffmpeg, "-hide_banner", "-v", "error", "-y",
+         "-f", "lavfi", "-i", "sine=frequency=220:duration=1",
+         "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono:d=2",
+         "-f", "lavfi", "-i", "sine=frequency=220:duration=1",
+         "-filter_complex", "[0:a][1:a][2:a]concat=n=3:v=0:a=1[out]",
+         "-map", "[out]", "-ar", "44100", "-ac", "1", str(path)],
+        check=True, capture_output=True)
+    return path
+
+
+def test_uploading_stores_a_raw_copy_the_board_can_point_at(
+        client, tmp_path):
+    """The upload response and the board both carry the new fields, and the
+    raw file on disk is the exact bytes handed over -- not the transcoded
+    one this same request also writes."""
+    _seed(client, beats=2, seconds=4.0)
+    settings = _settings(client)
+    settings.voice_clean = True
+    source = _gap_tone(settings, tmp_path / "gapped.wav")
+
+    body = _upload(client, "b0", source).json()
+    assert body["cleaned"] is True
+    assert body["filters_applied"]
+    assert body["cleanup_abandoned"] is False
+    assert body["raw_audio"] == "/api/audio/p1/b0?raw=1"
+
+    beat = _store(client).get_plan("p1").script.beats[0]
+    assert beat.raw_audio_path
+    assert Path(beat.raw_audio_path).read_bytes() == source.read_bytes()
+    assert beat.cleanup is not None and beat.cleanup.cleanup_abandoned \
+        is False
+
+    board = client.get("/api/plan/p1/voice").json()
+    row = board["beats"][0]
+    assert row["raw_audio"] == "/api/audio/p1/b0?raw=1"
+    assert row["cleaned"] is True
+    assert row["cleanup"]["filters_applied"]
+    # The beat nothing was ever uploaded for reports no raw, rather than
+    # erroring or inventing one.
+    assert board["beats"][1]["raw_audio"] is None
+    assert board["beats"][1]["cleaned"] is None
+    assert board["beats"][1]["cleanup"] is None
+
+
+def test_reverting_to_raw_measures_like_the_raw_and_is_not_cleaned(
+        client, tmp_path):
+    """Upload with cleanup on, then ask for cleanup off: the written file
+    comes back out at the raw's own length (the gap survives) and the
+    board says so."""
+    _seed(client, beats=2, seconds=4.0)
+    settings = _settings(client)
+    settings.voice_clean = True
+    source = _gap_tone(settings, tmp_path / "gapped.wav")
+
+    cleaned_body = _upload(client, "b0", source).json()
+    # Cleanup trimmed the 2s gap down to the pause cap: shorter than the
+    # raw's own ~4s.
+    assert cleaned_body["seconds"] < 3.0
+
+    response = client.post("/api/plan/p1/voice/b0/cleanup",
+                           json={"enabled": False})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["enabled"] is False
+    assert body["cleaned"] is False
+    assert body["seconds"] == pytest.approx(4.0, abs=0.3), \
+        "reverting to raw should measure like the raw, gap and all"
+
+    beat = _store(client).get_plan("p1").script.beats[0]
+    assert beat.measured_seconds == pytest.approx(4.0, abs=0.3)
+    assert beat.cleanup.filters_applied == ""
+
+
+def test_reverting_to_raw_and_back_to_cleaned_proves_the_raw_survived(
+        client, tmp_path):
+    """The round trip: cleaned -> raw -> cleaned again lands on the same
+    measurement it started at, which only holds if the raw uploaded bytes
+    were never touched by the first cleaned write."""
+    _seed(client, beats=2, seconds=4.0)
+    settings = _settings(client)
+    settings.voice_clean = True
+    source = _gap_tone(settings, tmp_path / "gapped.wav")
+
+    first = _upload(client, "b0", source).json()["seconds"]
+
+    off = client.post("/api/plan/p1/voice/b0/cleanup",
+                      json={"enabled": False}).json()
+    assert off["seconds"] > first + 1.0, "cleanup off did not restore the gap"
+
+    back_on = client.post("/api/plan/p1/voice/b0/cleanup",
+                          json={"enabled": True}).json()
+    assert back_on["cleaned"] is True
+    assert back_on["seconds"] == pytest.approx(first, abs=0.2)
+
+    beat = _store(client).get_plan("p1").script.beats[0]
+    assert beat.measured_seconds == pytest.approx(first, abs=0.2)
+
+
+def test_calling_the_toggle_twice_with_the_same_value_is_not_an_error(
+        client, tmp_path):
+    """Idempotent, per the brief's own resolution: same value, both calls
+    200, same state -- not that the second call is detected and skipped."""
+    _seed(client, beats=2, seconds=4.0)
+    settings = _settings(client)
+    settings.voice_clean = True
+    source = _gap_tone(settings, tmp_path / "gapped.wav")
+    _upload(client, "b0", source)
+
+    first = client.post("/api/plan/p1/voice/b0/cleanup",
+                        json={"enabled": True})
+    second = client.post("/api/plan/p1/voice/b0/cleanup",
+                         json={"enabled": True})
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["seconds"] == pytest.approx(second.json()["seconds"],
+                                                     abs=0.1)
+
+
+def test_raw_equals_one_serves_the_raw_bytes(client, tmp_path):
+    _seed(client, beats=2, seconds=4.0)
+    settings = _settings(client)
+    settings.voice_clean = True
+    source = _gap_tone(settings, tmp_path / "gapped.wav")
+    _upload(client, "b0", source)
+
+    response = client.get("/api/audio/p1/b0", params={"raw": 1})
+    assert response.status_code == 200
+    assert response.content == source.read_bytes()
+
+
+def test_raw_equals_one_is_404_for_a_beat_with_no_raw_stored(client):
+    _seed(client, beats=2, seconds=4.0)
+    response = client.get("/api/audio/p1/b1", params={"raw": 1})
+    assert response.status_code == 404
+
+
+def test_the_cleanup_route_is_409_off_the_gate(client, tmp_path):
+    settings = _settings(client)
+    settings.voice_clean = True
+    source = _gap_tone(settings, tmp_path / "gapped.wav")
+    _seed(client, beats=2, seconds=4.0)
+    _upload(client, "b0", source)
+
+    _store(client).set_status("p1", "approved")
+    response = client.post("/api/plan/p1/voice/b0/cleanup",
+                           json={"enabled": False})
+    assert response.status_code == 409
+
+
+def test_the_cleanup_route_is_404_for_an_unknown_beat(client):
+    _seed(client, beats=2, seconds=4.0)
+    response = client.post("/api/plan/p1/voice/nope/cleanup",
+                           json={"enabled": False})
+    assert response.status_code == 404
+
+
+def test_the_cleanup_route_is_404_for_a_beat_with_no_raw_stored(client):
+    """A beat nothing was uploaded for has nothing to revert to."""
+    _seed(client, beats=2, seconds=4.0)
+    response = client.post("/api/plan/p1/voice/b1/cleanup",
+                           json={"enabled": False})
+    assert response.status_code == 404
+
+
+def test_a_raw_path_outside_the_work_dir_is_never_served(client, tmp_path):
+    outside = tmp_path / "elsewhere" / "secret-raw.wav"
+    _tone(_settings(client), outside, seconds=1.0)
+    plan = _seed(client, beats=2, seconds=4.0)
+    plan.script.beats[0].raw_audio_path = str(outside)
+    _store(client).save_plan(plan, status=VOICE_REVIEW)
+
+    assert client.get("/api/audio/p1/b0",
+                      params={"raw": 1}).status_code == 404

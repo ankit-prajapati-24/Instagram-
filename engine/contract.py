@@ -85,6 +85,25 @@ class WordTiming(BaseModel):
     end: float
 
 
+class CleanupInfo(BaseModel):
+    """What the cleanup chain did to a beat's uploaded narration, carried on
+    the beat so the voice board can show it after a reload.
+
+    Mirrors ``engine.media.voice.CleanupReport`` field-for-field. That is a
+    plain dataclass which by its own docstring never crosses the
+    contract/store boundary -- this is the pydantic shape that does,
+    written once per upload or cleanup-toggle call (Global Constraint 4:
+    nothing about a transform happens silently).
+    """
+
+    seconds_before: float
+    seconds_after: float
+    loudness_before: float
+    loudness_after: float
+    filters_applied: str
+    cleanup_abandoned: bool = False
+
+
 class Clip(Coercing):
     """One stock-footage slot inside a beat.
 
@@ -159,6 +178,19 @@ class Beat(Coercing):
     clips: list[Clip] = Field(default_factory=list)
     # How many boundary spans the TTS service reported, for diagnostics.
     spoken_words: int | None = None
+    # A byte-identical copy of a human-uploaded take (Global Constraint 3:
+    # the raw upload is never destroyed), kept beside whatever is currently
+    # written to ``audio_path``. ``None`` for a beat nothing was ever
+    # uploaded for -- a synthesised beat, or one uploaded before this
+    # existed. The revert/cleanup-toggle route re-ingests from this path,
+    # never from ``audio_path``, so re-cleaning an already-cleaned file
+    # never compounds.
+    raw_audio_path: str | None = None
+    # What the cleanup chain did the last time this beat's raw upload was
+    # ingested (by the upload route or the cleanup-toggle route). ``None``
+    # alongside ``raw_audio_path`` being ``None`` -- there is no upload to
+    # report on.
+    cleanup: CleanupInfo | None = None
 
     def seconds(self) -> float:
         return (self.measured_seconds

@@ -60,8 +60,8 @@ from engine.assembly.render import VIDEO_SUFFIXES
 from engine.config import (Settings, beat_count, beat_word_range,
                            speech_rate, spoken_seconds, word_budget,
                            words_per_beat)
-from engine.contract import (Beat, Claim, Clip, Metadata, Motion, Role,
-                             Transition)
+from engine.contract import (Beat, Claim, CleanupInfo, Clip, Metadata, Motion,
+                             Role, Transition)
 from engine.gates.qc import pre_render_range
 from engine.media.align import build_aligner
 from engine.media.voice import (MIN_UPLOAD_SECONDS, UPLOAD_ENGINE,
@@ -271,6 +271,23 @@ AUDIO_CONTAINERS = {
     "audio/webm", "video/mp4", "video/quicktime", "video/webm",
 }
 
+# The extension the byte-identical raw copy is written with (Global
+# Constraint 3: the raw upload is never destroyed). One entry for every
+# value ``_sniff_audio`` can actually return, so the raw file's own name
+# says what container it is rather than lying with ``.mp3`` -- the cleaned
+# file next to it is always mp3 because it is always transcoded, but the
+# raw copy is neither, and naming it ``.mp3`` would make it look decodable
+# by a tool that trusts extensions.
+RAW_UPLOAD_SUFFIX = {
+    "audio/mpeg": ".mp3",
+    "audio/wav": ".wav",
+    "audio/ogg": ".ogg",
+    "audio/flac": ".flac",
+    "audio/webm": ".webm",
+    "audio/mp4": ".m4a",
+    "video/quicktime": ".mov",
+}
+
 
 def _sniff_audio(head: bytes) -> str | None:
     """The container these bytes claim to be, or ``None``.
@@ -373,6 +390,54 @@ def _decodes_as_media(path: Path, settings: Settings) -> bool:
          "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"],
         capture_output=True)
     return result.returncode == 0
+
+
+def _cleanup_info(report) -> CleanupInfo:
+    """Copy a ``CleanupReport`` (a plain dataclass, private to one ingest
+    call) onto the pydantic shape that is allowed to sit on a beat and
+    reach the store. Shared by the upload route and the cleanup-toggle
+    route so the two never describe the same dataclass two different ways.
+    """
+    return CleanupInfo(
+        seconds_before=report.seconds_before,
+        seconds_after=report.seconds_after,
+        loudness_before=report.loudness_before,
+        loudness_after=report.loudness_after,
+        filters_applied=report.filters_applied,
+        cleanup_abandoned=report.cleanup_abandoned,
+    )
+
+
+def _cleaned(info: CleanupInfo | None) -> bool | None:
+    """Did what's currently written for this beat actually go through the
+    cleanup chain?
+
+    ``None`` when there is nothing to report on. Otherwise: filters were
+    requested *and* they were not abandoned -- an abandoned cleanup (the
+    signal it emptied) falls back to normalising the raw signal instead, so
+    what got written was not cleaned even though cleanup was asked for.
+    This is the distinction the brief calls out by name: "cleanup was off"
+    and "cleanup was attempted and abandoned" must not collapse into the
+    same answer. Both report ``cleaned=False`` here, but the full
+    ``cleanup`` object alongside it still carries ``cleanup_abandoned`` to
+    tell them apart.
+    """
+    if info is None:
+        return None
+    return bool(info.filters_applied) and not info.cleanup_abandoned
+
+
+def _cleanup_response(report) -> dict:
+    """The CleanupReport fields, flattened into a response dict. Shared by
+    the upload route and the cleanup-toggle route (Global Constraint 4)."""
+    return {
+        "seconds_before": round(report.seconds_before, 2),
+        "seconds_after": round(report.seconds_after, 2),
+        "loudness_before": round(report.loudness_before, 1),
+        "loudness_after": round(report.loudness_after, 1),
+        "filters_applied": report.filters_applied,
+        "cleanup_abandoned": report.cleanup_abandoned,
+    }
 
 
 class PlanRequest(BaseModel):
@@ -487,6 +552,14 @@ class BeatTextEdit(BaseModel):
 
     voice_text: str | None = None
     caption_text: str | None = None
+
+
+class CleanupToggleRequest(BaseModel):
+    """What the cleanup-toggle route accepts: cleanup on or off, nothing
+    else. Re-ingesting is driven entirely by the beat's stored raw and the
+    settings already on the server."""
+
+    enabled: bool
 
 
 class VoiceReleaseRequest(ReleaseRequest):
@@ -996,6 +1069,10 @@ def create_app(db_path: str | Path | None = None,
         rows: list[dict] = []
         for beat in plan.script.beats:
             path = Path(beat.audio_path) if beat.audio_path else None
+            raw_path = Path(beat.raw_audio_path) if beat.raw_audio_path \
+                else None
+            raw_exists = bool(raw_path and raw_path.is_file()
+                              and _under_roots(raw_path, roots))
             rows.append({
                 "beat_id": beat.beat_id,
                 "role": beat.role,
@@ -1012,6 +1089,19 @@ def create_app(db_path: str | Path | None = None,
                                and _under_roots(path, roots)),
                 "audio": f"/api/audio/{plan_id}/{beat.beat_id}",
                 "replace": f"/api/plan/{plan_id}/voice/{beat.beat_id}",
+                # A beat nothing was ever uploaded for -- a synthesised
+                # beat, or one uploaded before this existed -- reports no
+                # raw rather than erroring: ``None`` all the way down.
+                "raw_audio": (f"/api/audio/{plan_id}/{beat.beat_id}?raw=1"
+                             if raw_exists else None),
+                # Whether *what's currently written* went through the
+                # cleanup chain -- distinct from whether cleanup was
+                # merely asked for. See ``_cleaned``.
+                "cleaned": _cleaned(beat.cleanup),
+                "cleanup": (beat.cleanup.model_dump()
+                           if beat.cleanup else None),
+                "cleanup_toggle": f"/api/plan/{plan_id}/voice/"
+                                  f"{beat.beat_id}/cleanup",
             })
 
         narration = plan.duration()
@@ -1120,7 +1210,8 @@ def create_app(db_path: str | Path | None = None,
 
             with partial.open("rb") as handle:
                 head = handle.read(32)
-            if _sniff_audio(head) is None:
+            sniffed = _sniff_audio(head)
+            if sniffed is None:
                 raise HTTPException(
                     415, "those bytes are not any media container this "
                          "gate recognises. The extension and the content "
@@ -1130,9 +1221,17 @@ def create_app(db_path: str | Path | None = None,
             destination = audio_dir / f"{safe_beat}-upload.mp3"
             if not _under_roots(destination, [Path(settings.work_dir)]):
                 raise HTTPException(500, "upload path escaped work_dir")
+            # The exact bytes handed over, kept beside the cleaned file
+            # (Global Constraint 3). Named from the sniffed container, not
+            # ``.mp3`` -- unlike the cleaned file this one is never
+            # transcoded, so a ``.mp3`` name would lie about what it is.
+            raw_suffix = RAW_UPLOAD_SUFFIX.get(sniffed, ".bin")
+            raw_target = audio_dir / f"{safe_beat}-upload.raw{raw_suffix}"
+            if not _under_roots(raw_target, [Path(settings.work_dir)]):
+                raise HTTPException(500, "raw upload path escaped work_dir")
             try:
-                seconds, _cleanup = ingest_narration(partial, destination,
-                                                    settings)
+                seconds, report = ingest_narration(
+                    partial, destination, settings, raw_target=raw_target)
             except UploadRejected as exc:
                 # A 415 rather than a 400: these are all judgements about
                 # the media itself — it does not decode, it is silent, it
@@ -1144,6 +1243,8 @@ def create_app(db_path: str | Path | None = None,
         before = beat.seconds()
         apply_beat_audio(beat, destination, settings,
                          engine=UPLOAD_ENGINE, aligner=build_aligner(settings))
+        beat.raw_audio_path = str(raw_target)
+        beat.cleanup = _cleanup_info(report)
         store.save_plan(plan, status=VOICE_REVIEW_STATUS)
 
         narration = plan.duration()
@@ -1164,6 +1265,9 @@ def create_app(db_path: str | Path | None = None,
             "in_window": (settings.duration_min <= narration
                           <= settings.duration_max),
             "audio": f"/api/audio/{plan_id}/{beat_id}",
+            "raw_audio": f"/api/audio/{plan_id}/{beat_id}?raw=1",
+            "cleaned": _cleaned(beat.cleanup),
+            **_cleanup_response(report),
         }
 
     @app.patch("/api/plan/{plan_id}/voice/{beat_id}")
@@ -1346,8 +1450,102 @@ def create_app(db_path: str | Path | None = None,
             "audio": f"/api/audio/{plan_id}/{beat_id}",
         }
 
+    @app.post("/api/plan/{plan_id}/voice/{beat_id}/cleanup")
+    def toggle_cleanup(plan_id: str, beat_id: str,
+                       request: CleanupToggleRequest) -> dict:
+        """Re-ingest a beat's stored raw upload with cleanup on or off.
+
+        Never re-ingests from ``audio_path`` -- only from ``raw_audio_path``.
+        Cleaning an already-cleaned file would compound the processing
+        (a second highpass, a second denoise, a second pass of
+        ``silenceremove`` eating into what the first pass already trimmed),
+        which is exactly what keeping the raw beside the cleaned file is
+        for.
+
+        Idempotent in the sense that matters here: calling this twice with
+        the same ``enabled`` re-runs the same deterministic ffmpeg pipeline
+        over the same raw bytes and lands in the same state both times,
+        rather than erroring on the second call.
+
+        Same guards as the upload route: the voice gate, a beat that
+        exists, and every path checked against ``work_dir`` before it is
+        written to.
+        """
+        plan = store.get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(404, "no such plan")
+        status = store.plan_status(plan_id)
+        if status != VOICE_REVIEW_STATUS:
+            raise HTTPException(
+                409, f"plan is '{status}', not awaiting voice review. "
+                     f"Cleanup is toggled at that gate, the same place "
+                     f"narration is replaceable.")
+
+        beat = next((b for b in plan.script.beats if b.beat_id == beat_id),
+                    None)
+        if beat is None:
+            raise HTTPException(404, f"no such beat: {beat_id}")
+
+        if not beat.raw_audio_path:
+            raise HTTPException(
+                404, f"beat {beat_id!r} has no raw upload stored to "
+                     f"re-ingest. Only a beat whose narration was uploaded "
+                     f"through this gate keeps one.")
+        raw_path = Path(beat.raw_audio_path)
+        if not raw_path.is_file() or not _under_roots(
+                raw_path, [Path(settings.work_dir)]):
+            raise HTTPException(
+                404, f"beat {beat_id!r}'s raw upload is no longer on disk")
+
+        # Server-built, exactly as the upload route builds it -- this is
+        # the same destination that route writes to, so toggling cleanup
+        # overwrites the beat's upload take rather than adding a second
+        # file nothing reads.
+        safe_beat = re.sub(r"[^A-Za-z0-9_-]", "_", beat_id)[:40] or "beat"
+        safe_plan = re.sub(r"[^A-Za-z0-9_-]", "_", plan_id)[:64] or "plan"
+        audio_dir = Path(settings.work_dir) / safe_plan / "audio"
+        if not _under_roots(audio_dir, [Path(settings.work_dir)]):
+            raise HTTPException(500, "audio directory escaped work_dir")
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        destination = audio_dir / f"{safe_beat}-upload.mp3"
+        if not _under_roots(destination, [Path(settings.work_dir)]):
+            raise HTTPException(500, "upload path escaped work_dir")
+
+        try:
+            seconds, report = ingest_narration(
+                raw_path, destination, settings, clean=request.enabled)
+        except UploadRejected as exc:
+            raise HTTPException(415, str(exc)) from exc
+
+        before = beat.seconds()
+        apply_beat_audio(beat, destination, settings,
+                         engine=UPLOAD_ENGINE, aligner=build_aligner(settings))
+        beat.cleanup = _cleanup_info(report)
+        store.save_plan(plan, status=VOICE_REVIEW_STATUS)
+
+        narration = plan.duration()
+        gate_min, gate_max = pre_render_range(settings.duration_min,
+                                              settings.duration_max)
+        return {
+            "plan_id": plan_id, "beat_id": beat_id,
+            "enabled": request.enabled,
+            "engine": UPLOAD_ENGINE,
+            "seconds": round(seconds, 2),
+            "was_seconds": round(before, 2),
+            "word_timing_source": beat.word_timing_source,
+            "narration_seconds": round(narration, 2),
+            "in_gate": gate_min <= narration <= gate_max,
+            "in_window": (settings.duration_min <= narration
+                          <= settings.duration_max),
+            "audio": f"/api/audio/{plan_id}/{beat_id}",
+            "raw_audio": f"/api/audio/{plan_id}/{beat_id}?raw=1",
+            "cleaned": _cleaned(beat.cleanup),
+            **_cleanup_response(report),
+        }
+
     @app.get("/api/audio/{plan_id}/{beat_id}")
-    def beat_audio(plan_id: str, beat_id: str) -> FileResponse:
+    def beat_audio(plan_id: str, beat_id: str,
+                  raw: bool = False) -> FileResponse:
         """One beat's narration, for the player on the review board.
 
         Every path here is server-controlled — synthesis writes
@@ -1355,6 +1553,12 @@ def create_app(db_path: str | Path | None = None,
         its own — but it is still keyed by URL input and read off disk, so
         it gets the same containment check as ``/media`` and ``/api/frame``:
         nothing outside ``work_dir``/``out_dir`` is ever served.
+
+        ``?raw=1`` serves the beat's stored raw upload instead of whatever
+        is currently active. There is deliberately no fall-back to the
+        cleaned file when no raw is stored: a player quietly serving a
+        different take than the one asked for is exactly the failure this
+        gate exists to catch, so that is a 404 instead.
         """
         plan = store.get_plan(plan_id)
         if plan is None:
@@ -1363,6 +1567,23 @@ def create_app(db_path: str | Path | None = None,
                     None)
         if beat is None:
             raise HTTPException(404, f"no such beat: {beat_id}")
+
+        if raw:
+            if not beat.raw_audio_path:
+                raise HTTPException(
+                    404, f"beat {beat_id!r} has no raw upload stored")
+            raw_path = Path(beat.raw_audio_path)
+            if not raw_path.is_file() or not _under_roots(
+                    raw_path,
+                    [Path(settings.work_dir), Path(settings.out_dir)]):
+                raise HTTPException(
+                    404, f"beat {beat_id!r}'s raw upload is not on disk "
+                         f"any more")
+            # No forced media_type, unlike the branch below: the raw file
+            # is whatever container the browser sent (wav, m4a, mov, ...),
+            # never transcoded, so its own extension says what it is.
+            return FileResponse(raw_path)
+
         if not beat.audio_path:
             raise HTTPException(
                 404, f"beat {beat_id!r} has no audio yet — voice has not "
