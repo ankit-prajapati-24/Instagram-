@@ -16,7 +16,7 @@ so rather than pretending.
 | Python | 3.14.3 | 3.11+ should work; 3.14 is what everything was tested on |
 | Node.js | v22.23.2 | only needed for OmniRoute |
 | Git | any | |
-| Disk | ~1.5 GB | the voice model is 61 MB, ffmpeg ~80 MB, the rest is Node |
+| Disk | ~1.5 GB | the voice model is 61 MB, ffmpeg ~80 MB, the rest is Node. Add ~40 MB if you turn on `RAHASYA_ALIGN` |
 
 Windows already ships the two fonts the captions use — **Arial** for Roman and
 **Nirmala UI** for Devanagari. Nothing to install.
@@ -169,6 +169,8 @@ documents the defaults. The ones worth knowing:
 | `RAHASYA_PIPER_VOICE` | `pratham` | downloads on first use, ~61 MB |
 | `RAHASYA_PIPER_LENGTH` | `1.12` | pace; `1.0` is Piper's natural speed |
 | `RAHASYA_CAPTIONS` | `caption_text` | Roman Hinglish, or `voice_text` for Devanagari |
+| `RAHASYA_ALIGN` | `0` | measure caption word timings out of the synthesised audio with faster-whisper instead of interpolating them. **Off by default** — it downloads a model on first use. See [Caption word alignment](#caption-word-alignment) |
+| `RAHASYA_ALIGN_MODEL` | `base` | which Whisper model aligns; `tiny` is faster per second of audio but slower to load, `small` is slower than realtime and useless here |
 | `RAHASYA_DAILY_USD` | `2.0` | pipeline pauses when the day's spend crosses this |
 | `RAHASYA_KEYLESS_IMAGES` | `1` | set `0` to skip the free image tier |
 | `PEXELS_API_KEY` | _(none)_ | stock footage for scenes, the primary visual source; free to register, and without it every scene falls back to the still-image chain |
@@ -181,6 +183,66 @@ documents the defaults. The ones worth knowing:
 
 **Provider API keys do not go in this file.** They belong to OmniRoute, in its
 own env file or dashboard.
+
+---
+
+## Caption word alignment
+
+Off by default. Turn it on with `RAHASYA_ALIGN=1` in `.env`.
+
+**What it does.** The burned captions highlight word by word, and the emoji
+stickers pop on a particular word. Both need to know when each caption word is
+spoken. Normally those times are a guess: the beat's span is measured exactly
+from its audio file, and the caption's words are spread across it by character
+count. With this on, `faster-whisper` listens to the audio the pipeline just
+synthesised and reports where each word actually landed.
+
+**The download.** The `base` model is fetched from Hugging Face the first time
+you run with it on — about 40 MB, into `~/.cache/huggingface/hub` (set
+`HF_HOME` to move it). Nothing downloads while the switch is off, which is the
+whole reason it is off: a clean clone should not stall mid-render on a network
+fetch nobody asked for. To pull it ahead of time:
+
+```bash
+python -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', compute_type='int8')"
+```
+
+No GPU and no PyTorch. `faster-whisper` runs on `ctranslate2`, which ships a
+CPU wheel for Python 3.14.
+
+**What it costs.** Measured here on a ten-beat, 38.5-second script: the model
+loads once per run (7.5s cold, 2.8s from warm disk cache) and transcription
+runs at about 2.8x realtime, so `synth_plan` went from 49.1s to 63.9s. Call it
+**+15 seconds on a full run** — against a render that takes minutes.
+
+**What it buys.** Less than you might hope, and that is worth saying plainly.
+Over those ten beats, five came back with a Whisper token count matching the
+caption and got true per-word timings; the other five did not and fell back to
+interpolation inside the *measured speech span*, which is still a real
+improvement because Piper leaves 0.25-0.57s of silence at the end of every
+beat file that plain interpolation spends caption time on. The per-word
+difference against plain interpolation averaged **0.151s**, worst case
+**0.375s**. It is polish on a 3-5 second beat, not a transformation.
+
+**Why the counts disagree.** Whisper hears this Piper voice as Urdu and
+transcribes Hindi into Arabic script — `اسم` for `असम` — so its text can never
+be matched to our Roman Hinglish caption words. Only position can be. Forcing
+`RAHASYA_ALIGN_LANG=hi` does not change that; it only skips the detection pass
+and roughly halves the time.
+
+**When it fails.** It falls back to the old interpolation and the run
+continues — a missing model, no network on first use, an empty transcription,
+a count it will not salvage. It never fails a render. Which path each beat
+took is printed as it goes:
+
+```
+[align] b1: whisper-span (10 spoken tokens vs 9 caption words)
+[align] whisper=5, whisper-span=5
+```
+
+and recorded on each beat as `word_timing_source`, the same way
+`voice_engine` records which TTS engine actually spoke. A run that silently
+interpolated everything says `[align] interpolated=10`.
 
 ---
 

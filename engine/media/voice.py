@@ -21,6 +21,13 @@ not be reused for captions regardless. Each beat is its own audio file, so
 its span is measured exactly and caption words are interpolated inside it by
 character length. For 3-5 second beats that is visually indistinguishable
 from true per-word timing, and it stays deterministic.
+
+That interpolation is still the default, and still the fallback. With
+``RAHASYA_ALIGN=1`` the timings are instead measured back off the synthesised
+audio with faster-whisper — see ``engine/media/align.py``, which owns both the
+model and the policy for what to do when its token count disagrees with ours.
+Any failure there returns interpolated timings rather than raising, and the
+source of every beat's timings is recorded on ``Beat.word_timing_source``.
 """
 
 from __future__ import annotations
@@ -33,6 +40,7 @@ import sys
 from pathlib import Path
 
 from engine.contract import ReelPlan, WordTiming
+from engine.media.align import INTERPOLATED, WHISPER, build_aligner
 
 TICKS_PER_SECOND = 10_000_000  # edge-tts reports 100-nanosecond ticks
 
@@ -156,7 +164,7 @@ def synth_beat_piper(beat_text: str, target: Path, settings) -> int:
 
 
 def synth_plan(plan: ReelPlan, work_dir: str | Path, settings,
-               progress=None) -> None:
+               progress=None) -> dict[str, int]:
     """Fill audio_path, measured_seconds and words for every beat.
 
     The engine is chosen by ``settings.voice_engine``. Piper is the default;
@@ -165,11 +173,22 @@ def synth_plan(plan: ReelPlan, work_dir: str | Path, settings,
     once and carrying on is better than losing an approved script to a voice
     problem, and the engine that was actually used is reported through
     ``progress``.
+
+    Returns the timing-source counts, the way ``generate_plan_clips`` returns
+    its provider counts: ``{"whisper": 7, "whisper-span": 2,
+    "interpolated": 1}``. Same reasoning — the fallback here is silent by
+    design, so the run has to say what it actually did.
     """
     work_dir = Path(work_dir) / plan.plan_id / "audio"
     work_dir.mkdir(parents=True, exist_ok=True)
 
     engine = (settings.voice_engine or "piper").strip().lower()
+    # One aligner for the whole plan, or None when RAHASYA_ALIGN is off.
+    # Built here rather than inside the loop because loading the Whisper
+    # model costs ~8s and transcribing a beat costs ~1.5s: per beat it would
+    # dominate the stage.
+    aligner = build_aligner(settings)
+    sources: dict[str, int] = {}
 
     for index, beat in enumerate(plan.script.beats):
         target = work_dir / f"{beat.beat_id}.mp3"
@@ -201,14 +220,37 @@ def synth_plan(plan: ReelPlan, work_dir: str | Path, settings,
         beat.voice_engine = engine
         beat.measured_seconds = probe_duration(target, settings.ffmpeg)
         # Burned captions are Roman, the voice is Devanagari; align the
-        # on-screen words to this beat's measured span. Piper reports no
-        # timings, so this is the only source either way.
-        beat.words = caption_timings(beat.caption_text,
-                                     beat.measured_seconds)
+        # on-screen words to this beat's measured span. Neither TTS engine
+        # reports usable word timings, so the choice is between measuring
+        # them back off the audio and interpolating them.
+        if aligner is None:
+            beat.words = caption_timings(beat.caption_text,
+                                         beat.measured_seconds)
+            beat.word_timing_source = INTERPOLATED
+        else:
+            result = aligner.align(target, beat.caption_text,
+                                   beat.measured_seconds)
+            beat.words = result.words
+            beat.word_timing_source = result.source
+            used = f"{used} / {result.source}"
+            if result.source != WHISPER:
+                print(f"[align] {beat.beat_id}: {result.source} "
+                      f"({result.detail})", file=sys.stderr, flush=True)
+        sources[beat.word_timing_source] = \
+            sources.get(beat.word_timing_source, 0) + 1
         beat.spoken_words = spoken
         if progress:
             progress(index + 1, len(plan.script.beats), beat.beat_id,
                      beat.measured_seconds, used)
+
+    if aligner is not None:
+        # One summary line, the way the clip stage prints its provider
+        # counts. A run that quietly interpolated every beat is the exact
+        # thing this is here to make visible.
+        print("[align] " + ", ".join(f"{k}={v}" for k, v in
+                                     sorted(sources.items())),
+              file=sys.stderr, flush=True)
+    return sources
 
 
 def stitch_narration(plan: ReelPlan, out_path: str | Path,

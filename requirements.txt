@@ -14,6 +14,14 @@ piper-tts
 # when Piper cannot synthesise.
 edge-tts
 
+# Caption word alignment, OFF by default (RAHASYA_ALIGN=1 turns it on).
+# Used as a forced aligner, not a transcriber: it measures where each word
+# lands in the audio we just synthesised, instead of interpolating caption
+# words across the beat by character count. CPU-only -- ctranslate2 ships a
+# cp314 wheel, so no torch is pulled in. The `base` model downloads ~40MB
+# from Hugging Face on FIRST USE, which is why the switch defaults to off.
+faster-whisper
+
 # Visuals: placeholder composition and image normalisation
 pillow
 

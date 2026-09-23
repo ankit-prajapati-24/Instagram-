@@ -147,6 +147,13 @@ class Beat(Coercing):
     measured_seconds: float | None = None
     # Caption-aligned timings (Roman), not the Devanagari narration's.
     words: list[WordTiming] = Field(default_factory=list)
+    # Where those timings came from: "interpolated" (spread across the beat
+    # by character count), "whisper-span" (interpolated inside the speech
+    # span faster-whisper measured) or "whisper" (its per-word timings,
+    # applied by index). Mirrors voice_engine and Clip.provider for the same
+    # reason: alignment falls back silently by design, and a run that
+    # interpolated must not look like one that aligned.
+    word_timing_source: str | None = None
     # Stock footage filling this beat's span. Empty means the render falls
     # back to image_path for the whole beat.
     clips: list[Clip] = Field(default_factory=list)

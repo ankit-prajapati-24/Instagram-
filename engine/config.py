@@ -143,6 +143,41 @@ class Settings:
     voice_pitch: str = field(
         default_factory=lambda: os.getenv("RAHASYA_VOICE_PITCH", "-6Hz"))
 
+    # --- Caption word alignment --------------------------------------------
+    # Measure the caption word timings from the synthesised audio with
+    # faster-whisper instead of interpolating them across the beat by
+    # character count. Same switch shape as video_grade and stickers, but
+    # inverted: OFF by default.
+    #
+    # Off, because unlike the grade this one downloads a model (~40MB for
+    # `base`) on first use and adds ~30s to a ten-beat run, and what it buys
+    # is polish rather than correctness -- measured, it moves caption words
+    # by 0.05-0.44s on a 2.4s beat. A clean clone should not pay a surprise
+    # download mid-render for that. Turn it on with RAHASYA_ALIGN=1; it
+    # degrades to the old interpolation on any failure, never to an error.
+    align_words: bool = field(
+        default_factory=lambda: os.getenv(
+            "RAHASYA_ALIGN", "0").strip().lower()
+        in {"1", "true", "yes", "on"})
+    # base, measured on this machine at 4.1x realtime against tiny's 3.5x
+    # and small's 0.5x -- small is slower than realtime and useless here,
+    # and tiny is no faster in practice because its load is 18.9s.
+    align_model: str = field(
+        default_factory=lambda: os.getenv("RAHASYA_ALIGN_MODEL", "base"))
+    # int8 on CPU. There is no torch on this install and ctranslate2's
+    # cp314 wheel is CPU-only anyway.
+    align_compute: str = field(
+        default_factory=lambda: os.getenv("RAHASYA_ALIGN_COMPUTE", "int8"))
+    align_device: str = field(
+        default_factory=lambda: os.getenv("RAHASYA_ALIGN_DEVICE", "cpu"))
+    # Forced, not auto-detected. Whisper hears this Piper voice as Urdu and
+    # writes it in Arabic script whichever way this is set -- forcing "hi"
+    # does not fix the script and does not move a timing. What it buys is
+    # speed: it skips the detection pass, which measured 8.4s -> 5.7s over
+    # four beats. Set it to "" to let it detect.
+    align_language: str = field(
+        default_factory=lambda: os.getenv("RAHASYA_ALIGN_LANG", "hi"))
+
     # --- Video -------------------------------------------------------------
     ffmpeg: str = field(default_factory=_resolve_ffmpeg)
     width: int = 1080
