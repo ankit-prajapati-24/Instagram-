@@ -89,6 +89,54 @@ ANCHOR_X_FRACTIONS = (0.30, 0.70, 0.50)
 MIN_PNG_PX = 96
 CACHE_DIRNAME = "_stickers"
 
+# Where scripts/bake_stickers.py leaves its output.
+BAKED_DIRNAME = "stickers"
+BAKED_ROOT = Path(__file__).resolve().parent.parent / "data" / BAKED_DIRNAME
+
+# Which grade each beat role gets. Reveal and twist are where the video
+# turns, and they carry the footage that a bright cartoon fights; hook and
+# cta are where loudness earns its place. Anything unmapped gets punchy,
+# because a sticker that is hard to see is worse than one that is loud.
+ROLE_STYLES = {"reveal": "dark", "twist": "dark"}
+DEFAULT_STYLE = "punchy"
+
+
+def style_for_role(role: str | None) -> str:
+    """The grade a beat of this role gets."""
+    return ROLE_STYLES.get((role or "").strip().lower(), DEFAULT_STYLE)
+
+
+def baked_sequence(name: str, style: str, *, fps: int, size: int,
+                   root: Path | None = None
+                   ) -> tuple[str, int, int] | None:
+    """``(pattern, frames, canvas)`` for baked art, or None to fall back.
+
+    Returns None rather than raising for every kind of absence -- no art for
+    this trigger, a bake made at another fps or another size, a bake that is
+    short a frame. A half-written sequence would composite a truncated
+    animation, and a wrong-size one would sit off its own anchor because
+    ``canvas_origin`` derives the geometry from the canvas; both are worse
+    failures than the emoji this falls back to, and harder to notice.
+    """
+    folder = (root or BAKED_ROOT) / name / style
+    meta_path = folder / "meta.json"
+    if not meta_path.exists():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        frames = int(meta["frames"])
+        canvas = int(meta["canvas"])
+        baked_fps = int(meta["fps"])
+        baked_size = int(meta["size"])
+    except (OSError, ValueError, KeyError):
+        return None
+    if baked_fps != fps or baked_size != size or frames <= 0:
+        return None
+    if len(list(folder.glob("frame-*.png"))) != frames:
+        return None
+    return str(folder / "frame-%03d.png"), frames, canvas
+
+
 _PUNCTUATION = "\"'`.,!?;:()[]{}<>\u2014\u2013-\u2018\u2019\u201c\u201d" \
                "\u0964\u0965\u2026"
 
@@ -133,6 +181,8 @@ class Sticker:
     beat_index: int
     start: float
     slot: int
+    style: str       # which grade the baked frames were made with
+    baked: bool      # True when designed art rendered, False for the emoji
     size: int        # resting width of the glyph
     canvas: int      # the square every pop frame is drawn on
     frames: int      # how many PNGs the pop is
@@ -442,18 +492,24 @@ def prepare(plan: ReelPlan, settings, *,
 
     prepared: list[Sticker] = []
     for slot, cue in enumerate(cues):
-        try:
-            pattern, frames, canvas = render_pop_frames(
-                cue.emoji, root, size=size, fps=fps, font_path=font)
-        except StickerUnavailable as exc:
-            print(f"[stickers] disabled for this render: {exc}",
-                  file=sys.stderr, flush=True)
-            return []
+        beat = plan.script.beats[cue.beat_index]
+        style = style_for_role(getattr(beat, "role", None))
+        found = baked_sequence(cue.name, style, fps=fps, size=size)
+        if found is not None:
+            pattern, frames, canvas = found
+        else:
+            try:
+                pattern, frames, canvas = render_pop_frames(
+                    cue.emoji, root, size=size, fps=fps, font_path=font)
+            except StickerUnavailable as exc:
+                print(f"[stickers] disabled for this render: {exc}",
+                      file=sys.stderr, flush=True)
+                return []
         prepared.append(Sticker(
             name=cue.name, emoji=cue.emoji, word=cue.word,
             beat_index=cue.beat_index, start=cue.start, slot=slot,
-            size=size, canvas=canvas, frames=frames, pattern=pattern,
-            png=pattern % (frames - 1)))
+            style=style, baked=found is not None, size=size, canvas=canvas,
+            frames=frames, pattern=pattern, png=pattern % (frames - 1)))
     return prepared
 
 

@@ -163,10 +163,12 @@ def test_a_pop_lands_on_every_sticker(tmp_path):
     from engine.assembly.stickers import Sticker
     _touch(tmp_path / "placeholder-pop.wav")
     made = [Sticker(name="warning", emoji="!", word="w", beat_index=1,
-                    start=5.5, slot=0, size=10, canvas=12, frames=7,
+                    start=5.5, slot=0, style="punchy", baked=False,
+                    size=10, canvas=12, frames=7,
                     pattern="p-%03d.png", png="p-006.png"),
             Sticker(name="eye", emoji="!", word="w", beat_index=3,
-                    start=13.25, slot=1, size=10, canvas=12, frames=7,
+                    start=13.25, slot=1, style="punchy", baked=False,
+                    size=10, canvas=12, frames=7,
                     pattern="q-%03d.png", png="q-006.png")]
     cues = audio.plan_sfx(_timed_plan(beats=6), _Stub(sfx_dir=tmp_path),
                           stickers=made)
@@ -180,8 +182,8 @@ def test_cues_are_in_timeline_order_and_never_past_the_end(tmp_path):
         _touch(tmp_path / f"placeholder-{kind}.wav")
     plan = _timed_plan(beats=6, measured=2.0)          # 12.0s total
     late = Sticker(name="x", emoji="!", word="w", beat_index=5, start=99.0,
-                   slot=0, size=10, canvas=12, frames=7, pattern="p-%03d.png",
-                   png="p-006.png")
+                   slot=0, style="punchy", baked=False, size=10, canvas=12,
+                   frames=7, pattern="p-%03d.png", png="p-006.png")
     cues = audio.plan_sfx(plan, _Stub(sfx_dir=tmp_path), stickers=[late])
     assert [c.start for c in cues] == sorted(c.start for c in cues)
     assert all(0.0 <= c.start < 12.0 for c in cues)

@@ -19,6 +19,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from engine.assembly import stickers as stk
 from engine.assembly.captions import build_ass, write_ass
@@ -338,8 +339,10 @@ def test_switching_stickers_off_prepares_nothing(tmp_path):
     assert stk.prepare(plan, settings) == []
 
 
-def test_a_missing_emoji_font_disables_stickers_instead_of_failing(tmp_path):
-    plan = _timed(beats=4)
+def test_a_missing_emoji_font_disables_the_emoji_path(tmp_path):
+    # "paisa" hits `money`, which ships no art, so this exercises the
+    # glyph path the font is actually needed for.
+    plan = _timed(beats=4, captions=["Us gaon mein paisa gaadha tha"] * 4)
     settings = shipped_settings()
     settings.work_dir = tmp_path
     settings.sticker_font = str(tmp_path / "nope.ttf")
@@ -388,6 +391,83 @@ def test_every_emoji_in_the_map_actually_has_a_colour_glyph(tmp_path):
             thin.append(f"{trigger.name} ({stk._codepoints(trigger.emoji)}): "
                         f"{len(opaque)} colours")
     assert not thin, "monochrome or missing glyphs: " + "; ".join(thin)
+
+
+# --- baked art -------------------------------------------------------------
+
+def test_reveal_and_twist_are_dark_everything_else_is_punchy():
+    assert stk.style_for_role("reveal") == "dark"
+    assert stk.style_for_role("twist") == "dark"
+    assert stk.style_for_role("hook") == "punchy"
+    assert stk.style_for_role("cta") == "punchy"
+    assert stk.style_for_role("setup") == "punchy"
+    assert stk.style_for_role("") == "punchy"
+
+
+SHIPPED_SIZE = stk.sticker_size(1080, 0.17)      # 184
+
+
+def test_a_shipped_trigger_resolves_to_its_baked_frames():
+    found = stk.baked_sequence("death", "dark", fps=30, size=SHIPPED_SIZE)
+    assert found is not None
+    pattern, frames, canvas = found
+    assert frames == 42
+    assert canvas == stk.sticker_canvas(SHIPPED_SIZE)
+    assert Path(pattern % 0).exists()
+
+
+def test_a_trigger_without_art_has_no_baked_frames():
+    assert stk.baked_sequence("ghost", "dark", fps=30,
+                              size=SHIPPED_SIZE) is None
+
+
+def _fake_bake(root, *, frames, meta_frames, fps=30, size=48):
+    folder = root / "death" / "dark"
+    folder.mkdir(parents=True)
+    for index in range(frames):
+        Image.new("RGBA", (8, 8)).save(folder / f"frame-{index:03d}.png")
+    (folder / "meta.json").write_text(json.dumps(
+        {"frames": meta_frames, "fps": fps, "size": size, "canvas": 8}),
+        encoding="utf-8")
+    return folder
+
+
+def test_a_short_bake_is_refused_so_it_cannot_render_truncated(tmp_path):
+    _fake_bake(tmp_path, frames=5, meta_frames=48)   # 5 on disk, 48 claimed
+    assert stk.baked_sequence("death", "dark", fps=30, size=48,
+                              root=tmp_path) is None
+
+
+def test_a_bake_for_another_fps_is_not_reused(tmp_path):
+    _fake_bake(tmp_path, frames=48, meta_frames=48, fps=30)
+    assert stk.baked_sequence("death", "dark", fps=60, size=48,
+                              root=tmp_path) is None
+
+
+def test_a_bake_for_another_size_is_not_reused(tmp_path):
+    _fake_bake(tmp_path, frames=48, meta_frames=48, size=184)
+    assert stk.baked_sequence("death", "dark", fps=30, size=60,
+                              root=tmp_path) is None
+
+
+def test_prepared_stickers_carry_the_style_of_their_beat(tmp_path):
+    plan = _timed(beats=4, captions=[
+        "Roopkund jheel mein paanch sau kankaal mile",
+        "Koi nahi jaanta ye log kaun the",
+        "Sab ek hi waqt par khatam hue",
+        "Tumhe kya lagta hai sach kya hai"])
+    for beat, role in zip(plan.script.beats,
+                          ["hook", "setup", "reveal", "cta"]):
+        beat.role = role
+    settings = shipped_settings()
+    settings.work_dir = tmp_path
+
+    prepared = stk.prepare(plan, settings)
+
+    assert prepared, "expected at least one sticker"
+    for sticker in prepared:
+        role = plan.script.beats[sticker.beat_index].role
+        assert sticker.style == stk.style_for_role(role)
 
 
 # --- real renders ----------------------------------------------------------
