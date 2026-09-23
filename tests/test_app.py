@@ -322,6 +322,56 @@ def test_checklist_silent_when_all_beats_used_pexels():
                    for item in items)
 
 
+def test_checklist_does_not_flag_all_upload_beat_as_fallback():
+    """A clip the user watched and replaced through the review gate carries
+    provider="upload" — a deliberate, successful outcome, not a fallback.
+    A beat made entirely of uploads must not be flagged, and the checklist
+    should instead note that the whole video was hand-supplied."""
+    plan = make_plan()
+    for beat in plan.script.beats:
+        beat.clips = [_clip("mine.mp4", provider="upload")]
+    items = payloads.publish_checklist(plan, "o.mp4")
+    assert not any("placeholder" in item or "fell back" in item
+                   for item in items)
+    assert any("hand-supplied" in item for item in items)
+
+
+def test_checklist_does_not_flag_pexels_and_upload_mix():
+    """Some beats got real Pexels footage, others were deliberately replaced
+    by the user via upload. Both are successful, on-purpose outcomes, so
+    neither should read as a fallback."""
+    plan = make_plan()
+    beats = plan.script.beats
+    beats[0].clips = [_clip("clip.mp4", provider="pexels")]
+    beats[1].clips = [_clip("mine.mp4", provider="upload")]
+    for beat in beats[2:]:
+        beat.clips = [_clip("clip.mp4", provider="pexels")]
+    items = payloads.publish_checklist(plan, "o.mp4")
+    assert not any("placeholder" in item or "fell back" in item
+                   for item in items)
+    # Not every visual was an upload here, so the informational upload-only
+    # line must not appear either.
+    assert not any("hand-supplied" in item for item in items)
+
+
+def test_checklist_still_flags_upload_mixed_with_placeholder():
+    """A beat mixing a deliberate upload with a genuine image-chain fallback
+    (placeholder) must still be flagged — the upload does not launder the
+    placeholder into looking fine."""
+    plan = make_plan()
+    beats = plan.script.beats
+    beats[0].clips = [
+        _clip("mine.mp4", provider="upload"),
+        _clip("still.png", provider="placeholder"),
+    ]
+    for beat in beats[1:]:
+        beat.clips = [_clip("clip.mp4", provider="pexels")]
+    items = payloads.publish_checklist(plan, "o.mp4")
+    placeholder_items = [i for i in items if "placeholder frames" in i]
+    assert len(placeholder_items) == 1
+    assert beats[0].beat_id in placeholder_items[0]
+
+
 def test_checklist_flags_unsourced_claims():
     items = payloads.publish_checklist(make_plan(sourced=False), "o.mp4")
     assert any("UNSOURCED" in item for item in items)

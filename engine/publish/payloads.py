@@ -134,12 +134,27 @@ def publish_checklist(plan: ReelPlan, video_path: str, *,
     # is judged by the legacy beat.image_provider field instead — that field
     # is never set by the current pipeline, so this branch only fires for
     # old plans.
+    #
+    # A provider is "deliberate" when it reflects a human or the pipeline
+    # choosing exactly what ended up in the video, on purpose: a fetched
+    # Pexels clip, or a clip the user watched and replaced through the
+    # review gate (provider="upload"). Everything else is some tier of the
+    # image-fallback chain (generate_beat_image's "keyless"/"placeholder"/
+    # gateway-name returns) or an unfilled slot, and genuinely means "we did
+    # not get the footage we wanted" — including any new provider name that
+    # chain grows later, since it starts out unlisted here rather than
+    # silently passing as deliberate.
+    DELIBERATE_PROVIDERS = {"pexels", "upload"}
     fallback_ids = []
     placeholder_ids = []
+    all_clip_providers: set[str] = set()
+    any_clips = False
     for beat in plan.script.beats:
         if beat.clips:
+            any_clips = True
             providers = {c.provider for c in beat.clips}
-            if providers - {"pexels"}:
+            all_clip_providers |= providers
+            if providers - DELIBERATE_PROVIDERS:
                 fallback_ids.append(beat.beat_id)
             if "placeholder" in providers:
                 placeholder_ids.append(beat.beat_id)
@@ -158,4 +173,13 @@ def publish_checklist(plan: ReelPlan, video_path: str, *,
             f"{len(stills_only)} beats fell back to still images instead "
             f"of stock video ({', '.join(stills_only[:4])}...) — add a "
             f"Pexels key before publishing this publicly")
+
+    # Informational, not a warning: every clip in the render was a hand-
+    # supplied upload, so there is no stock footage to double-check — but a
+    # publisher may still want to know the whole visual track was manually
+    # curated rather than fetched.
+    if any_clips and all_clip_providers == {"upload"}:
+        items.append(
+            "All visuals were hand-supplied uploads (no stock footage "
+            "was used) — informational, not a warning")
     return items
