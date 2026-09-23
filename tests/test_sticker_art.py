@@ -292,10 +292,41 @@ from scripts.bake_stickers import WINDOW_SECONDS, bake_one, frame_count
 
 
 def test_the_window_is_exactly_the_span_the_chain_lets_through():
-    """The chain trims to HOLD_SECONDS and gates `enable` to the same span,
-    so a bake longer than that would have its tail cut and never finish."""
+    """The bake must last as long as the chain actually keeps it on screen.
+
+    Asserted against the emitted filtergraph, not against the constant the
+    bake is defined from. ``WINDOW_SECONDS == stk.HOLD_SECONDS`` was the
+    earlier form of this test and it could not fail: bake_stickers.py
+    defines ``WINDOW_SECONDS = HOLD_SECONDS``, so it asserted
+    ``HOLD_SECONDS == HOLD_SECONDS`` while claiming to guard Ruling 1. What
+    matters is the two numbers ffmpeg is given -- the trim and the enable
+    gate -- and whether ``frame_count(fps)`` frames at ``fps`` fill them.
+    """
+    import re
+
     from engine.assembly import stickers as stk
-    assert WINDOW_SECONDS == pytest.approx(stk.HOLD_SECONDS)
+
+    fps = 30
+    start = 2.5
+    sticker = stk.Sticker(
+        name="death", emoji="💀", word="kankaal", beat_index=0,
+        start=start, slot=0, style="dark", baked=True, size=184, canvas=232,
+        frames=frame_count(fps), pattern="x-%03d.png", png="x-041.png")
+
+    parts, _label = stk.sticker_chain([sticker], "v", 4, fps=fps)
+    graph = ";".join(parts)
+
+    trim = float(re.search(r"trim=duration=([0-9.]+)", graph).group(1))
+    gate = re.search(r"enable='between\(t,([0-9.]+),([0-9.]+)\)'", graph)
+    gate_span = float(gate.group(2)) - float(gate.group(1))
+    baked_span = frame_count(fps) / fps
+
+    assert baked_span == pytest.approx(trim, abs=0.005), (
+        f"the bake runs {baked_span:.3f}s but the chain trims to {trim:.3f}s")
+    assert baked_span == pytest.approx(gate_span, abs=0.005), (
+        f"the bake runs {baked_span:.3f}s but enable gates {gate_span:.3f}s")
+    # And the constant the bake is defined from agrees with both of them.
+    assert WINDOW_SECONDS == pytest.approx(trim, abs=0.005)
 
 
 def test_the_frame_count_follows_the_configured_fps():

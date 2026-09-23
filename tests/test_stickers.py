@@ -432,22 +432,55 @@ def _fake_bake(root, *, frames, meta_frames, fps=30, size=48):
     return folder
 
 
+# The count a 30fps bake must have to span the window sticker_chain lets
+# through. Spelled out rather than imported so these fixtures keep saying
+# what a *correct* bake looks like even if the constant moves.
+WINDOW_FRAMES_30 = 42
+
+
 def test_a_short_bake_is_refused_so_it_cannot_render_truncated(tmp_path):
-    _fake_bake(tmp_path, frames=5, meta_frames=48)   # 5 on disk, 48 claimed
+    # 5 on disk, a whole window claimed.
+    _fake_bake(tmp_path, frames=5, meta_frames=WINDOW_FRAMES_30)
     assert stk.baked_sequence("death", "dark", fps=30, size=48,
                               root=tmp_path) is None
 
 
 def test_a_bake_for_another_fps_is_not_reused(tmp_path):
-    _fake_bake(tmp_path, frames=48, meta_frames=48, fps=30)
+    _fake_bake(tmp_path, frames=WINDOW_FRAMES_30,
+               meta_frames=WINDOW_FRAMES_30, fps=30)
     assert stk.baked_sequence("death", "dark", fps=60, size=48,
                               root=tmp_path) is None
 
 
 def test_a_bake_for_another_size_is_not_reused(tmp_path):
-    _fake_bake(tmp_path, frames=48, meta_frames=48, size=184)
+    _fake_bake(tmp_path, frames=WINDOW_FRAMES_30,
+               meta_frames=WINDOW_FRAMES_30, size=184)
     assert stk.baked_sequence("death", "dark", fps=30, size=60,
                               root=tmp_path) is None
+
+
+def test_a_bake_that_outruns_the_window_is_refused(tmp_path):
+    """Finding 4. A bake longer than the chain's trim would be cut mid-arc.
+
+    fps and size both agree here, and the frames on disk match the meta, so
+    every other guard in baked_sequence passes. Only the window check can
+    reject this, and if HOLD_SECONDS ever moves without a re-bake, this is
+    the shape the committed 42-frame bakes would take.
+    """
+    over = WINDOW_FRAMES_30 + 6
+    _fake_bake(tmp_path, frames=over, meta_frames=over, fps=30, size=48)
+    assert stk.baked_sequence("death", "dark", fps=30, size=48,
+                              root=tmp_path) is None
+
+
+def test_a_bake_that_spans_exactly_the_window_is_accepted(tmp_path):
+    """The other half of Finding 4: the check must not reject a good bake."""
+    _fake_bake(tmp_path, frames=WINDOW_FRAMES_30,
+               meta_frames=WINDOW_FRAMES_30, fps=30, size=48)
+    found = stk.baked_sequence("death", "dark", fps=30, size=48,
+                               root=tmp_path)
+    assert found is not None
+    assert found[1] == round(stk.HOLD_SECONDS * 30) == WINDOW_FRAMES_30
 
 
 def test_prepared_stickers_carry_the_style_of_their_beat(tmp_path):
@@ -468,6 +501,89 @@ def test_prepared_stickers_carry_the_style_of_their_beat(tmp_path):
     for sticker in prepared:
         role = plan.script.beats[sticker.beat_index].role
         assert sticker.style == stk.style_for_role(role)
+
+
+def test_the_render_reports_the_credit_it_owes_for_its_own_stickers(tmp_path):
+    """Finding 1's render half: the credit is a fact the render knows and
+    hands out, so nothing downstream has to ask the filesystem again.
+
+    Both directions, because a report that always says "Lordicon" is as
+    wrong as one that never does.
+    """
+    from engine.assembly.render import build_command
+
+    plan = _mixed_art_plan()
+    for i, beat in enumerate(plan.script.beats):
+        beat.image_path = f"C:/tmp/img{i}.png"
+        beat.audio_path = f"C:/tmp/a{i}.mp3"
+    settings = shipped_settings()
+    settings.work_dir = tmp_path
+    settings.sfx = False
+
+    report: dict = {}
+    build_command(plan, settings, Path("C:/tmp/out.mp4"), report=report)
+    assert report["attribution"] == stk.ATTRIBUTION
+
+    settings.stickers = False
+    off: dict = {}
+    build_command(plan, settings, Path("C:/tmp/out.mp4"), report=off)
+    assert off["attribution"] is None, (
+        "a render with the stickers switched off owes Lordicon nothing")
+
+
+def _mixed_art_plan():
+    """A plan whose first sticker has baked art and whose second has none.
+
+    ``kankaal`` resolves to ``death`` (weight 10, has art) over ``jheel``
+    (``water``, weight 4). ``aag`` resolves to ``fire`` (weight 8), which is
+    one of the ten triggers deliberately left on the emoji path.
+    """
+    plan = _timed(beats=4, captions=[
+        "Roopkund jheel mein paanch sau kankaal mile",
+        "Us raat wahan aag lagi thi",
+        "Sab ek hi waqt par khatam hue",
+        "Tumhe kya lagta hai sach kya hai"])
+    return plan
+
+
+def test_a_missing_emoji_font_costs_only_the_cue_that_needed_it(tmp_path):
+    """Finding 2. The emoji fallback sits *below* the baked art, so a
+    failure in it must not take the designed stickers down with it.
+
+    engine/config.py already contemplates a Linux VPS with no colour emoji
+    font. On that box every render used to come out with no stickers at all,
+    including the ones that are committed PNG sequences and never open a
+    font.
+    """
+    plan = _mixed_art_plan()
+    settings = shipped_settings()
+    settings.work_dir = tmp_path          # cold cache: nothing pre-rendered
+    settings.sticker_font = str(tmp_path / "no-such-font.ttf")
+
+    prepared = stk.prepare(plan, settings)
+
+    names = [s.name for s in prepared]
+    assert "death" in names, (
+        f"the baked sticker was lost to the missing font: {names}")
+    assert "fire" not in names, (
+        "the emoji cue cannot render without a font and must be skipped")
+    assert all(s.baked for s in prepared)
+    # Slots stay contiguous from zero even though a cue dropped out, because
+    # canvas_origin cycles x-positions on the slot number.
+    assert [s.slot for s in prepared] == list(range(len(prepared)))
+
+
+def test_both_cues_survive_when_the_font_is_there(tmp_path):
+    """The control for the test above: with a font, nothing is skipped, so
+    the skip really is caused by the font and not by the plan."""
+    plan = _mixed_art_plan()
+    settings = shipped_settings()
+    settings.work_dir = tmp_path
+    if not Path(settings.sticker_font).exists():   # pragma: no cover
+        pytest.skip("no colour emoji font on this machine")
+
+    names = [s.name for s in stk.prepare(plan, settings)]
+    assert "death" in names and "fire" in names, names
 
 
 # --- real renders ----------------------------------------------------------

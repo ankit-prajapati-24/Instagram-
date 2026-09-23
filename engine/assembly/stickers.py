@@ -132,6 +132,15 @@ def baked_sequence(name: str, style: str, *, fps: int, size: int,
         return None
     if baked_fps != fps or baked_size != size or frames <= 0:
         return None
+    # The bake must span exactly the window ``sticker_chain`` lets through:
+    # it trims to HOLD_SECONDS and gates ``enable`` to the same span. A
+    # longer sequence has its tail cut and never reaches its final frame --
+    # the mid-animation truncation this whole change exists to remove, and
+    # the subject of Ruling 1. Checked here rather than trusted, because the
+    # committed 42-frame bakes would stay silently accepted if HOLD_SECONDS
+    # ever moved and nothing re-baked.
+    if frames != round(HOLD_SECONDS * fps):
+        return None
     if len(list(folder.glob("frame-*.png"))) != frames:
         return None
     return str(folder / "frame-%03d.png"), frames, canvas
@@ -471,9 +480,12 @@ def prepare(plan: ReelPlan, settings, *,
             cache_dir: str | Path | None = None) -> list[Sticker]:
     """Every sticker this plan should get, its pop drawn and cached.
 
-    Returns an empty list when stickers are off, when nothing triggered, or
-    when this machine has no colour emoji font -- the last one prints and
-    carries on, because a missing decoration must never cost a render.
+    Returns an empty list when stickers are off and when nothing triggered.
+    A cue that needs the emoji fallback on a machine with no colour emoji
+    font is skipped on its own -- it prints and carries on, because a
+    missing decoration must never cost a render, and must not cost the
+    other stickers either. Baked art needs no font, so on a box without one
+    a plan still gets every designed sticker it triggered.
     """
     if not getattr(settings, "stickers", False):
         return []
@@ -491,7 +503,13 @@ def prepare(plan: ReelPlan, settings, *,
     font = getattr(settings, "sticker_font", DEFAULT_FONT) or DEFAULT_FONT
 
     prepared: list[Sticker] = []
-    for slot, cue in enumerate(cues):
+    # Counted over the stickers that survive, not over the cues, because a
+    # cue can drop out below and ``canvas_origin`` cycles x-positions on the
+    # slot number. Skipping a slot would leave a gap in that cycle and could
+    # sit two consecutive stickers in the same place
+    # (test_consecutive_stickers_do_not_reuse_the_same_spot).
+    slot = 0
+    for cue in cues:
         beat = plan.script.beats[cue.beat_index]
         style = style_for_role(getattr(beat, "role", None))
         found = baked_sequence(cue.name, style, fps=fps, size=size)
@@ -502,14 +520,21 @@ def prepare(plan: ReelPlan, settings, *,
                 pattern, frames, canvas = render_pop_frames(
                     cue.emoji, root, size=size, fps=fps, font_path=font)
             except StickerUnavailable as exc:
-                print(f"[stickers] disabled for this render: {exc}",
-                      file=sys.stderr, flush=True)
-                return []
+                # Only this cue goes. The emoji fallback is the rung *below*
+                # the baked art, so a machine with no colour emoji font --
+                # the normal case on the Linux VPS engine/config.py
+                # contemplates -- used to lose the designed stickers too,
+                # which need no font at all. A missing decoration must cost
+                # nothing beyond itself.
+                print(f"[stickers] {cue.name} skipped, no emoji fallback "
+                      f"available: {exc}", file=sys.stderr, flush=True)
+                continue
         prepared.append(Sticker(
             name=cue.name, emoji=cue.emoji, word=cue.word,
             beat_index=cue.beat_index, start=cue.start, slot=slot,
             style=style, baked=found is not None, size=size, canvas=canvas,
             frames=frames, pattern=pattern, png=pattern % (frames - 1)))
+        slot += 1
     return prepared
 
 
