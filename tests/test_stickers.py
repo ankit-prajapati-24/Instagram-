@@ -69,6 +69,33 @@ def test_a_new_trigger_needs_no_code_change(tmp_path):
     assert [c.name for c in cues] == ["telescope"]
 
 
+def test_a_trigger_can_carry_art_and_one_without_it_still_loads(tmp_path):
+    path = tmp_path / "triggers.json"
+    path.write_text(json.dumps({"triggers": [
+        {"name": "death", "emoji": "\U0001f480", "weight": 10,
+         "match": ["kankaal"],
+         "art": {"source": "lordicon", "family": "wired",
+                 "variant": "flat", "slug": "2130-skull-poison"}},
+        {"name": "plain", "emoji": "❓", "weight": 1,
+         "match": ["kya"]},
+    ]}), encoding="utf-8")
+
+    by_name = {t.name: t for t in stk.load_triggers(path)}
+
+    assert by_name["death"].art["slug"] == "2130-skull-poison"
+    assert by_name["death"].art["variant"] == "flat"
+    assert by_name["plain"].art is None
+
+
+def test_every_shipped_art_entry_is_complete():
+    for trigger in stk.load_triggers():
+        if trigger.art is None:
+            continue
+        for key in ("source", "family", "variant", "slug"):
+            assert trigger.art.get(key), \
+                f"{trigger.name} art is missing {key}"
+
+
 def test_devanagari_aliases_are_carried_for_mixed_script_captions():
     """Timings are caption-aligned, so Roman is what we match -- but a
     caption that mixes in Devanagari must not go silently unmatched."""

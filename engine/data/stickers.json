@@ -24,7 +24,13 @@
       "match": ["maut", "mout", "kankaal*", "kankal*", "laash*", "lash",
                 "murda*", "shav", "death", "dead", "skeleton*", "corpse",
                 "mrityu", "kabra", "kabr", "qabr",
-                "मौत", "कंकाल", "लाश", "शव", "मृत्यु"]
+                "मौत", "कंकाल", "लाश", "शव", "मृत्यु"],
+      "art": {
+        "source": "lordicon",
+        "family": "wired",
+        "variant": "flat",
+        "slug": "2130-skull-poison"
+      }
     },
     {
       "name": "shock",
@@ -81,7 +87,13 @@
       "weight": 6,
       "match": ["dekha", "dekhi", "dekhte", "nazar", "najar", "gawah*",
                 "chashmadeed", "witness*", "dikha", "dikhi", "spotted",
-                "देखा", "देखी", "नज़र", "गवाह"]
+                "देखा", "देखी", "नज़र", "गवाह"],
+      "art": {
+        "source": "lordicon",
+        "family": "wired",
+        "variant": "flat",
+        "slug": "2813-creepy-eye-ball"
+      }
     },
     {
       "name": "question",
@@ -89,7 +101,13 @@
       "weight": 6,
       "match": ["sawaal*", "sawal*", "kyun", "kyu", "kyon", "question*",
                 "why", "anuttarit", "unanswered",
-                "सवाल", "क्यों", "क्यूं"]
+                "सवाल", "क्यों", "क्यूं"],
+      "art": {
+        "source": "lordicon",
+        "family": "wired",
+        "variant": "flat",
+        "slug": "424-chat-question"
+      }
     },
     {
       "name": "science",
@@ -98,7 +116,13 @@
       "match": ["dna", "research*", "vigyan*", "science", "scientist*",
                 "vaigyanik*", "laboratory", "lab", "forensic*", "sample*",
                 "test", "experiment*", "genome",
-                "डीएनए", "विज्ञान", "वैज्ञानिक", "प्रयोग"]
+                "डीएनए", "विज्ञान", "वैज्ञानिक", "प्रयोग"],
+      "art": {
+        "source": "lordicon",
+        "family": "wired",
+        "variant": "flat",
+        "slug": "440-dna"
+      }
     },
     {
       "name": "night",
@@ -140,7 +164,13 @@
       "match": ["saal", "saalon", "saalo", "varsh*", "year", "years",
                 "sadi", "sadiyon", "century", "dashak*", "decade",
                 "arse", "barso", "barson",
-                "साल", "सदी", "वर्ष", "दशक"]
+                "साल", "सदी", "वर्ष", "दशक"],
+      "art": {
+        "source": "lordicon",
+        "family": "wired",
+        "variant": "flat",
+        "slug": "196-clock-arrow-rotate-left"
+      }
     }
   ]
 }

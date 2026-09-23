@@ -104,6 +104,11 @@ class Trigger:
     emoji: str
     weight: int
     match: tuple[str, ...]
+    # Designed art for this concept, or None to keep using the emoji glyph.
+    # Data, not code: a new trigger with art is still a JSON edit. Keys are
+    # source, family, variant, slug -- enough to rebuild the download URL
+    # without storing one, so a CDN path change is a one-line fix here.
+    art: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -143,10 +148,12 @@ def load_triggers(path: str | Path | None = None) -> list[Trigger]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     triggers: list[Trigger] = []
     for entry in raw.get("triggers", []):
+        art = entry.get("art")
         triggers.append(Trigger(
             name=entry["name"], emoji=entry["emoji"],
             weight=int(entry.get("weight", 5)),
-            match=tuple(a.strip().lower() for a in entry["match"] if a)))
+            match=tuple(a.strip().lower() for a in entry["match"] if a),
+            art=dict(art) if art else None))
     return triggers
 
 
