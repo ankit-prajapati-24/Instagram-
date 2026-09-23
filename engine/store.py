@@ -60,6 +60,13 @@ CREATE TABLE IF NOT EXISTS assets (
   licence TEXT,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sticker_choices (
+  plan_id TEXT NOT NULL,
+  trigger TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (plan_id, trigger)
+);
 CREATE TABLE IF NOT EXISTS renders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   plan_id TEXT NOT NULL,
@@ -360,6 +367,31 @@ class Store:
                 "AND status='done' ORDER BY id DESC LIMIT 1",
                 (plan_id,)).fetchone()
         return row["attribution"] if row else None
+
+    # -- sticker choices --------------------------------------------------
+    def choose_sticker(self, plan_id: str, trigger: str, slug: str) -> None:
+        """Record which Lordicon icon this reel should use for ``trigger``.
+
+        Per plan on purpose: the same trigger can wear different art in
+        different reels, the way clips already do. Replacing rather than
+        appending, because there is one answer per trigger per reel and a
+        history of rejected picks would only have to be filtered out again.
+        """
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO sticker_choices(plan_id, trigger, slug, "
+                "created_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(plan_id, trigger) DO UPDATE SET "
+                "slug=excluded.slug, created_at=excluded.created_at",
+                (plan_id, trigger, slug, _now()))
+
+    def sticker_choices(self, plan_id: str) -> dict[str, str]:
+        """``{trigger: slug}`` for this plan, empty when nothing was chosen."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT trigger, slug FROM sticker_choices WHERE plan_id=?",
+                (plan_id,)).fetchall()
+        return {row["trigger"]: row["slug"] for row in rows}
 
     # -- dedup support ----------------------------------------------------
     def save_embedding(self, plan_id: str, vector: list[float]) -> None:

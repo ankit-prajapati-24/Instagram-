@@ -168,3 +168,49 @@ def test_list_plans_reports_cost(store):
     store.save_plan(make_plan(), status="draft")
     store.record_cost("p1", "script", CostRecord(usd=0.05))
     assert store.list_plans()[0]["usd"] == pytest.approx(0.05)
+
+
+def test_a_sticker_choice_is_remembered_per_plan_and_trigger(tmp_path):
+    store = Store(tmp_path / "s.db")
+    store.init()
+
+    assert store.sticker_choices("p1") == {}
+
+    store.choose_sticker("p1", "death", "2130-skull-poison")
+    store.choose_sticker("p1", "science", "440-dna")
+    assert store.sticker_choices("p1") == {
+        "death": "2130-skull-poison", "science": "440-dna"}
+
+
+def test_choosing_again_replaces_rather_than_accumulates(tmp_path):
+    store = Store(tmp_path / "s.db")
+    store.init()
+
+    store.choose_sticker("p1", "death", "2130-skull-poison")
+    store.choose_sticker("p1", "death", "2841-crashed-skull")
+    assert store.sticker_choices("p1") == {"death": "2841-crashed-skull"}
+
+
+def test_two_plans_choosing_the_same_trigger_do_not_collide(tmp_path):
+    store = Store(tmp_path / "s.db")
+    store.init()
+
+    store.choose_sticker("p1", "death", "2130-skull-poison")
+    store.choose_sticker("p2", "death", "2816-skull-halloween")
+    assert store.sticker_choices("p1") == {"death": "2130-skull-poison"}
+    assert store.sticker_choices("p2") == {"death": "2816-skull-halloween"}
+
+
+def test_the_choices_table_is_added_to_a_database_that_predates_it(tmp_path):
+    """The same shape as the `attribution` column: an existing engine.db
+    must gain the table on the next start, not on a fresh install only."""
+    path = tmp_path / "old.db"
+    store = Store(path)
+    store.init()
+
+    import sqlite3
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE sticker_choices")
+
+    store.init()
+    assert store.sticker_choices("p1") == {}
