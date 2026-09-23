@@ -7,9 +7,17 @@ Four routes matter beyond CRUD, and two of them are human gates:
                                         hook.
   ``POST /api/plan/{id}/produce``        voice, length and clips; then either
                                         straight on to the render, or a stop
-                                        at gate two when ``review_clips`` is
-                                        set.
-  ``POST /api/plan/{id}/clips/approve``  gate two. The plan sits in
+                                        at one of the two later gates when
+                                        ``review_voice`` or ``review_clips``
+                                        is set.
+  ``POST /api/plan/{id}/voice/approve``  gate two. The plan sits in
+                                        ``awaiting_voice_review`` until this
+                                        releases it. Voice comes before
+                                        clips because every number the clip
+                                        stage uses — how many clips a beat
+                                        gets, how long each one is — is
+                                        derived from the measured narration.
+  ``POST /api/plan/{id}/clips/approve``  gate three. The plan sits in
                                         ``awaiting_clip_review`` until this
                                         releases it, and only this route can
                                         start the render half of a reviewed
@@ -47,12 +55,16 @@ from engine.config import (Settings, beat_count, beat_word_range,
 from engine.contract import (Beat, Claim, Clip, Metadata, Motion, Role,
                              Transition)
 from engine.gates.qc import pre_render_range
+from engine.media.align import build_aligner
+from engine.media.voice import (MIN_UPLOAD_SECONDS, UPLOAD_ENGINE,
+                                UploadRejected, apply_beat_audio,
+                                ingest_narration)
 from engine.omniroute import OmniRouteClient
 from engine.pipeline import (BudgetError, GateError, ManualScriptError,
                              PipelineEvent, Stage, budget_report,
                              clip_providers, clips_stage, default_roles,
                              manual_plan_stage, plan_stage, produce_stage,
-                             render_stage)
+                             render_stage, voice_engines, voice_stage)
 from engine.publish.payloads import (instagram_payload, publish_checklist,
                                      youtube_payload)
 from engine.store import Store
@@ -213,10 +225,70 @@ CONTENT_TYPE_ALIASES = {
 # found, in the plan, on the review board or on the publish checklist.
 UPLOAD_PROVIDER = "upload"
 
-# The second gate's parking status, alongside "awaiting_approval". The gate
+# The later gates' parking statuses, alongside "awaiting_approval". A gate
 # is a row in the store, not a disabled button: a reload, a retry or a curl
 # all meet the same refusal.
 CLIP_REVIEW_STATUS = "awaiting_clip_review"
+VOICE_REVIEW_STATUS = "awaiting_voice_review"
+
+# --- uploaded narration ----------------------------------------------------
+#
+# Deliberately shorter than the clip rules above, because the checks that
+# matter for audio happen somewhere else. ``ingest_narration`` re-encodes
+# every upload into Piper's exact format (24 kHz mono mp3) and normalises
+# it into Piper's loudness band, and to do that it has to fully decode the
+# file and measure it. That is a far stronger proof than the clip route's
+# "can ffmpeg read one frame", so this layer only has to answer a cheaper
+# question: are these bytes plausibly a media container at all, so an
+# obvious mistake — a PDF, a screenshot — is refused before ffmpeg is
+# started on it.
+#
+# Two things the clip route does are therefore left out on purpose:
+#
+#   * the stored extension is not decided here. Every upload becomes
+#     ``.mp3`` because every upload is transcoded, so there is nothing for
+#     a sniffed extension to choose.
+#   * the declared Content-Type is not cross-checked against the bytes.
+#     Browsers type .m4a, .opus and .flac inconsistently enough that the
+#     check would refuse real files, and it was never the security
+#     boundary — the server-built filename, the containment check, the
+#     size cap and the decode are.
+#
+# Video containers are accepted: somebody handing over the .mp4 their phone
+# recorded means the sound in it, and ``ingest_narration`` passes ``-vn``.
+# A container with no audio stream in it is refused there, by measurement.
+AUDIO_CONTAINERS = {
+    "audio/mpeg", "audio/wav", "audio/mp4", "audio/ogg", "audio/flac",
+    "audio/webm", "video/mp4", "video/quicktime", "video/webm",
+}
+
+
+def _sniff_audio(head: bytes) -> str | None:
+    """The container these bytes claim to be, or ``None``.
+
+    Signatures only, and only enough of them to separate "a media file" from
+    "not a media file". ffmpeg decides everything after that.
+    """
+    if head.startswith(b"ID3"):
+        return "audio/mpeg"
+    if len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
+        return "audio/mpeg"                       # MPEG audio frame sync
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return "audio/wav"
+    if head.startswith(b"OggS"):
+        return "audio/ogg"                        # vorbis and opus
+    if head.startswith(b"fLaC"):
+        return "audio/flac"
+    if head.startswith(b"\x1a\x45\xdf\xa3"):
+        return "audio/webm"                       # EBML: webm and mkv
+    if head[4:8] == b"ftyp":
+        brand = head[8:12]
+        if brand.startswith(b"qt"):
+            return "video/quicktime"
+        # M4A, M4B, mp42, isom: one container, and ffmpeg reads the audio
+        # out of all of them.
+        return "audio/mp4"
+    return None
 
 # A path separator, a drive colon, a control character or a traversal
 # segment. None of these belong in something a browser called a filename.
@@ -361,8 +433,20 @@ class ApproveRequest(BaseModel):
 class ProduceRequest(BaseModel):
     captions_source: str = "caption_text"
     use_fake: bool = False
-    # The second human gate, expressed as a flag on the request that starts
-    # the work rather than as a separate "produce half" route.
+    # Stop after VOICE and let every beat be listened to, and replaced with
+    # narration the user supplies. Earlier than the clip gate because the
+    # clip stage reads what this one may change: a beat's clip count is
+    # ``ceil(measured / 2.5)`` and its slot lengths divide the measured
+    # span, so footage fetched before the audio is final is footage cut to
+    # the wrong length.
+    #
+    # Both flags may be set. The run then stops here first; whether it also
+    # stops at the clip gate is decided again when this one is released,
+    # because by then the user has heard the beats and may have changed
+    # their mind.
+    review_voice: bool = False
+    # The clip gate, expressed as a flag on the request that starts the
+    # work rather than as a separate "produce half" route.
     #
     # Why a flag and not two endpoints for the first half: the caller's
     # choice is not *which stages to run* — VOICE, LENGTH and CLIPS run
@@ -377,10 +461,28 @@ class ProduceRequest(BaseModel):
 
 
 class ReleaseRequest(BaseModel):
-    """What the second gate accepts. Everything optional: releasing the
+    """What the clip gate accepts. Everything optional: releasing the
     review is a decision, not a form."""
 
     captions_source: str | None = None
+
+
+class VoiceReleaseRequest(ReleaseRequest):
+    """What the voice gate accepts.
+
+    ``review_clips`` is asked again here rather than remembered from the
+    original produce request. Releasing a gate is a fresh decision: a user
+    who has just spent ten minutes replacing narration by hand is in a
+    different position than they were when they ticked a box, and carrying
+    the old answer forward would quietly decide for them.
+
+    ``use_fake`` is here and not on the clip gate because this gate is
+    followed by CLIPS, which does call a model to turn a beat into a search
+    phrase. The clip gate is followed only by ffmpeg.
+    """
+
+    review_clips: bool = False
+    use_fake: bool = False
 
 
 def create_app(db_path: str | Path | None = None,
@@ -694,6 +796,15 @@ def create_app(db_path: str | Path | None = None,
         # rather than only in the browser. Without this, any script, retry
         # or curl could render and package a plan nobody had looked at.
         status = store.plan_status(plan_id)
+        if status == VOICE_REVIEW_STATUS:
+            raise HTTPException(
+                409, f"plan is awaiting voice review, so it cannot be "
+                     f"produced from here. Listen to the beats (GET "
+                     f"/api/plan/{plan_id}/voice), replace any you want to "
+                     f"say yourself, then POST "
+                     f"/api/plan/{plan_id}/voice/approve to release it. "
+                     f"Re-running produce would re-synthesise over the "
+                     f"narration you just uploaded.")
         if status == CLIP_REVIEW_STATUS:
             raise HTTPException(
                 409, f"plan is awaiting clip review, so it cannot be "
@@ -713,19 +824,36 @@ def create_app(db_path: str | Path | None = None,
             client = None
             try:
                 client = client_for(request.use_fake)
-                if request.review_clips:
+                if request.review_voice or request.review_clips:
+                    # The gated path, walked one part at a time so a gate
+                    # can be put between them. ``produce_stage`` is the
+                    # same three parts in a row; it is not called here
+                    # because the run has to be able to stop.
+                    voice_stage(plan, store, settings, emit=emit)
+                    if request.review_voice:
+                        # Saved with the audio on it: the review board
+                        # reads the plan back out of the store, and the
+                        # status is what stops anything producing it in
+                        # the meantime.
+                        store.save_plan(plan, status=VOICE_REVIEW_STATUS)
+                        emit(PipelineEvent(
+                            "complete", "voice_review",
+                            f"{len(plan.script.beats)} beats ready to hear",
+                            {"plan_id": plan_id, "awaiting_review": True,
+                             "gate": "voice",
+                             "engines": voice_engines(plan),
+                             "narration_seconds": round(plan.duration(), 2),
+                             "voice": f"/api/plan/{plan_id}/voice"}))
+                        return
                     counts = clips_stage(plan, client, store, settings,
                                          emit=emit)
-                    # Saved with the clips on it: the review board reads the
-                    # plan back out of the store, and the status is what
-                    # stops anything rendering it in the meantime.
                     store.save_plan(plan, status=CLIP_REVIEW_STATUS)
                     total = sum(counts.values()) if counts else 0
                     emit(PipelineEvent(
                         "complete", "review",
                         f"{total} clips ready to review",
                         {"plan_id": plan_id, "awaiting_review": True,
-                         "providers": counts,
+                         "gate": "clips", "providers": counts,
                          "clips": f"/api/plan/{plan_id}/clips"}))
                     return
                 result = produce_stage(
@@ -744,10 +872,306 @@ def create_app(db_path: str | Path | None = None,
                     client.close()
 
         threading.Thread(target=work, daemon=True).start()
-        return {"plan_id": plan_id, "review_clips": request.review_clips,
+        return {"plan_id": plan_id, "review_voice": request.review_voice,
+                "review_clips": request.review_clips,
                 "streaming": f"/api/events/{plan_id}"}
 
-    # -- gate two: the clip review ---------------------------------------
+    # -- gate two: the voice review ---------------------------------------
+    @app.post("/api/plan/{plan_id}/voice/approve")
+    def approve_voice(plan_id: str,
+                      request: VoiceReleaseRequest | None = None) -> dict:
+        """Release a heard plan and run LENGTH -> CLIPS, then on or stop.
+
+        The only way a plan in ``awaiting_voice_review`` moves. ``/produce``
+        refuses it, so a plan parked here stays parked until a human says
+        otherwise.
+
+        Unlike the clip gate this one does build a client: CLIPS is
+        downstream of it, and turning a beat into an English search phrase
+        is a model call. What it must not do is synthesise again — and it
+        cannot, because ``voice_stage`` is not called from here. Narration
+        the user uploaded survives this route by never being regenerated.
+
+        Declared above the per-beat upload route on purpose: both are POST
+        under ``/voice/``, and FastAPI matches in declaration order, so
+        ``approve`` has to be seen before ``{beat_id}`` can swallow it.
+        """
+        plan = store.get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(404, "no such plan")
+        status = store.plan_status(plan_id)
+        if status != VOICE_REVIEW_STATUS:
+            raise HTTPException(
+                409, f"plan is '{status}', not awaiting voice review. Only "
+                     f"a plan produced with review_voice=true stops here.")
+
+        request = request or VoiceReleaseRequest()
+        store.save_plan(plan, status="voice_approved")
+        emit = emitter(plan_id)
+        captions_source = request.captions_source
+        review_clips = request.review_clips
+        use_fake = request.use_fake
+
+        def work() -> None:
+            client = None
+            try:
+                client = client_for(use_fake)
+                counts = clips_stage(plan, client, store, settings, emit=emit)
+                if review_clips:
+                    store.save_plan(plan, status=CLIP_REVIEW_STATUS)
+                    total = sum(counts.values()) if counts else 0
+                    emit(PipelineEvent(
+                        "complete", "review",
+                        f"{total} clips ready to review",
+                        {"plan_id": plan_id, "awaiting_review": True,
+                         "gate": "clips", "providers": counts,
+                         "clips": f"/api/plan/{plan_id}/clips"}))
+                    return
+                result = render_stage(plan, store, settings, emit=emit,
+                                      captions_source=captions_source,
+                                      providers=counts)
+                emit(PipelineEvent("complete", "done",
+                                   Path(result["video"]).name, result))
+            except Exception as exc:
+                # Back to the gate rather than stranded in a status nothing
+                # accepts. The audio is still on disk and still correct, so
+                # the user can fix one more beat and release again.
+                store.save_plan(plan, status=VOICE_REVIEW_STATUS)
+                emit(PipelineEvent("complete", "failed",
+                                   f"{type(exc).__name__}: {exc}",
+                                   {"trace": traceback.format_exc()[-800:]}))
+            finally:
+                if client is not None:
+                    client.close()
+
+        threading.Thread(target=work, daemon=True).start()
+        return {"plan_id": plan_id, "status": "voice_approved",
+                "review_clips": review_clips,
+                "streaming": f"/api/events/{plan_id}"}
+
+    # -- the listening board ----------------------------------------------
+    @app.get("/api/plan/{plan_id}/voice")
+    def voice_review(plan_id: str) -> dict:
+        """Every beat's narration, one row each, with the text that made it.
+
+        Carries ``voice_text`` deliberately. The expected use of this gate
+        is to paste a beat into some other voice tool, generate it there
+        and bring the file back, so the Devanagari the beat is supposed to
+        say has to be on the board next to the upload control — not one
+        screen back up.
+
+        The duration numbers are here for the same reason the LENGTH gate
+        exists: replacing narration by hand is the easiest way to walk a
+        plan out of its publishing window, and finding that out from QC
+        twelve minutes later is exactly the failure this gate is against.
+        """
+        plan = store.get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(404, "no such plan")
+        status = store.plan_status(plan_id)
+        roots = [Path(settings.work_dir), Path(settings.out_dir)]
+
+        rows: list[dict] = []
+        for beat in plan.script.beats:
+            path = Path(beat.audio_path) if beat.audio_path else None
+            rows.append({
+                "beat_id": beat.beat_id,
+                "role": beat.role,
+                "seconds": round(beat.seconds(), 2),
+                "engine": beat.voice_engine,
+                "replaced": beat.voice_engine == UPLOAD_ENGINE,
+                "word_timing_source": beat.word_timing_source,
+                # What this beat is supposed to say, and what gets burned
+                # over it. Both, because they differ: the voice is
+                # Devanagari and the caption is Roman Hinglish.
+                "voice_text": beat.voice_text,
+                "caption_text": beat.caption_text,
+                "exists": bool(path and path.is_file()
+                               and _under_roots(path, roots)),
+                "audio": f"/api/audio/{plan_id}/{beat.beat_id}",
+                "replace": f"/api/plan/{plan_id}/voice/{beat.beat_id}",
+            })
+
+        narration = plan.duration()
+        gate_min, gate_max = pre_render_range(settings.duration_min,
+                                              settings.duration_max)
+        return {
+            "plan_id": plan_id,
+            "status": status,
+            "awaiting_review": status == VOICE_REVIEW_STATUS,
+            "total": len(rows),
+            "narration_seconds": round(narration, 2),
+            "engines": voice_engines(plan),
+            # Both windows, because they are different questions: the gate
+            # decides whether the run continues at all, QC decides whether
+            # the finished video is publishable. A plan can pass the first
+            # and fail the second, and the board should not hide that.
+            "gate_min": round(gate_min, 1), "gate_max": round(gate_max, 1),
+            "duration_min": settings.duration_min,
+            "duration_max": settings.duration_max,
+            "in_gate": gate_min <= narration <= gate_max,
+            "in_window": (settings.duration_min <= narration
+                          <= settings.duration_max),
+            "min_seconds": MIN_UPLOAD_SECONDS,
+            "max_bytes": int(settings.upload_max_mb * 1024 * 1024),
+            "beats": rows,
+        }
+
+    @app.post("/api/plan/{plan_id}/voice/{beat_id}")
+    async def replace_voice(plan_id: str, beat_id: str,
+                            request: Request) -> dict:
+        """Replace one beat's narration with a file the user supplied.
+
+        The body is the file itself, not multipart, for the same reason the
+        clip route streams: a multipart parser buffers the whole body
+        before the handler sees a byte, so the size cap would be enforced
+        after the disk write it exists to prevent.
+
+        What lands on disk is never the uploaded bytes.
+        ``ingest_narration`` re-encodes into Piper's exact format and
+        loudness band and writes *that*, which is why this route does not
+        have to decide an extension: every beat is an mp3 either way.
+
+        The synthesised original is left where it is, under the beat's own
+        name, and the upload is written alongside it. Nothing reads it any
+        more, but a destroyed original cannot be compared against and
+        cannot be put back, and this gate exists for people who are still
+        making up their minds.
+        """
+        plan = store.get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(404, "no such plan")
+        status = store.plan_status(plan_id)
+        if status != VOICE_REVIEW_STATUS:
+            raise HTTPException(
+                409, f"plan is '{status}', not awaiting voice review. "
+                     f"Narration is replaceable at that gate, which is the "
+                     f"one moment nothing has been derived from it yet — "
+                     f"after CLIPS the footage has already been cut to the "
+                     f"length the old audio measured.")
+
+        beat = next((b for b in plan.script.beats if b.beat_id == beat_id),
+                    None)
+        if beat is None:
+            raise HTTPException(404, f"no such beat: {beat_id}")
+
+        # Refused before a byte is read: an attacker-shaped filename is a
+        # fact about the request, not about the file.
+        _safe_client_filename(request.headers.get("x-upload-filename"))
+
+        limit = int(settings.upload_max_mb * 1024 * 1024)
+        length = request.headers.get("content-length")
+        if length and length.isdigit() and int(length) > limit:
+            raise HTTPException(
+                413, f"that file is {int(length) / 1048576:.1f} MB and the "
+                     f"cap is {settings.upload_max_mb:g} MB "
+                     f"(RAHASYA_UPLOAD_MAX_MB).")
+
+        # Server-built, from values already validated against the stored
+        # plan. Beat ids are generated, but one arriving from a model's
+        # output must still not be able to shape a path.
+        safe_beat = re.sub(r"[^A-Za-z0-9_-]", "_", beat_id)[:40] or "beat"
+        safe_plan = re.sub(r"[^A-Za-z0-9_-]", "_", plan_id)[:64] or "plan"
+        audio_dir = Path(settings.work_dir) / safe_plan / "audio"
+        # Checked BEFORE the mkdir: a containment check that runs once the
+        # directory exists has already let the filesystem be touched
+        # outside work_dir, which is the whole thing it is for.
+        if not _under_roots(audio_dir, [Path(settings.work_dir)]):
+            raise HTTPException(500, "audio directory escaped work_dir")
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        partial = audio_dir / f"{safe_beat}-upload.part"
+
+        written = 0
+        try:
+            with partial.open("wb") as handle:
+                async for chunk in request.stream():
+                    written += len(chunk)
+                    if written > limit:
+                        raise HTTPException(
+                            413, f"the upload passed the "
+                                 f"{settings.upload_max_mb:g} MB cap "
+                                 f"(RAHASYA_UPLOAD_MAX_MB) and was stopped "
+                                 f"there; nothing was kept.")
+                    handle.write(chunk)
+            if written == 0:
+                raise HTTPException(400, "the upload was empty")
+
+            with partial.open("rb") as handle:
+                head = handle.read(32)
+            if _sniff_audio(head) is None:
+                raise HTTPException(
+                    415, "those bytes are not any media container this "
+                         "gate recognises. The extension and the content "
+                         "type are not trusted here; the file's own "
+                         "signature is.")
+
+            destination = audio_dir / f"{safe_beat}-upload.mp3"
+            if not _under_roots(destination, [Path(settings.work_dir)]):
+                raise HTTPException(500, "upload path escaped work_dir")
+            try:
+                seconds = ingest_narration(partial, destination, settings)
+            except UploadRejected as exc:
+                # A 415 rather than a 400: these are all judgements about
+                # the media itself — it does not decode, it is silent, it
+                # is too short to be a beat.
+                raise HTTPException(415, str(exc)) from exc
+        finally:
+            Path(partial).unlink(missing_ok=True)
+
+        before = beat.seconds()
+        apply_beat_audio(beat, destination, settings,
+                         engine=UPLOAD_ENGINE, aligner=build_aligner(settings))
+        store.save_plan(plan, status=VOICE_REVIEW_STATUS)
+
+        narration = plan.duration()
+        gate_min, gate_max = pre_render_range(settings.duration_min,
+                                              settings.duration_max)
+        return {
+            "plan_id": plan_id, "beat_id": beat_id,
+            "engine": UPLOAD_ENGINE,
+            "seconds": round(seconds, 2),
+            "was_seconds": round(before, 2),
+            "word_timing_source": beat.word_timing_source,
+            "bytes": written,
+            # The totals, recomputed. Replacing one beat moves the whole
+            # video's length, and the number the board was showing a
+            # moment ago is now wrong.
+            "narration_seconds": round(narration, 2),
+            "in_gate": gate_min <= narration <= gate_max,
+            "in_window": (settings.duration_min <= narration
+                          <= settings.duration_max),
+            "audio": f"/api/audio/{plan_id}/{beat_id}",
+        }
+
+    @app.get("/api/audio/{plan_id}/{beat_id}")
+    def beat_audio(plan_id: str, beat_id: str) -> FileResponse:
+        """One beat's narration, for the player on the review board.
+
+        Every path here is server-controlled — synthesis writes
+        deterministic names under ``work_dir`` and the upload route builds
+        its own — but it is still keyed by URL input and read off disk, so
+        it gets the same containment check as ``/media`` and ``/api/frame``:
+        nothing outside ``work_dir``/``out_dir`` is ever served.
+        """
+        plan = store.get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(404, "no such plan")
+        beat = next((b for b in plan.script.beats if b.beat_id == beat_id),
+                    None)
+        if beat is None:
+            raise HTTPException(404, f"no such beat: {beat_id}")
+        if not beat.audio_path:
+            raise HTTPException(
+                404, f"beat {beat_id!r} has no audio yet — voice has not "
+                     f"run for this plan")
+        path = Path(beat.audio_path)
+        if not path.is_file() or not _under_roots(
+                path, [Path(settings.work_dir), Path(settings.out_dir)]):
+            raise HTTPException(
+                404, f"beat {beat_id!r} has no usable audio on disk")
+        return FileResponse(path, media_type="audio/mpeg")
+
+    # -- gate three: the clip review --------------------------------------
     @app.post("/api/plan/{plan_id}/clips/approve")
     def approve_clips(plan_id: str,
                       request: ReleaseRequest | None = None) -> dict:

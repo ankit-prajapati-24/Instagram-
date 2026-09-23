@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import os
 import re
 import subprocess
 import sys
@@ -145,6 +147,200 @@ def probe_duration(path: str | Path, ffmpeg: str) -> float:
                            f"{result.stderr[-300:]}")
     hours, minutes, seconds = match.groups()
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+# --- narration a human supplied -------------------------------------------
+#
+# Piper writes 24000 Hz mono mp3, and ``stitch_narration`` glues the beats
+# together with ffmpeg's concat demuxer, which requires every input to agree
+# on codec, rate and channel count. A 44.1 kHz stereo upload dropped in
+# beside nine Piper beats is therefore not a cosmetic mismatch — it either
+# fails the concat or plays at the wrong speed. Every upload is rewritten
+# into this exact shape before anything else looks at it.
+NARRATION_SAMPLE_RATE = 24000
+NARRATION_CHANNELS = 1
+
+# Measured off Piper's own output on 2026-09-23: three beats of a real plan
+# came in at -18.2, -15.9 and -16.3 LUFS. -16 is the middle of the band it
+# already occupies, so an uploaded beat lands inside Piper's own spread
+# rather than beside it.
+#
+# This has to happen per beat. The render's own ``loudnorm`` runs on the
+# concatenated narration, by which point one quiet beat and nine loud ones
+# are a single stream and the difference between them is baked in.
+UPLOAD_LOUDNESS = -16.0
+UPLOAD_TRUE_PEAK = -2.0
+UPLOAD_LOUDNESS_RANGE = 11.0
+
+# The engine name written onto a beat whose audio a human supplied. Sits
+# alongside "piper" and "edge" for the reason those are written down at all:
+# a run that used something other than the default must never be
+# indistinguishable from one that did not.
+UPLOAD_ENGINE = "upload"
+
+# Below this a file is not a beat of narration. A 0.2s blip decodes fine,
+# passes every signature check, and would silently shrink the beat it
+# replaced — taking its clip slots and its caption words down with it.
+MIN_UPLOAD_SECONDS = 0.5
+
+# loudnorm reports -inf for digital silence and something near it for a file
+# holding nothing but noise floor. Either way there is no speech to
+# normalise, and the second pass would apply enormous gain to hiss.
+SILENCE_LUFS = -60.0
+
+
+class UploadRejected(Exception):
+    """An uploaded narration file this pipeline will not accept.
+
+    Separate from ``RuntimeError`` so the HTTP layer can turn it into a 4xx
+    the user can act on rather than a 500 that reads like a bug in the
+    engine. Every message is written to be shown to whoever picked the file.
+    """
+
+
+def _loudnorm_measurement(path: Path, settings) -> dict:
+    """Run loudnorm's analysis pass and return what it measured.
+
+    Two passes rather than one because single-pass loudnorm is a *dynamic*
+    normaliser: it rides the gain as it goes, which over three seconds of
+    speech is audible as pumping. Measuring first and then applying one
+    linear gain preserves the delivery, which is the entire reason somebody
+    recorded their own narration instead of using Piper's.
+    """
+    result = subprocess.run(
+        [settings.ffmpeg, "-hide_banner", "-nostats", "-i", str(path),
+         "-af", (f"loudnorm=I={UPLOAD_LOUDNESS}:TP={UPLOAD_TRUE_PEAK}"
+                 f":LRA={UPLOAD_LOUDNESS_RANGE}:print_format=json"),
+         "-f", "null", "-"],
+        capture_output=True, text=True)
+    if result.returncode != 0:
+        raise UploadRejected(
+            "ffmpeg could not read any audio out of that file. The "
+            "extension and the content type are not trusted here, only "
+            "what the bytes decode to.")
+    blobs = re.findall(r"\{[^{}]+\}", result.stderr)
+    if not blobs:
+        raise UploadRejected(
+            "ffmpeg decoded that file but reported no loudness for it, "
+            "which means it carries no audio stream.")
+    try:
+        return json.loads(blobs[-1])
+    except ValueError as exc:                      # pragma: no cover
+        raise UploadRejected(
+            f"could not read loudness back from ffmpeg: {exc}") from exc
+
+
+def ingest_narration(source: str | Path, target: str | Path,
+                     settings) -> float:
+    """Accept one beat of human-supplied narration. Returns its seconds.
+
+    Does three jobs in one place because they are one question asked three
+    ways — is this really usable narration:
+
+      * it decodes at all, which a signature check cannot establish;
+      * it says something, rather than being silence or a blip;
+      * it comes out in Piper's format, at Piper's loudness.
+
+    Refusals are ``UploadRejected`` carrying a sentence aimed at whoever
+    picked the file. Nothing reaches ``target`` unless all three pass: the
+    transcode lands on a temporary path and is moved into place last, so a
+    rejected upload cannot leave a broken beat behind.
+    """
+    source, target = Path(source), Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        seconds = probe_duration(source, settings.ffmpeg)
+    except RuntimeError as exc:
+        raise UploadRejected(
+            "ffmpeg could not read a duration out of that file, so it is "
+            "not audio this pipeline can use.") from exc
+    if seconds < MIN_UPLOAD_SECONDS:
+        raise UploadRejected(
+            f"that file is {seconds:.2f}s, too short to be a beat of "
+            f"narration (the minimum is {MIN_UPLOAD_SECONDS:g}s). A beat's "
+            f"length sets its clip slots and its caption timings, so a "
+            f"stray blip would take those down with it.")
+
+    measured = _loudnorm_measurement(source, settings)
+    try:
+        input_i = float(measured["input_i"])
+    except (KeyError, TypeError, ValueError):
+        input_i = float("-inf")
+    if not input_i > SILENCE_LUFS:
+        raise UploadRejected(
+            f"that file is silent (measured {measured.get('input_i')} "
+            f"LUFS). It would render as a gap the length of the beat, with "
+            f"the captions scrolling over nothing.")
+
+    # Linear mode with the measured values: one gain for the whole beat and
+    # no riding. ffmpeg drops back to dynamic by itself if the requested
+    # gain would clip, which is the right trade and not worth refusing.
+    applied = (f"loudnorm=I={UPLOAD_LOUDNESS}:TP={UPLOAD_TRUE_PEAK}"
+               f":LRA={UPLOAD_LOUDNESS_RANGE}"
+               f":measured_I={measured['input_i']}"
+               f":measured_TP={measured['input_tp']}"
+               f":measured_LRA={measured['input_lra']}"
+               f":measured_thresh={measured['input_thresh']}"
+               f":offset={measured.get('target_offset', 0)}"
+               f":linear=true")
+
+    partial = target.with_suffix(target.suffix + ".part")
+    try:
+        result = subprocess.run(
+            [settings.ffmpeg, "-hide_banner", "-v", "error", "-y",
+             "-i", str(source), "-af", applied,
+             "-ar", str(NARRATION_SAMPLE_RATE),
+             "-ac", str(NARRATION_CHANNELS),
+             "-c:a", "libmp3lame", "-q:a", "2",
+             # Named, not inferred: the output lands on a ``.part`` path so
+             # a rejected upload cannot leave a broken beat behind, and
+             # ffmpeg cannot guess a muxer from that extension.
+             "-f", "mp3",
+             # Video is dropped rather than refused: somebody handing over
+             # the .mp4 their phone recorded meant the sound in it.
+             "-vn", str(partial)],
+            capture_output=True, text=True)
+        if result.returncode != 0 or not partial.is_file():
+            raise UploadRejected(
+                f"ffmpeg could not convert that file into narration: "
+                f"{result.stderr.strip()[-200:]}")
+        # Read the length back off what was actually written rather than
+        # off the source: the written file is what the timeline measures.
+        written = probe_duration(partial, settings.ffmpeg)
+        os.replace(partial, target)
+    finally:
+        Path(partial).unlink(missing_ok=True)
+    return written
+
+
+def apply_beat_audio(beat, path: str | Path, settings, *,
+                     engine: str = UPLOAD_ENGINE, aligner=None) -> float:
+    """Point a beat at different audio and redo everything derived from it.
+
+    A beat's span is its audio's measured length, and its caption words are
+    positions inside that span — so swapping the audio without redoing both
+    leaves the captions timed to a recording that no longer exists. Kept
+    beside ``synth_plan`` and doing it the same way, because two places
+    deriving a beat's timings differently is how they drift.
+    """
+    path = Path(path)
+    beat.audio_path = str(path)
+    beat.voice_engine = engine
+    beat.measured_seconds = probe_duration(path, settings.ffmpeg)
+    if aligner is None:
+        beat.words = caption_timings(beat.caption_text,
+                                     beat.measured_seconds)
+        beat.word_timing_source = INTERPOLATED
+    else:
+        result = aligner.align(path, beat.caption_text,
+                               beat.measured_seconds)
+        beat.words = result.words
+        beat.word_timing_source = result.source
+    # Whatever the previous engine reported about its own speech does not
+    # describe this file.
+    beat.spoken_words = None
+    return beat.measured_seconds
 
 
 def synth_beat_edge(beat_text: str, target: Path, settings) -> int:

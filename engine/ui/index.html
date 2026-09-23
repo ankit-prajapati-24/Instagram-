@@ -230,6 +230,48 @@
   .clipcard .said.bad { color: var(--stamp); }
   .clipcard .said.ok { color: var(--moss); }
 
+  /* voice review: one row per beat, because a beat is mostly text */
+  .beatlist { display: flex; flex-direction: column; gap: 10px;
+              margin-top: 14px; }
+  .beatrow {
+    border: 1px solid var(--rule); background: var(--card); padding: 10px 12px;
+    display: grid; gap: 8px;
+    grid-template-columns: minmax(0, 1fr) minmax(210px, 280px);
+  }
+  .beatrow.swapped { border-color: var(--moss); }
+  .beatrow.gone { border-color: var(--stamp); }
+  .beatrow .vhead {
+    grid-column: 1 / -1; display: flex; gap: 12px; align-items: baseline;
+    font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted);
+  }
+  .beatrow .vhead b { color: var(--paper); font-weight: 600; }
+  .beatrow .vhead .eng { color: var(--muted); }
+  .beatrow .vhead .eng.upload { color: var(--moss); }
+  .beatrow .vhead .eng.weak { color: var(--gold); }
+  .beatrow .vsay {
+    font-size: 14px; line-height: 1.5; color: var(--paper);
+    word-break: break-word;
+  }
+  .beatrow .vcap { font-size: 11.5px; color: var(--muted); line-height: 1.4; }
+  .beatrow .vside { display: flex; flex-direction: column; gap: 6px; }
+  .beatrow audio { width: 100%; height: 32px; }
+  .beatrow button.copy, .beatrow label.pick {
+    font-size: 11.5px; border: 1px dashed var(--rule); padding: 5px 6px;
+    text-align: center; cursor: pointer; color: var(--muted);
+    background: none; font-family: inherit;
+  }
+  .beatrow button.copy:hover, .beatrow label.pick:hover {
+    border-color: var(--gold); color: var(--paper);
+  }
+  .beatrow input[type=file] { display: none; }
+  .beatrow .said { font-size: 11px; min-height: 13px; }
+  .beatrow .said.bad { color: var(--stamp); }
+  .beatrow .said.ok { color: var(--moss); }
+  .lenbar { font-size: 12px; font-variant-numeric: tabular-nums; }
+  .lenbar.bad { color: var(--stamp); }
+  .lenbar.warn { color: var(--gold); }
+  .lenbar.ok { color: var(--moss); }
+
   /* light-box */
   .lightbox { display: flex; gap: 22px; flex-wrap: wrap; margin-top: 14px; }
   .lightbox video {
@@ -445,6 +487,13 @@
         <button class="go" id="btn-produce">Approve and render</button>
       </div>
       <label class="hint" style="display:block;cursor:pointer">
+        <input type="checkbox" id="review-voice">
+        Stop after the narration is spoken and let me hear every beat
+        first. This is also where a beat can be replaced with a recording
+        of your own — and it has to happen before the footage is fetched,
+        because a beat's clips are cut to the length its audio measures.
+      </label>
+      <label class="hint" style="display:block;cursor:pointer">
         <input type="checkbox" id="review-clips">
         Stop after the footage is fetched and let me check every clip first.
         Stock search gets it wrong often enough that this is usually worth
@@ -453,6 +502,29 @@
       </label>
       <p class="hint">Rendering takes a few minutes. The log on the left
         shows measured progress.</p>
+    </section>
+
+    <section class="sheet hidden" id="s-voice">
+      <h3>Every beat, before the footage is fetched
+        <em id="voice-note"></em></h3>
+      <p class="hint">Listen to each one. To say a beat yourself, copy its
+        line into whatever voice you want to use, then upload what comes
+        back — mp3, wav, m4a, ogg, flac, or the video you recorded on a
+        phone. It is re-encoded to match the rest of the narration and
+        levelled to the same loudness, so an uploaded beat does not jump
+        out next to a synthesised one. Replacing a beat changes how long
+        the video is, which is what the line below tracks.</p>
+      <p class="lenbar" id="voice-length"></p>
+      <div class="beatlist" id="beatlist"></div>
+      <div class="entry">
+        <button class="go" id="btn-voice-release">This is the voice —
+          get the footage</button>
+      </div>
+      <label class="hint" style="display:block;cursor:pointer">
+        <input type="checkbox" id="voice-then-clips">
+        Stop again once the footage is in, so I can check every clip too.
+      </label>
+      <p class="hint" id="voice-release-note"></p>
     </section>
 
     <section class="sheet hidden" id="s-review">
@@ -674,7 +746,202 @@ function renderStrip(plan) {
 }
 
 /* ---------------------------------------------------------------------
-   Gate two: every clip, before the render.
+   Gate two: every beat's narration, before anything is derived from it.
+
+   Earlier than the clip board on purpose. A beat's clip count and its
+   slot lengths both come from how long its audio measures, so footage
+   fetched before the narration is settled has been cut to a length that
+   no longer exists.
+
+   Every number shown here comes from /api/plan/{id}/voice, which reads
+   them off engine/config.py and engine/gates/qc.py. There is deliberately
+   not one of them written down in this file.
+   --------------------------------------------------------------------- */
+let VOICE = null;
+
+async function loadVoice() {
+  if (!PLAN) return;
+  VOICE = await (await fetch(`/api/plan/${PLAN.plan_id}/voice`)).json();
+  $("voice-then-clips").checked = $("review-clips").checked;
+  renderVoice();
+}
+
+function voiceLengthLine(data) {
+  const bar = $("voice-length");
+  const secs = data.narration_seconds.toFixed(1);
+  if (!data.in_gate) {
+    bar.className = "lenbar bad";
+    bar.textContent = `${secs}s of narration — outside the `
+      + `${data.gate_min}-${data.gate_max}s this pipeline will render at `
+      + `all. Nothing after this stage shortens a script.`;
+  } else if (!data.in_window) {
+    bar.className = "lenbar warn";
+    bar.textContent = `${secs}s of narration — inside the `
+      + `${data.gate_min}-${data.gate_max}s that renders, but outside the `
+      + `${data.duration_min}-${data.duration_max}s publishing window, so `
+      + `QC will fail it on duration.`;
+  } else {
+    bar.className = "lenbar ok";
+    bar.textContent = `${secs}s of narration — inside the `
+      + `${data.duration_min}-${data.duration_max}s publishing window.`;
+  }
+}
+
+function renderVoice() {
+  const data = VOICE;
+  if (!data) return;
+  const swapped = data.beats.filter((b) => b.replaced).length;
+  const missing = data.beats.filter((b) => !b.exists).length;
+  $("voice-note").textContent =
+    `${data.total} beats`
+    + (swapped ? ` · ${swapped} in your own voice` : "")
+    + (missing ? ` · ${missing} missing on disk` : "");
+  voiceLengthLine(data);
+
+  $("beatlist").innerHTML = data.beats.map((b) => {
+    const weak = b.engine && b.engine !== "piper" && b.engine !== "upload";
+    return `
+    <div class="beatrow ${b.replaced ? "swapped" : ""}
+                        ${b.exists ? "" : "gone"}" id="vrow-${esc(b.beat_id)}">
+      <div class="vhead">
+        <b>${esc(b.beat_id)} · ${esc(b.role)}</b>
+        <span id="vsecs-${esc(b.beat_id)}">${b.seconds.toFixed(2)}s</span>
+        <span class="eng ${b.replaced ? "upload" : (weak ? "weak" : "")}"
+              id="veng-${esc(b.beat_id)}">${esc(b.engine || "not spoken")}</span>
+      </div>
+      <div>
+        <div class="vsay">${esc(b.voice_text)}</div>
+        <div class="vcap">burned: ${esc(b.caption_text)}</div>
+      </div>
+      <div class="vside">
+        <audio controls preload="none" src="${b.audio}"
+               id="vaud-${esc(b.beat_id)}"></audio>
+        <button class="copy" data-beat="${esc(b.beat_id)}">Copy this
+          line</button>
+        <label class="pick">
+          Upload a take
+          <input type="file" accept="audio/*,video/*"
+                 data-beat="${esc(b.beat_id)}">
+        </label>
+        <div class="said" id="vsaid-${esc(b.beat_id)}"></div>
+      </div>
+    </div>`;
+  }).join("");
+
+  $("beatlist").querySelectorAll("input[type=file]").forEach((input) => {
+    input.onchange = () => replaceVoice(input);
+  });
+  /* The text comes off the loaded data rather than out of a data-
+     attribute: it is Devanagari and the whole point of copying it is that
+     it arrives somewhere else byte for byte. */
+  $("beatlist").querySelectorAll("button.copy").forEach((button) => {
+    button.onclick = async () => {
+      const row = VOICE.beats.find((b) => b.beat_id === button.dataset.beat);
+      if (!row) return;
+      try {
+        await navigator.clipboard.writeText(row.voice_text);
+        button.textContent = "Copied";
+        setTimeout(() => { button.textContent = "Copy this line"; }, 1400);
+      } catch (err) {
+        banner("Could not reach the clipboard: " + esc(String(err)), true);
+      }
+    };
+  });
+  show("s-voice");
+}
+
+async function replaceVoice(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const beat = input.dataset.beat;
+  const said = $("vsaid-" + beat);
+  said.className = "said";
+  said.textContent = `sending ${(file.size / 1048576).toFixed(1)} MB…`;
+
+  try {
+    /* The file IS the body, like the clip route: the server streams it and
+       stops at the size cap rather than spooling the whole thing first. */
+    const response = await fetch(
+      `/api/plan/${PLAN.plan_id}/voice/${beat}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": file.type || "application/octet-stream",
+          /* Validated and then discarded server-side; the stored name is
+             built from the beat id. */
+          "X-Upload-Filename": file.name
+        },
+        body: file
+      });
+    const data = await response.json();
+    if (!response.ok) {
+      said.className = "said bad";
+      said.textContent = String(data.detail || response.status);
+      input.value = "";
+      return;
+    }
+    said.className = "said ok";
+    said.textContent =
+      `${data.seconds.toFixed(2)}s (was ${data.was_seconds.toFixed(2)}s)`;
+    $("vrow-" + beat).classList.add("swapped");
+    $("vrow-" + beat).classList.remove("gone");
+    $("vsecs-" + beat).textContent = data.seconds.toFixed(2) + "s";
+    $("veng-" + beat).textContent = data.engine;
+    $("veng-" + beat).className = "eng upload";
+    /* Bust the browser's cache: the audio URL has not changed. */
+    $("vaud-" + beat).src = `${data.audio}?t=${Date.now()}`;
+    const row = VOICE.beats.find((b) => b.beat_id === beat);
+    if (row) {
+      row.engine = data.engine; row.replaced = true;
+      row.seconds = data.seconds; row.exists = true;
+    }
+    /* One beat moved, so the total moved with it. */
+    VOICE.narration_seconds = data.narration_seconds;
+    VOICE.in_gate = data.in_gate;
+    VOICE.in_window = data.in_window;
+    voiceLengthLine(VOICE);
+    $("voice-note").textContent =
+      `${VOICE.total} beats · `
+      + `${VOICE.beats.filter((b) => b.replaced).length} in your own voice`;
+  } catch (err) {
+    said.className = "said bad";
+    said.textContent = String(err);
+  }
+  input.value = "";
+}
+
+$("btn-voice-release").onclick = async () => {
+  if (!PLAN) return;
+  $("btn-voice-release").disabled = true;
+  $("voice-release-note").innerHTML =
+    `<span class="spin">Fetching footage for every beat, cut to the
+     narration you just settled.</span>`;
+  try {
+    const response = await fetch(
+      `/api/plan/${PLAN.plan_id}/voice/approve`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          captions_source: $("captions").value,
+          review_clips: $("voice-then-clips").checked,
+          use_fake: USE_FAKE
+        })
+      });
+    if (!response.ok) {
+      const data = await response.json();
+      $("btn-voice-release").disabled = false;
+      $("voice-release-note").textContent = "";
+      banner("Not released: " + esc(String(data.detail)), true);
+      return;
+    }
+    listen(PLAN.plan_id, afterRender);
+  } catch (err) {
+    $("btn-voice-release").disabled = false;
+    $("voice-release-note").textContent = "";
+    banner("Request failed: " + esc(String(err)), true);
+  }
+};
+
+/* ---------------------------------------------------------------------
+   Gate three: every clip, before the render.
 
    The scene strip above shows one thumbnail per beat. That is what let a
    European city park through for a script about skeletons in a frozen
@@ -809,12 +1076,21 @@ $("btn-release").onclick = async () => {
 async function afterRender(ev) {
   $("btn-produce").disabled = false;
   $("btn-release").disabled = false;
+  $("btn-voice-release").disabled = false;
   $("release-note").textContent = "";
+  $("voice-release-note").textContent = "";
   if (ev.status === "failed") {
     banner("Render stopped: " + esc(ev.detail), true);
     return;
   }
+  if (ev.status === "voice_review") {
+    PLAN = await (await fetch(`/api/plan/${PLAN.plan_id}`)).json();
+    await loadVoice();
+    $("s-voice").scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
   if (ev.status === "review") {
+    hide("s-voice");
     PLAN = await (await fetch(`/api/plan/${PLAN.plan_id}`)).json();
     renderStrip(PLAN);
     await loadReview();
@@ -823,6 +1099,7 @@ async function afterRender(ev) {
   }
   PLAN = await (await fetch(`/api/plan/${PLAN.plan_id}`)).json();
   hide("s-review");
+  hide("s-voice");
   renderStrip(PLAN);
   renderResult(ev.payload);
   $("s-video").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -927,8 +1204,8 @@ $("btn-plan").onclick = async () => {
   if (!topic) { $("topic").focus(); return; }
 
   resetSpine();
-  ["s-hooks", "s-script", "s-review", "s-images", "s-video", "s-qc",
-   "s-publish"]
+  ["s-hooks", "s-script", "s-voice", "s-review", "s-images", "s-video",
+   "s-qc", "s-publish"]
     .forEach(hide);
   $("btn-plan").disabled = true;
   $("plan-note").innerHTML = `<span class="spin">Working through research,
@@ -966,7 +1243,8 @@ $("btn-produce").onclick = async () => {
   if (!chosen) return;
 
   $("btn-produce").disabled = true;
-  ["s-review", "s-images", "s-video", "s-qc", "s-publish"].forEach(hide);
+  ["s-voice", "s-review", "s-images", "s-video", "s-qc",
+   "s-publish"].forEach(hide);
 
   try {
     await fetch(`/api/plan/${PLAN.plan_id}/approve`, {
@@ -977,6 +1255,7 @@ $("btn-produce").onclick = async () => {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ captions_source: $("captions").value,
                              use_fake: USE_FAKE,
+                             review_voice: $("review-voice").checked,
                              review_clips: $("review-clips").checked })
     });
 
@@ -1179,8 +1458,8 @@ function collectManual() {
 $("btn-manual").onclick = () => {
   if (!$("topic").value.trim()) { $("topic").focus(); return; }
   resetSpine();
-  ["s-hooks", "s-script", "s-review", "s-images", "s-video", "s-qc",
-   "s-publish"]
+  ["s-hooks", "s-script", "s-voice", "s-review", "s-images", "s-video",
+   "s-qc", "s-publish"]
     .forEach(hide);
   show("s-manual");
   updateBudget();

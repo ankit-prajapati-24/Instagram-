@@ -58,7 +58,7 @@ whole pipeline work before spending anything. To get real scripts, follow
 python scripts/verify_e2e.py      # full pipeline, fake brain, real everything else
 python scripts/probe_omniroute.py # which gateway endpoints actually answer
 python scripts/reset_cooldown.py  # what the dedup gate is currently blocking
-python -m pytest tests/ -q        # 330 tests
+python -m pytest tests/ -q        # 598 tests
 ```
 
 `verify_e2e.py` exits non-zero unless it produced a playable 1080x1920 MP4 with
@@ -78,7 +78,7 @@ Measured on this machine, 2026-09-17/18:
 | Web panel | full flow driven end to end, including an edit to the hook beat surviving approval. No console errors, no mobile overflow |
 | Stock footage | 12/12 beats matched real Pexels footage on a real run, zero fallbacks; the matcher now downloads the smallest file that still covers 1080x1920 instead of the largest available (was up to 1.6 GB of 4K source for one video) |
 | Colour grade cost | +80.1s on a 49.8s render (143.0s ungraded → 223.1s graded); `RAHASYA_VIDEO_GRAIN=0` buys back most of that (187.5s) because grain, not the colour work, is what defeats inter-frame compression |
-| 330 tests | `pytest tests/ -q` |
+| 598 tests | `pytest tests/ -q` |
 
 | Not verified | Why |
 |---|---|
@@ -100,7 +100,7 @@ Measured on this machine, 2026-09-17/18:
 | `engine/gates/` | four-layer dedup, QC scorecard |
 | `engine/media/` | Piper voice, stock clip matching (`clips.py`), image generation with fallback |
 | `engine/assembly/` | ASS captions, ffmpeg graph, legacy-endpoint compiler |
-| `engine/pipeline.py` | stage orchestration either side of the human gate |
+| `engine/pipeline.py` | stage orchestration, split at each human gate |
 
 ### Browser-backed Gemini images
 
@@ -195,7 +195,13 @@ more than 0.35s.
 
 ## The constraints that are not features
 
-1. One human gate, between script and render.
+1. A human gate before anything is produced, and two optional ones after
+   it. Approving a script is compulsory. Stopping to hear every beat of
+   narration (`review_voice`) and stopping to look at every clip
+   (`review_clips`) are each a tick-box, and each is a status in the store
+   rather than a disabled button — a reload, a retry or a curl meets the
+   same refusal. Voice comes before clips because a beat's clip count and
+   slot lengths are derived from how long its audio measures.
 2. Semantic dedup before production — cosine 0.88, 45-day entity cooldown.
    `scripts/reset_cooldown.py` shows what is blocked and can clear it when
    the recorded entities are wrong.

@@ -12,6 +12,7 @@ import statistics
 from dataclasses import dataclass, field
 
 from engine.contract import ReelPlan
+from engine.media.voice import UPLOAD_ENGINE
 
 # These are the fingerprints of an AI script in this niche. Audiences in India
 # recognise them instantly, and they are also the phrasing that clusters
@@ -97,6 +98,11 @@ DURATION_MIN, DURATION_MAX = duration_window(45.0)
 # second pair of literals would separate from the window the first time
 # either moved, which is the failure the single definition exists to prevent.
 PRE_RENDER_MARGIN = 0.15
+
+# Voice engines that were *chosen*, as opposed to stood in for a failure.
+# Imported rather than spelled so the name the upload route writes and the
+# name this gate forgives cannot drift apart.
+DELIBERATE_VOICE_ENGINES = {"piper", UPLOAD_ENGINE}
 
 
 def pre_render_range(duration_min: float = DURATION_MIN,
@@ -282,11 +288,24 @@ def run_qc(plan: ReelPlan, *, similarity: float | None = None,
 
     engines = {b.voice_engine for b in beats if b.voice_engine}
     if engines:
-        checks.append(Check(
-            "voice_engine", len(engines) == 1 and "piper" in engines, "warn",
-            f"{', '.join(sorted(engines))}"
-            + ("" if engines == {"piper"} else " — a fallback engine ran, so "
-               "this does not sound like the voice you chose")))
+        # Whitelisted, not blacklisted. This check used to pass only on
+        # exactly {"piper"}, which made narration a human deliberately
+        # uploaded at the voice gate indistinguishable from edge-tts
+        # silently standing in for a broken Piper — the same mistake the
+        # publish checklist made about hand-picked clips. A new *fallback*
+        # engine must fail this check by default; a new deliberate one is
+        # a line here.
+        fallbacks = engines - DELIBERATE_VOICE_ENGINES
+        detail = ", ".join(sorted(engines))
+        if fallbacks:
+            detail += (" — a fallback engine ran, so this does not sound "
+                       "like the voice you chose")
+        elif UPLOAD_ENGINE in engines:
+            spoken = sum(1 for b in beats
+                         if b.voice_engine == UPLOAD_ENGINE)
+            detail += (f" — {spoken} of {len(beats)} beats use narration "
+                       f"you supplied")
+        checks.append(Check("voice_engine", not fallbacks, "warn", detail))
 
     lengths = [len(s.split()) for s in _sentences(plan.all_text())]
     if len(lengths) >= 3:

@@ -142,6 +142,36 @@ anything.
 The MP4 lands in `outputs/`. The evidence log down the left reports measured
 facts as each stage finishes, not progress guesses.
 
+### Stopping to check the work
+
+Two tick-boxes under **Approve and render** each park the run so you can
+look at what it made before it spends the expensive stages on it.
+
+**Hear every beat** (`review_voice`) stops after the narration is spoken.
+Each beat gets a player, the Devanagari line it is meant to say with a copy
+button, and an upload control. To say a beat in some other voice — your own,
+or whatever tool you like — copy the line, generate it there, and upload
+what comes back. mp3, wav, m4a, ogg, flac, or the video your phone
+recorded; the sound is taken out of it, re-encoded to match the rest of the
+narration and levelled to the same loudness, so an uploaded beat does not
+jump out next to a synthesised one. The synthesised original is left on
+disk untouched.
+
+Replacing a beat changes how long the whole video is, so the line above the
+list tracks the total against both windows: the range that will render at
+all, and the narrower range QC will publish. Nothing after this point
+shortens a script.
+
+This gate is before the footage is fetched, and it has to be: a beat's clip
+count is `ceil(measured / 2.5)` and its slot lengths divide the measured
+span, so clips fetched first would be cut to a length that no longer
+exists.
+
+**Check every clip** (`review_clips`) stops after the footage is in, with
+one card per clip and the search phrase that found it. Either box can be
+ticked, or both — with both, the run stops at the voice first and asks
+again about the clips when you release it.
+
 ---
 
 ## 5. Check it actually works
@@ -150,7 +180,7 @@ facts as each stage finishes, not progress guesses.
 python scripts/verify_e2e.py        # full pipeline, fake brain, everything else real
 python scripts/probe_omniroute.py   # which gateway endpoints answer
 python scripts/reset_cooldown.py    # what the dedup gate is blocking
-python -m pytest -q                 # 330 tests
+python -m pytest -q                 # 598 tests
 ```
 
 `verify_e2e.py` exits non-zero unless it produced a playable 1080x1920 MP4 with

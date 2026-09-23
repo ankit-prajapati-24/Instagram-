@@ -559,34 +559,81 @@ def manual_plan_stage(topic_raw: str, beats: list[dict], store, settings, *,
     return plan
 
 
-def clips_stage(plan: ReelPlan, client, store, settings, *,
-                emit: Emit = _noop) -> dict:
-    """VOICE -> LENGTH -> CLIPS. Returns the provider counts.
+def voice_stage(plan: ReelPlan, store, settings, *,
+                emit: Emit = _noop) -> dict[str, int]:
+    """VOICE, alone. Returns the word-timing-source counts.
 
-    The first half of produce, and the half that is worth looking at before
-    the second one runs: by the time this returns, every clip that will
-    appear in the video exists on disk, with the query that found it still
-    attached, and nothing expensive has happened to it yet. Stock footage
-    frequently does not match the story — a real run fetched a European
-    city park for a script about skeletons in a frozen Himalayan lake — and
-    the only way a human could see that before was to wait out the render.
+    Its own stage rather than the head of ``clips_stage`` because it is the
+    other thing a human may want to replace by hand, and this is the only
+    moment at which replacing it is free. Every number downstream is
+    derived from what this writes: clip count is ``ceil(measured / 2.5)``,
+    the slot durations divide the measured span, the caption words are
+    positions inside it, and the LENGTH gate and QC both judge the total.
+    Swap a beat's audio after CLIPS has run and the footage has been cut
+    for a beat that no longer exists.
 
-    Split here rather than anywhere else because this is the last point at
-    which a clip can be swapped for free. CAPTIONS reads no clip, and
-    RENDER reads every one of them.
+    Takes no ``client``, the way ``render_stage`` and ``manual_plan_stage``
+    take none, and for the same reason: synthesis never needed a model --
+    Piper is local, edge-tts is its own service -- so the third of produce
+    a human may redo by hand cannot reach the gateway at all. Structural,
+    not a promise.
     """
+    # Read here as well as in ``clips_stage`` so the one-shot path still
+    # fails before a minute of synthesis rather than after it. Voice itself
+    # spends nothing; this check is about what comes next.
     _check_budget(store, settings)
     settings.ensure_dirs()
 
     emit(PipelineEvent(Stage.VOICE, "started",
                        f"{settings.voice_engine}: "
                        f"{settings.piper_voice if settings.voice_engine == 'piper' else settings.voice}"))
-    synth_plan(plan, settings.work_dir, settings,
-               progress=lambda i, n, beat, secs, engine: emit(PipelineEvent(
-                   Stage.VOICE, "info",
-                   f"{i}/{n} {beat} {secs:.1f}s via {engine}")))
+    sources = synth_plan(
+        plan, settings.work_dir, settings,
+        progress=lambda i, n, beat, secs, engine: emit(PipelineEvent(
+            Stage.VOICE, "info",
+            f"{i}/{n} {beat} {secs:.1f}s via {engine}")))
     emit(PipelineEvent(Stage.VOICE, "done",
-                       f"{plan.duration():.1f}s measured"))
+                       f"{plan.duration():.1f}s measured",
+                       {"timing_sources": sources}))
+    return sources
+
+
+def voice_engines(plan: ReelPlan) -> dict[str, int]:
+    """How many beats each engine spoke, read off the plan itself.
+
+    ``synth_plan`` knows what it synthesised but not what a human replaced
+    afterwards. Counted from the plan for the same reason
+    ``clip_providers`` is: a resumed half must not report a tally the voice
+    review gate has since made untrue.
+    """
+    counts: dict[str, int] = {}
+    for beat in plan.script.beats:
+        name = beat.voice_engine or "unknown"
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def clips_stage(plan: ReelPlan, client, store, settings, *,
+                emit: Emit = _noop) -> dict:
+    """LENGTH -> CLIPS. Returns the provider counts.
+
+    The middle third of produce, and the part worth looking at before the
+    render runs: by the time this returns, every clip that will appear in
+    the video exists on disk, with the query that found it still attached,
+    and nothing expensive has happened to it yet. Stock footage frequently
+    does not match the story -- a real run fetched a European city park for
+    a script about skeletons in a frozen Himalayan lake -- and the only way
+    a human could see that before was to wait out the render.
+
+    Split here rather than anywhere else because this is the last point at
+    which a clip can be swapped for free. CAPTIONS reads no clip, and
+    RENDER reads every one of them.
+
+    Expects ``voice_stage`` to have run: a clip count is derived from a
+    beat's measured span, and synthesis is what measures it.
+    """
+    _check_budget(store, settings)
+    settings.ensure_dirs()
 
     # --- length gate ------------------------------------------------------
     #
@@ -764,11 +811,13 @@ def produce_stage(plan: ReelPlan, client, store, settings, *,
                   music_path: str | None = None) -> dict:
     """Everything after the human gate, in one uninterrupted call.
 
-    The one-shot path, kept because a user who does not want to review
-    twenty clips should not be made to. It is literally the two halves back
-    to back — there is no third copy of the stage order — so the reviewed
-    run and the unreviewed one cannot drift apart.
+    The one-shot path, kept because a user who does not want to listen to
+    ten beats and look at twenty clips should not be made to. It is
+    literally the three parts back to back — there is no second copy of
+    the stage order — so a reviewed run and an unreviewed one cannot drift
+    apart.
     """
+    voice_stage(plan, store, settings, emit=emit)
     counts = clips_stage(plan, client, store, settings, emit=emit)
     return render_stage(plan, store, settings, emit=emit,
                         captions_source=captions_source,

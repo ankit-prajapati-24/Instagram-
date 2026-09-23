@@ -190,3 +190,36 @@ def test_a_mixed_beat_counts_every_clip_it_holds():
     check = next(c for c in run_qc(plan).checks
                  if c.name == "visual_change_rate")
     assert f"{plan.duration() / 13:.1f}s" in check.detail
+
+
+def _check(scorecard, name):
+    return next(c for c in scorecard.to_dict()["checks"] if c["name"] == name)
+
+
+def test_a_fallback_voice_engine_is_flagged():
+    """edge-tts standing in for a broken Piper does not sound like the
+    voice that was chosen, and the run has to say so."""
+    plan = make_plan()
+    plan.script.beats[0].voice_engine = "edge"
+    assert not _check(run_qc(plan), "voice_engine")["ok"]
+
+
+def test_narration_the_user_uploaded_is_not_a_fallback():
+    """This check used to pass only on exactly {"piper"}, which made
+    narration a human chose to record indistinguishable from a silent
+    fallback — the same mistake the publish checklist made about
+    hand-picked clips."""
+    plan = make_plan()
+    plan.script.beats[0].voice_engine = "upload"
+
+    check = _check(run_qc(plan), "voice_engine")
+    assert check["ok"]
+    assert "you supplied" in check["detail"]
+    assert "fallback" not in check["detail"]
+
+
+def test_a_fallback_is_still_flagged_when_uploads_are_present():
+    plan = make_plan()
+    plan.script.beats[0].voice_engine = "upload"
+    plan.script.beats[1].voice_engine = "edge"
+    assert not _check(run_qc(plan), "voice_engine")["ok"]

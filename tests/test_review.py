@@ -128,6 +128,11 @@ def _stub_halves(monkeypatch, *, clips=None, render=None):
     render = render or _Recorder({"video": "x.mp4", "probe": {},
                                   "scorecard": {"passed": True},
                                   "providers": {}})
+    # Stubbed for speed, not for correctness: these are tests of the
+    # route's branching, and the real one runs Piper over every beat.
+    # That VOICE genuinely precedes CLIPS is asserted in
+    # tests/test_voice_review.py, against the unstubbed pair.
+    monkeypatch.setattr(app_mod, "voice_stage", _Recorder({"interpolated": 2}))
     monkeypatch.setattr(app_mod, "clips_stage", clips)
     monkeypatch.setattr(app_mod, "render_stage", render)
     monkeypatch.setattr(app_mod, "produce_stage", _Recorder({
