@@ -784,8 +784,13 @@ def render_stage(plan: ReelPlan, store, settings, *,
     # generated placeholder (see engine/assembly/audio.py and
     # scripts/make_audio_assets.py). Resolved here rather than inside
     # `render` so that a direct render stays exactly as explicit as it was.
+    # The reel's own bed beats the shared folder, and a caller who named
+    # a path explicitly beats both -- that parameter is someone being
+    # deliberate, and a stored pick must not quietly override it.
+    music_credit = ""
     if music_path is None:
-        music_path = audio.find_music(settings)
+        music_path, music_credit = audio.resolve_bed(
+            store.music_choice(plan.plan_id), settings)
     emit(PipelineEvent(Stage.RENDER, "started",
                        f"music: {Path(music_path).name}" if music_path
                        else "music: none (assets/music/ is empty)"))
@@ -813,7 +818,12 @@ def render_stage(plan: ReelPlan, store, settings, *,
     info = probe_video(out_path, settings.ffmpeg)
     store.record_render(plan.plan_id, key, "done", output_path=str(out_path),
                         duration_s=info.get("duration"),
-                        attribution=used.get("attribution"))
+                        # Two obligations, not one: the art credit the
+                        # render reported and the credit the bed owes.
+                        # Keeping only the first is how a CC-BY track
+                        # ships uncredited.
+                        attribution=audio.join_credits(
+                            used.get("attribution"), music_credit))
     emit(PipelineEvent(Stage.RENDER, "done",
                        f"{info.get('duration', 0):.1f}s, "
                        f"{info.get('bytes', 0) // 1024}KB", info))

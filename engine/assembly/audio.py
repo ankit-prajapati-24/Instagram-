@@ -190,6 +190,62 @@ def find_music(settings) -> str | None:
     return _prefer_real(_audio_files(directory))
 
 
+def resolve_bed(choice: dict | None, settings) -> tuple[str | None, str]:
+    """The bed this reel renders with, and the credit that bed owes.
+
+    ``choice`` is the row ``Store.music_choice`` returns, or None when
+    the reel never picked one. A dict rather than a store, so nothing in
+    this module has to know a database exists.
+
+    Three rules, in order:
+
+    1. ``settings.music`` off means no bed. The switch is a switch, and a
+       stored pick must not turn music back on behind it.
+    2. A chosen file that is still on disk wins.
+    3. Anything else falls back to ``find_music``, exactly as before this
+       feature existed -- including the case where the chosen file has
+       been cleaned up. A plan can wait at a gate for days and work
+       directories do not; rendering in silence or failing the render
+       would both be worse answers than the shared folder.
+
+    The credit is returned beside the path because only the path that is
+    actually playing owes one. A bed that fell back owes nothing, and a
+    reel that credits a track it did not use is as wrong as one that
+    fails to credit a track it did.
+    """
+    if not getattr(settings, "music", False):
+        return None, ""
+    if choice:
+        path = str(choice.get("path") or "")
+        if path and Path(path).is_file():
+            from engine.media.music_search import credit_line
+
+            class _Row:
+                licence = str(choice.get("licence") or "")
+                attribution = str(choice.get("attribution") or "")
+
+            return path, credit_line(_Row())
+    # Whatever was dropped into assets/music/ by hand carries no recorded
+    # licence, so nothing can be claimed about it in either direction.
+    return find_music(settings), ""
+
+
+def join_credits(*credits: str | None) -> str | None:
+    """Every credit a reel owes, as one block, each said once.
+
+    Art and music are separate obligations and a reel can owe both. The
+    failure that breaks a licence is the silent one -- a credit dropped
+    because something assumed there was only ever a single line -- so
+    this keeps all of them and de-duplicates rather than choosing.
+    """
+    seen: list[str] = []
+    for credit in credits:
+        text = (credit or "").strip()
+        if text and text not in seen:
+            seen.append(text)
+    return "\n".join(seen) if seen else None
+
+
 def find_sfx(kind: str, settings) -> str | None:
     """The file for one sound kind, by the documented naming rule.
 

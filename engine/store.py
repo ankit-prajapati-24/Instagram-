@@ -68,6 +68,17 @@ CREATE TABLE IF NOT EXISTS sticker_choices (
   created_at TEXT NOT NULL,
   PRIMARY KEY (plan_id, beat_id)
 );
+CREATE TABLE IF NOT EXISTS music_choices (
+  plan_id TEXT PRIMARY KEY,
+  openverse_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  title TEXT,
+  creator TEXT,
+  licence TEXT,
+  attribution TEXT,
+  source_url TEXT,
+  created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS renders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   plan_id TEXT NOT NULL,
@@ -430,6 +441,57 @@ class Store:
                 "SELECT beat_id, slug FROM sticker_choices WHERE plan_id=?",
                 (plan_id,)).fetchall()
         return {row["beat_id"]: row["slug"] for row in rows}
+
+    # -- the music bed ----------------------------------------------------
+    def set_music_choice(self, plan_id: str, *, openverse_id: str,
+                         path: str, title: str = "", creator: str = "",
+                         licence: str = "", attribution: str = "",
+                         source_url: str = "") -> None:
+        """Record the bed this reel was given.
+
+        Per plan because ``audio.find_music`` reads one shared folder and
+        would otherwise give every reel the same track. Replacing rather
+        than appending: there is one bed per reel, and a history of
+        rejected picks would only have to be filtered back out.
+
+        The credit is stored beside the path rather than re-derived at
+        publish time. By then the track may have been withdrawn or
+        relicensed, and the credit that is owed is the one for the file
+        actually sitting on disk.
+        """
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO music_choices(plan_id, openverse_id, path, "
+                "title, creator, licence, attribution, source_url, "
+                "created_at) VALUES(?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(plan_id) DO UPDATE SET "
+                "openverse_id=excluded.openverse_id, path=excluded.path, "
+                "title=excluded.title, creator=excluded.creator, "
+                "licence=excluded.licence, "
+                "attribution=excluded.attribution, "
+                "source_url=excluded.source_url, "
+                "created_at=excluded.created_at",
+                (plan_id, openverse_id, path, title, creator, licence,
+                 attribution, source_url, _now()))
+
+    def music_choice(self, plan_id: str) -> dict | None:
+        """This plan's bed, or None when it never chose one.
+
+        None means "fall back to the shared folder", not "render in
+        silence" -- see ``pipeline.render_stage``.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT openverse_id, path, title, creator, licence, "
+                "attribution, source_url FROM music_choices WHERE plan_id=?",
+                (plan_id,)).fetchone()
+        return dict(row) if row else None
+
+    def clear_music_choice(self, plan_id: str) -> None:
+        """Put this reel back on the shared folder. Never an error."""
+        with self._conn() as conn:
+            conn.execute("DELETE FROM music_choices WHERE plan_id=?",
+                         (plan_id,))
 
     # -- dedup support ----------------------------------------------------
     def save_embedding(self, plan_id: str, vector: list[float]) -> None:

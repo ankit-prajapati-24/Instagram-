@@ -70,6 +70,7 @@ from engine.contract import (Beat, Claim, CleanupInfo, Clip, Metadata, Motion,
                              Role, Transition)
 from engine.gates.qc import pre_render_range
 from engine.media import clip_search as clip_search_mod
+from engine.media import music_search as music_search_mod
 from engine.media.clips import clip_count, slot_words
 from engine.media.align import build_aligner
 from engine.media.voice import (MIN_UPLOAD_SECONDS, UPLOAD_ENGINE,
@@ -574,6 +575,17 @@ class ProduceRequest(BaseModel):
     # Off by default, because the one-shot path has to stay: a user who
     # does not want to look at twenty clips must not be made to.
     review_clips: bool = False
+
+
+class MusicPickRequest(BaseModel):
+    """A searched track chosen as this reel's bed.
+
+    An id, deliberately, and not a link: the server resolves the audio
+    address with Openverse itself, so the only URLs it ever fetches are
+    ones Openverse gave it.
+    """
+
+    openverse_id: str
 
 
 class PickRequest(BaseModel):
@@ -1741,6 +1753,36 @@ def create_app(db_path: str | Path | None = None,
                 404, f"beat {beat_id!r} has no usable audio on disk")
         return FileResponse(path, media_type="audio/mpeg")
 
+    @app.get("/api/music/{plan_id}")
+    def plan_music(plan_id: str) -> FileResponse:
+        """The bed this reel is set to use, for the player on the board.
+
+        Serves the file on disk rather than the Openverse URL it came
+        from. What matters at this gate is what the render will actually
+        composite, and once downloaded that is a local file -- which may
+        differ from whatever the source URL serves today.
+
+        Same containment as ``/media``, ``/api/frame`` and
+        ``/api/audio``. The path comes out of the database here rather
+        than off the URL, and a database row is not a trust boundary: a
+        bad row is the only way this could point somewhere it should
+        not, so it is checked exactly as if the caller had supplied it.
+        """
+        if store.get_plan(plan_id) is None:
+            raise HTTPException(404, "no such plan")
+        choice = store.music_choice(plan_id)
+        if not choice or not choice.get("path"):
+            raise HTTPException(
+                404, "this reel has no bed of its own; it renders with "
+                     "whatever is in assets/music/")
+        path = Path(choice["path"])
+        if not path.is_file() or not _under_roots(
+                path, [Path(settings.work_dir)]):
+            raise HTTPException(
+                404, "that bed is not on disk any more, so the render "
+                     "will fall back to assets/music/")
+        return FileResponse(path)
+
     # -- gate three: the clip review --------------------------------------
     @app.post("/api/plan/{plan_id}/clips/approve")
     def approve_clips(plan_id: str,
@@ -1870,6 +1912,11 @@ def create_app(db_path: str | Path | None = None,
             "providers": clip_providers(plan),
             "accept": sorted(UPLOAD_KINDS),
             "max_bytes": int(settings.upload_max_mb * 1024 * 1024),
+            # The reel's own bed, or None when it is still on whatever
+            # sits in assets/music/. The board is where the bed is
+            # chosen, so it has to say what the bed currently is --
+            # otherwise the only way to find out is to render.
+            "music": _music_row(plan_id),
             "clips": rows,
         }
 
@@ -2294,6 +2341,97 @@ def create_app(db_path: str | Path | None = None,
                          "used_in": used.get(c.pexels_id, [])}
                         for c in results],
         }
+
+    def _music_row(plan_id: str) -> dict | None:
+        """This reel's bed as the panel needs it, credit included.
+
+        The credit is recomputed from the stored licence rather than
+        stored ready-made, so the one rule about which licences oblige a
+        line lives in ``music_search`` and nowhere else.
+        """
+        choice = store.music_choice(plan_id)
+        if not choice:
+            return None
+
+        class _Row:
+            licence = str(choice.get("licence") or "")
+            attribution = str(choice.get("attribution") or "")
+
+        return {**choice,
+                "credit": music_search_mod.credit_line(_Row()),
+                "exists": bool(choice.get("path")
+                               and Path(choice["path"]).is_file())}
+
+    @app.get("/api/plan/{plan_id}/music-search")
+    def music_search(plan_id: str, q: str = "") -> dict:
+        """Openverse results for a query the user typed.
+
+        Read-only and downloads nothing: every result carries a playable
+        URL, so the row points the browser at the CDN and the disk stays
+        untouched until something is chosen.
+
+        ``needs_credit`` rides on every row. That is the whole reason
+        CC-BY tracks are offered at all -- the obligation is visible
+        before it is taken on rather than discovered at publish time.
+        """
+        if store.get_plan(plan_id) is None:
+            raise HTTPException(404, "no such plan")
+        try:
+            results = music_search_mod.search(q, settings)
+        except music_search_mod.SearchUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        return {"plan_id": plan_id, "query": q.strip(),
+                "results": [c.to_dict() for c in results]}
+
+    @app.post("/api/plan/{plan_id}/music")
+    def pick_music(plan_id: str, request: MusicPickRequest) -> dict:
+        """Give this reel its own bed.
+
+        Takes an Openverse **id**, never a URL, for the same reason the
+        clip picker does.
+
+        Gated on the review status: the bed is composited by the render,
+        so this gate is the last moment it can change. A produced reel
+        that swapped its bed would leave the render record naming a
+        credit the MP4 does not carry.
+        """
+        if store.get_plan(plan_id) is None:
+            raise HTTPException(404, "no such plan")
+        status = store.plan_status(plan_id)
+        if status != CLIP_REVIEW_STATUS:
+            raise HTTPException(
+                409, f"plan is '{status}', not awaiting clip review. The "
+                     f"bed is composited by the render, so that gate is "
+                     f"the last moment it can change.")
+
+        try:
+            choice = music_search_mod.fetch_for_plan(
+                plan_id, request.openverse_id, settings, settings.work_dir)
+        except music_search_mod.SearchUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+
+        if not _under_roots(Path(choice.path), [Path(settings.work_dir)]):
+            raise HTTPException(500, "the download escaped work_dir")
+
+        store.set_music_choice(
+            plan_id, openverse_id=choice.openverse_id, path=choice.path,
+            title=choice.title, creator=choice.creator,
+            licence=choice.licence, attribution=choice.attribution,
+            source_url=choice.source_url)
+        return {"plan_id": plan_id, **choice.to_dict()}
+
+    @app.delete("/api/plan/{plan_id}/music")
+    def clear_music(plan_id: str) -> dict:
+        """Put this reel back on the shared folder.
+
+        Not the same as turning music off: ``resolve_bed`` falls back to
+        ``assets/music/``, so clearing restores the default rather than
+        rendering in silence.
+        """
+        if store.get_plan(plan_id) is None:
+            raise HTTPException(404, "no such plan")
+        store.clear_music_choice(plan_id)
+        return {"plan_id": plan_id, "music": None}
 
     @app.post("/api/plan/{plan_id}/clip/{beat_id}/{slot}/pick")
     def pick_clip(plan_id: str, beat_id: str, slot: int,
