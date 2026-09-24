@@ -294,12 +294,16 @@
   .lineup header .shut:hover { color: var(--paper); }
   .lineup .body { overflow-y: auto; padding: 16px 18px 18px; }
   /* The question being answered, so it reads before anything else. */
-  .lineup .asked {
-    font-family: var(--serif); font-size: 19px; line-height: 1.45;
-    color: var(--paper); max-width: 62ch; margin: 0 0 4px;
-  }
+  /* The line comes first because it is what the footage has to carry.
+     The scene description sits under it, quieter, as the instruction
+     that was derived from it -- and seeing them together is how you
+     notice the derivation went wrong. */
   .lineup .spoken {
-    font-size: 13px; color: var(--muted); line-height: 1.5;
+    font-family: var(--serif); font-size: 20px; line-height: 1.45;
+    color: var(--paper); max-width: 62ch; margin: 0 0 6px;
+  }
+  .lineup .asked {
+    font-size: 13.5px; color: var(--muted); line-height: 1.5;
     max-width: 62ch; margin: 0 0 16px;
   }
   /* The fade is the scroll affordance: with six 196px tiles the sixth is
@@ -378,6 +382,14 @@
   .clipcard .q {
     font-size: 11.5px; color: var(--muted); line-height: 1.35;
     word-break: break-word;
+  }
+  /* The global button rule sets white-space: nowrap, which is right for
+     the wide buttons it was written for and wrong inside a 196px card:
+     a two-word label fits, a three-word one walks straight out through
+     its own border. */
+  .clipcard button {
+    white-space: normal; line-height: 1.3; padding: 7px 8px;
+    font-size: 12.5px;
   }
   .clipcard label.pick {
     font-size: 11.5px; border: 1px dashed var(--rule); padding: 5px 6px;
@@ -856,8 +868,8 @@
                     aria-label="Close">&times;</button>
           </header>
           <div class="body">
-            <p class="asked" id="lineup-asked"></p>
             <p class="spoken" id="lineup-spoken"></p>
+            <p class="asked" id="lineup-asked"></p>
             <div class="railwrap">
               <div class="rail" id="lineup-rail"></div>
             </div>
@@ -1624,7 +1636,7 @@ function renderReview() {
       <div class="qlabel">Searched for</div>
       <div class="q">${esc(c.query) || "<i>no query recorded</i>"}</div>
       <button class="opts" data-beat="${esc(c.beat_id)}"
-              data-slot="${c.slot}">Compare other clips</button>
+              data-slot="${c.slot}">Compare clips</button>
       <label class="pick">
         Upload my own
         <input type="file" accept="video/*,image/*"
@@ -1673,10 +1685,11 @@ function openLineup(beat, slot) {
   $("lineup-slot").textContent = `${row.beat_id} · slot ${row.slot}`;
   $("lineup-fixed").textContent =
     `${row.duration.toFixed(2)}s, fixed by the narration`;
-  $("lineup-asked").textContent =
-    row.visual_prompt || "This beat recorded no scene description.";
-  $("lineup-spoken").textContent = row.query
-    ? "" : "No search query was recorded for this slot.";
+  $("lineup-spoken").textContent =
+    row.caption_text || row.voice_text || "";
+  $("lineup-asked").textContent = row.visual_prompt
+    ? `Scene asked for: ${row.visual_prompt}`
+    : "This beat recorded no scene description.";
   $("lineup-was").textContent = row.query ? `Searched for: ${row.query}` : "";
   $("lineup-q").value = row.query || "";
   $("lineup-said").className = "said";

@@ -177,3 +177,17 @@ def test_the_clip_is_servable_after_the_gate_too(client):
     surprise, not a safeguard."""
     _seed(client, status="produced")
     assert client.get("/api/clip/p1/b0/0").status_code == 200
+
+
+def test_the_board_carries_the_line_the_footage_has_to_match(client):
+    """The scene description says what to show; the line is what is
+    actually being said over it. Matching footage to a beat means
+    hearing the line, so the board hands both to the panel."""
+    plan = _seed(client)
+    rows = client.get("/api/plan/p1/clips").json()["clips"]
+
+    first = next(r for r in rows if r["beat_id"] == "b0")
+    beat = plan.script.beats[0]
+    assert first["caption_text"] == beat.caption_text
+    assert first["voice_text"] == beat.voice_text
+    assert first["visual_prompt"] == beat.visual_prompt

@@ -1796,6 +1796,14 @@ def create_app(db_path: str | Path | None = None,
                     # clip is a mystery; with it, it is usually obvious.
                     "query": clip.query,
                     "visual_prompt": beat.visual_prompt,
+                    # The line the footage has to carry. The scene
+                    # description says what to show; this is what is
+                    # actually said over it, and matching a shot to a
+                    # beat means reading it. Both go to the panel because
+                    # a wrong clip is often a scene description that
+                    # drifted from the line it was derived from.
+                    "caption_text": beat.caption_text,
+                    "voice_text": beat.voice_text,
                     "motion": beat.motion,
                     "role": beat.role,
                     "source_url": clip.source_url,
