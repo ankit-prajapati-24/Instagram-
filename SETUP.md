@@ -30,8 +30,8 @@ the burned-in captions shape correctly.
 ## 1. Clone and install
 
 ```bash
-git clone https://github.com/ankit-prajapati-24/Instagram-.git
-cd Instagram-
+git clone <your-repo-url> rahasya
+cd rahasya
 pip install -r requirements.txt
 ```
 

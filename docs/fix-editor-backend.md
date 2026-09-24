@@ -1,6 +1,6 @@
 # Fixes for EDITOR-_BACKEND
 
-Three problems in [EDITOR-_BACKEND](https://github.com/ankit-prajapati-24/EDITOR-_BACKEND)
+Three problems in `EDITOR-_BACKEND`
 that will bite as soon as it is driven by something other than a hand-written
 call. Rahasya renders with ffmpeg directly, so none of these block it — but
 `engine/assembly/compile.py` exists to let that service act as an alternative
