@@ -2021,7 +2021,8 @@ def create_app(db_path: str | Path | None = None,
                 "chosen": chosen.get(cue.name),
                 "candidates": [
                     {"slug": slug,
-                     "preview": f"/api/sticker-preview/{slug}"}
+                     "preview": f"/api/sticker-preview/{slug}",
+                     "motion": f"/api/sticker-motion/{slug}"}
                     for slug in seen[:8]],
                 "choose": f"/api/plan/{plan_id}/sticker/{cue.name}",
             })
@@ -2039,6 +2040,36 @@ def create_app(db_path: str | Path | None = None,
         except Exception as exc:
             raise HTTPException(502, f"preview failed: {exc}") from exc
         return FileResponse(png, media_type="image/png")
+
+    @app.get("/api/sticker-motion/{slug}")
+    def sticker_motion(slug: str) -> FileResponse:
+        """The icon's own animation, for the picker to show on hover.
+
+        ``sticker_preview`` serves one matted, graded frame, and that is
+        the right thing to rest on -- it is what the icon will look like
+        in the reel. But these are all animations, and a still cannot
+        tell a spinning lock from a wobbling one.
+
+        Checked against the catalogue rather than sanitised: the slug
+        reaches a filename, and a membership test is a stronger answer
+        than a regex.
+        """
+        cache = sticker_choices_mod.cache_root(settings)
+        try:
+            slugs = sticker_catalog.load(cache)
+        except Exception as exc:
+            raise HTTPException(502, f"catalogue unavailable: {exc}") from exc
+        if slug not in slugs:
+            raise HTTPException(404, "not a catalogue slug")
+        try:
+            gif = sticker_choices_mod.source_gif(slug, root=cache)
+        except Exception as exc:
+            # The source downloads on first use. If that fails the picker
+            # keeps working with its stills, so this is a bad gateway and
+            # not a broken page.
+            raise HTTPException(502, f"could not fetch the animation: "
+                                     f"{exc}") from exc
+        return FileResponse(gif, media_type="image/gif")
 
     @app.post("/api/plan/{plan_id}/sticker/{trigger}")
     def choose_sticker(plan_id: str, trigger: str,

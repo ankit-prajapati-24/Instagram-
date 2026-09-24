@@ -192,6 +192,17 @@ def ensure_baked(slug: str, *, root: Path, size: int, fps: int) -> None:
         bake_one(source, folder, style=style, size=size, fps=fps)
 
 
+def source_gif(slug: str, *, root: Path) -> Path:
+    """The cached source animation, downloaded on first use.
+
+    Public because the picker serves it: a wall of stills says nothing
+    about how an icon moves, and a spinning lock and a wobbling lock are
+    the same picture. Same file the bake already pulls, so hovering a
+    card costs at most one download that was going to happen anyway.
+    """
+    return _source(slug, Path(root))
+
+
 def preview_png(slug: str, *, root: Path, style: str = "punchy",
                 px: int = 96) -> Path:
     """One matted, graded frame of an icon, for browsing.

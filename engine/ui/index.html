@@ -1745,9 +1745,16 @@ function renderStickers() {
     const used = r.chosen
       ? `in use now: <b>${esc(r.chosen)}</b>`
       : "in use now: the committed art / emoji default";
+    /* The still is the resting state on purpose: it is matted and
+       graded, so it shows what the icon will look like in the reel. But
+       every one of these is an animation, and a spinning lock and a
+       wobbling lock are the same picture -- so hovering swaps in the
+       source GIF. */
     const pics = r.candidates.length ? r.candidates.map((c) => `
       <img class="${c.slug === r.chosen ? "chosen" : ""}"
            data-trigger="${esc(r.trigger)}" data-slug="${esc(c.slug)}"
+           data-still="${c.preview}" data-motion="${c.motion}"
+           title="hover to see it move"
            loading="lazy" alt="${esc(c.slug)}" src="${c.preview}">`).join("")
       : "<i>no alternate art offered</i>";
     return `
@@ -1765,6 +1772,16 @@ function renderStickers() {
 
   $("stickergrid").querySelectorAll(".stickerpicks img").forEach((img) => {
     img.onclick = () => chooseSticker(img.dataset.trigger, img.dataset.slug);
+    if (!img.dataset.motion) return;
+    /* The GIF downloads on first hover and the browser caches it, so a
+       card costs nothing until someone looks at it. A source that fails
+       to fetch leaves the still in place rather than an empty box. */
+    img.onmouseenter = () => {
+      const motion = new Image();
+      motion.onload = () => { img.src = img.dataset.motion; };
+      motion.src = img.dataset.motion;
+    };
+    img.onmouseleave = () => { img.src = img.dataset.still; };
   });
 }
 
