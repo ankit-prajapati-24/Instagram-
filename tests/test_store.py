@@ -216,14 +216,37 @@ def test_the_choices_table_is_added_to_a_database_that_predates_it(tmp_path):
     assert store.sticker_choices("p1") == {}
 
 
-def test_two_beats_in_one_reel_can_wear_different_icons(tmp_path):
-    """Keyed by trigger name, a reel's two `water` cues shared one icon.
-    Keyed by beat, they do not."""
+def test_two_beats_round_trip_their_own_slugs(tmp_path):
+    """A plain round trip, not a guard: two distinct beat ids are two
+    distinct values under either the old trigger-keyed schema or the new
+    beat-keyed one, so this cannot see the defect the task fixes. The
+    schema itself is asserted in
+    ``test_the_choice_table_is_keyed_by_beat_not_by_trigger`` below, and
+    the end-to-end proof (two beats sharing one trigger word) lives in the
+    ``prepare()`` test in the next task."""
     store = Store(tmp_path / "t.db"); store.init()
     store.choose_sticker("p1", "b3", "27-globe")
     store.choose_sticker("p1", "b7", "1875-planet")
     assert store.sticker_choices("p1") == {"b3": "27-globe",
                                            "b7": "1875-planet"}
+
+
+def test_the_choice_table_is_keyed_by_beat_not_by_trigger(tmp_path):
+    """The defect this task fixes is a key shape, so the key is what the
+    test has to look at. Keyed by trigger name, a reel whose script named
+    one concept at two beats could only ever wear one icon for both -- and
+    a round-trip test cannot see that, because two beat ids are two
+    distinct values under either schema.
+    """
+    store = Store(tmp_path / "t.db")
+    store.init()
+    with store._conn() as conn:
+        info = list(conn.execute("PRAGMA table_info(sticker_choices)"))
+    names = [row["name"] for row in info]
+    primary = sorted(row["name"] for row in info if row["pk"])
+    assert "beat_id" in names, f"columns are {names}"
+    assert "trigger" not in names, f"the old key is still there: {names}"
+    assert primary == ["beat_id", "plan_id"], f"primary key is {primary}"
 
 
 def test_choosing_again_for_one_beat_replaces_it(tmp_path):
