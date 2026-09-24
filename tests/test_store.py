@@ -214,3 +214,28 @@ def test_the_choices_table_is_added_to_a_database_that_predates_it(tmp_path):
 
     store.init()
     assert store.sticker_choices("p1") == {}
+
+
+def test_two_beats_in_one_reel_can_wear_different_icons(tmp_path):
+    """Keyed by trigger name, a reel's two `water` cues shared one icon.
+    Keyed by beat, they do not."""
+    store = Store(tmp_path / "t.db"); store.init()
+    store.choose_sticker("p1", "b3", "27-globe")
+    store.choose_sticker("p1", "b7", "1875-planet")
+    assert store.sticker_choices("p1") == {"b3": "27-globe",
+                                           "b7": "1875-planet"}
+
+
+def test_choosing_again_for_one_beat_replaces_it(tmp_path):
+    store = Store(tmp_path / "t.db"); store.init()
+    store.choose_sticker("p1", "b3", "27-globe")
+    store.choose_sticker("p1", "b3", "1875-planet")
+    assert store.sticker_choices("p1") == {"b3": "1875-planet"}
+
+
+def test_choices_do_not_leak_between_plans(tmp_path):
+    store = Store(tmp_path / "t.db"); store.init()
+    store.choose_sticker("p1", "b3", "27-globe")
+    store.choose_sticker("p2", "b3", "1875-planet")
+    assert store.sticker_choices("p1") == {"b3": "27-globe"}
+    assert store.sticker_choices("p2") == {"b3": "1875-planet"}

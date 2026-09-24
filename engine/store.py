@@ -62,10 +62,10 @@ CREATE TABLE IF NOT EXISTS assets (
 );
 CREATE TABLE IF NOT EXISTS sticker_choices (
   plan_id TEXT NOT NULL,
-  trigger TEXT NOT NULL,
+  beat_id TEXT NOT NULL,
   slug TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  PRIMARY KEY (plan_id, trigger)
+  PRIMARY KEY (plan_id, beat_id)
 );
 CREATE TABLE IF NOT EXISTS renders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -369,29 +369,34 @@ class Store:
         return row["attribution"] if row else None
 
     # -- sticker choices --------------------------------------------------
-    def choose_sticker(self, plan_id: str, trigger: str, slug: str) -> None:
-        """Record which Lordicon icon this reel should use for ``trigger``.
+    def choose_sticker(self, plan_id: str, beat_id: str, slug: str) -> None:
+        """Record which Lordicon icon this reel should use at this beat.
 
-        Per plan on purpose: the same trigger can wear different art in
+        Per beat, not per trigger: ``find_cues`` already allows one sticker
+        per beat, so the beat id is the cue's identity on both rungs. Keyed
+        by trigger name, a reel whose script said "water" twice could only
+        ever wear one icon for both.
+
+        Per plan on purpose: the same beat can wear different art in
         different reels, the way clips already do. Replacing rather than
-        appending, because there is one answer per trigger per reel and a
+        appending, because there is one answer per beat per reel and a
         history of rejected picks would only have to be filtered out again.
         """
         with self._conn() as conn:
             conn.execute(
-                "INSERT INTO sticker_choices(plan_id, trigger, slug, "
+                "INSERT INTO sticker_choices(plan_id, beat_id, slug, "
                 "created_at) VALUES(?,?,?,?) "
-                "ON CONFLICT(plan_id, trigger) DO UPDATE SET "
+                "ON CONFLICT(plan_id, beat_id) DO UPDATE SET "
                 "slug=excluded.slug, created_at=excluded.created_at",
-                (plan_id, trigger, slug, _now()))
+                (plan_id, beat_id, slug, _now()))
 
     def sticker_choices(self, plan_id: str) -> dict[str, str]:
-        """``{trigger: slug}`` for this plan, empty when nothing was chosen."""
+        """``{beat_id: slug}`` for this plan, empty when nothing was chosen."""
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT trigger, slug FROM sticker_choices WHERE plan_id=?",
+                "SELECT beat_id, slug FROM sticker_choices WHERE plan_id=?",
                 (plan_id,)).fetchall()
-        return {row["trigger"]: row["slug"] for row in rows}
+        return {row["beat_id"]: row["slug"] for row in rows}
 
     # -- dedup support ----------------------------------------------------
     def save_embedding(self, plan_id: str, vector: list[float]) -> None:
