@@ -52,6 +52,11 @@ TRIGGER_PATH = (Path(__file__).resolve().parent.parent / "data"
 # proper full-colour glyph on transparency, so no sticker pack is needed.
 DEFAULT_FONT = r"C:\Windows\Fonts\seguiemj.ttf"
 
+# What a model-asked sticker falls back to when its terms find no icon and
+# nothing was picked in the panel. The trigger map's own concepts each carry
+# a glyph; the script's do not, so they share this one.
+DEFAULT_EMOJI = "✨"  # sparkles
+
 # --- restraint --------------------------------------------------------------
 DEFAULT_CAP = 3
 # Minimum spacing between two stickers. Deliberately longer than
@@ -176,7 +181,7 @@ class Trigger:
 
 @dataclass(frozen=True)
 class Cue:
-    """A matched trigger word, placed on the render timeline."""
+    """A moment that earns a sticker, placed on the render timeline."""
 
     name: str
     emoji: str
@@ -184,6 +189,18 @@ class Cue:
     beat_index: int
     start: float           # absolute seconds from the first frame
     weight: int
+    # The stable identity. ``beat_index`` is a position and would move if
+    # beats were ever reordered; a stored choice is keyed on this, so it is
+    # carried rather than recomputed.
+    beat_id: str = ""
+    # What the panel searches the catalogue with. Filled from the beat's
+    # ``sticker.terms`` on the model rung and from ``Trigger.search`` on the
+    # fallback rung, so the route that builds candidates reads one field and
+    # never has to know which rung produced the cue.
+    terms: tuple[str, ...] = ()
+    # "model" when the script asked for this, "trigger" when the map found
+    # it. The cap binds only the second kind.
+    source: str = "trigger"
 
 
 @dataclass(frozen=True)
@@ -243,13 +260,52 @@ def _hits(token: str, trigger: Trigger) -> bool:
 
 # --- picking the moments ----------------------------------------------------
 
+def _model_start(beat, asked, offset: float) -> float:
+    """When the sticker the script asked for lands.
+
+    The named word's own timing when that word is in the caption, and the
+    beat's midpoint when it is not. The midpoint is a placement, not a
+    failure: the model naming a word its caption does not contain should
+    cost a looser landing, never the sticker.
+    """
+    wanted = normalise(asked.word)
+    if wanted:
+        for timing in beat.words:
+            if normalise(timing.word) == wanted:
+                return offset + timing.start
+    return offset + beat.seconds() / 2
+
+
 def _candidates(plan: ReelPlan, triggers: list[Trigger],
                 total: float) -> list[Cue]:
     cues: list[Cue] = []
     offset = 0.0
     for index, beat in enumerate(plan.script.beats):
         # No word timings means no clock, and a sticker without a clock is
-        # worse than no sticker. Beats before the voice stage have none.
+        # worse than no sticker. Beats before the voice stage have none --
+        # including a beat whose script asked for a sticker, which is why
+        # the midpoint fallback below sits inside this guard and not
+        # outside it. A cue that could exist before the voice stage would
+        # put stickers on the script screen, where the picker cannot live.
+        if not beat.words:
+            offset += beat.seconds()
+            continue
+
+        asked = getattr(beat, "sticker", None)
+        if asked is not None:
+            start = _model_start(beat, asked, offset)
+            if start + POP_SECONDS <= total:
+                cues.append(Cue(
+                    name=beat.beat_id, emoji=DEFAULT_EMOJI, word=asked.word,
+                    beat_index=index, start=start, weight=0,
+                    beat_id=beat.beat_id,
+                    terms=tuple(t for t in asked.terms if t),
+                    source="model"))
+            # One sticker per beat: a beat that asked does not also get
+            # scanned for triggers.
+            offset += beat.seconds()
+            continue
+
         for timing in beat.words:
             token = normalise(timing.word)
             if not token:
@@ -261,9 +317,11 @@ def _candidates(plan: ReelPlan, triggers: list[Trigger],
                 # It needs room to finish popping before the file ends.
                 if start + POP_SECONDS > total:
                     continue
-                cues.append(Cue(name=trigger.name, emoji=trigger.emoji,
-                                word=timing.word, beat_index=index,
-                                start=start, weight=trigger.weight))
+                cues.append(Cue(
+                    name=trigger.name, emoji=trigger.emoji,
+                    word=timing.word, beat_index=index, start=start,
+                    weight=trigger.weight, beat_id=beat.beat_id,
+                    terms=trigger.search, source="trigger"))
                 break
         offset += beat.seconds()
     return cues
@@ -274,27 +332,47 @@ def find_cues(plan: ReelPlan, triggers: list[Trigger] | None = None, *,
               min_gap: float = MIN_GAP_SECONDS) -> list[Cue]:
     """The moments that earn a sticker, in timeline order.
 
-    Strongest first, then spread out: the cap is spent on the biggest
-    moments rather than on whichever trigger happened to come first.
+    Two rungs. A beat whose script asked for a sticker gets that one, and
+    is not also scanned for triggers. Every other beat is matched against
+    the trigger map, strongest first, so ``cap`` is spent on the biggest
+    moments rather than on whichever trigger came first.
+
+    ``cap`` binds only the second rung. A script that asks for ten
+    stickers gets ten.
     """
-    if cap <= 0:
-        return []
     triggers = load_triggers() if triggers is None else triggers
     total = sum(beat.seconds() for beat in plan.script.beats)
+    everything = _candidates(plan, triggers, total)
 
-    ranked = sorted(_candidates(plan, triggers, total),
-                    key=lambda c: (-c.weight, c.start))
     chosen: list[Cue] = []
-    for cue in ranked:
-        if len(chosen) >= cap:
-            break
-        # One per beat: two stickers inside one line of narration is the
-        # "sticker on every other word" failure the brief warns about.
+
+    def _fits(cue: Cue) -> bool:
+        # One per beat, and never two on screen together. Both rules are
+        # about what the viewer sees, so both apply across the two rungs
+        # together rather than within each one.
         if any(c.beat_index == cue.beat_index for c in chosen):
-            continue
-        if any(abs(c.start - cue.start) < min_gap for c in chosen):
-            continue
-        chosen.append(cue)
+            return False
+        return not any(abs(c.start - cue.start) < min_gap for c in chosen)
+
+    # The script's own stickers first, in timeline order, uncapped. The cap
+    # exists to stop a word list firing on everything it happens to match;
+    # a model that asked for this beat specifically has already made that
+    # judgement.
+    for cue in sorted((c for c in everything if c.source == "model"),
+                      key=lambda c: c.start):
+        if _fits(cue):
+            chosen.append(cue)
+
+    # Then the trigger map spends what the cap allows, strongest first.
+    taken = 0
+    for cue in sorted((c for c in everything if c.source == "trigger"),
+                      key=lambda c: (-c.weight, c.start)):
+        if taken >= cap:
+            break
+        if _fits(cue):
+            chosen.append(cue)
+            taken += 1
+
     return sorted(chosen, key=lambda c: c.start)
 
 

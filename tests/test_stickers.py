@@ -24,6 +24,7 @@ from PIL import Image
 from engine.assembly import stickers as stk
 from engine.assembly.captions import build_ass, write_ass
 from engine.assembly.render import build_filter_graph, plan_inputs, render
+from engine.contract import StickerCue
 from engine.media.voice import caption_timings
 from tests.factories import make_plan, shipped_settings
 
@@ -170,6 +171,121 @@ def test_a_cue_too_close_to_the_end_is_dropped():
     """The pop needs room; half a sticker at the last frame is a glitch."""
     plan = _timed(beats=1, measured=0.1, captions=["Maut"])
     assert stk.find_cues(plan, cap=3) == []
+
+
+# --- the script asks for its own stickers ---------------------------------
+
+def test_the_script_can_ask_for_a_sticker_the_trigger_map_has_never_heard_of():
+    plan = _timed(beats=4, captions=[
+        "usne din raat mehnat ki code likha",
+        "college ki placement sthiti kharab thi",
+        "woh naukri nahi bas yaadein lekar ja rahi thi",
+        "kabhi manzil nahi milti safar badal deta hai"])
+    plan.script.beats[1].sticker = StickerCue(
+        word="placement", terms=["briefcase", "office"])
+    cue = next(c for c in stk.find_cues(plan) if c.beat_index == 1)
+    assert cue.source == "model"
+    assert cue.terms == ("briefcase", "office")
+    assert cue.beat_id == plan.script.beats[1].beat_id
+    timing = next(t for t in plan.script.beats[1].words
+                  if t.word == "placement")
+    assert cue.start == pytest.approx(
+        plan.script.beats[0].seconds() + timing.start)
+
+
+def test_a_beat_with_no_word_timings_gets_no_sticker_even_when_asked():
+    """The picker lives on the clips screen because a cue cannot exist
+    before the voice stage. A midpoint fallback that fires on a beat with
+    no timings would put stickers on the script screen and break that."""
+    plan = make_plan(beats=3, measured=4.0)
+    for beat in plan.script.beats:
+        assert not beat.words
+    plan.script.beats[0].sticker = StickerCue(word="code", terms=["laptop"])
+    assert stk.find_cues(plan) == []
+
+
+def test_a_word_that_is_not_in_the_caption_lands_at_the_beat_midpoint():
+    plan = _timed(beats=2, measured=4.0,
+                  captions=["ek ladki college gayi", "usne code likha"])
+    plan.script.beats[1].sticker = StickerCue(word="rocket", terms=["rocket"])
+    cue = next(c for c in stk.find_cues(plan) if c.beat_index == 1)
+    assert cue.start == pytest.approx(
+        plan.script.beats[0].seconds() + plan.script.beats[1].seconds() / 2)
+
+
+def test_an_empty_word_is_treated_as_not_found():
+    plan = _timed(beats=2, measured=4.0,
+                  captions=["ek ladki college gayi", "usne code likha"])
+    plan.script.beats[1].sticker = StickerCue(word="   ", terms=["laptop"])
+    cue = next(c for c in stk.find_cues(plan) if c.beat_index == 1)
+    assert cue.start == pytest.approx(
+        plan.script.beats[0].seconds() + plan.script.beats[1].seconds() / 2)
+
+
+def test_a_repeated_word_takes_its_first_occurrence():
+    plan = _timed(beats=1, measured=6.0,
+                  captions=["code likha phir code chala phir code ruka"])
+    plan.script.beats[0].sticker = StickerCue(word="code", terms=["code"])
+    first = plan.script.beats[0].words[0]
+    assert first.word == "code"
+    cue = stk.find_cues(plan)[0]
+    assert cue.start == pytest.approx(first.start)
+
+
+def test_empty_terms_still_produce_a_cue():
+    """No candidates to offer is not the same as no sticker. The emoji
+    still renders."""
+    plan = _timed(beats=2, measured=4.0,
+                  captions=["ek ladki college gayi", "usne code likha"])
+    plan.script.beats[1].sticker = StickerCue(word="code", terms=[])
+    cue = next(c for c in stk.find_cues(plan) if c.beat_index == 1)
+    assert cue.terms == ()
+
+
+def test_the_cap_does_not_bind_the_scripts_own_stickers():
+    """DEFAULT_CAP is three. Ten beats that each ask for one get ten."""
+    captions = [f"beat {n} ka andar code likha gaya tha yahan" for n in range(10)]
+    plan = _timed(beats=10, measured=4.0, captions=captions)
+    for beat in plan.script.beats:
+        beat.sticker = StickerCue(word="code", terms=["laptop"])
+    assert len(stk.find_cues(plan, cap=3)) == 10
+
+
+def test_the_gap_still_holds_between_the_two_rungs():
+    """A model cue and a trigger cue are two things the viewer sees, so
+    the 2.5s gap is about both of them together.
+
+    The script asks for a sticker on the last word of beat 0; the trigger
+    map finds `raat` on the first word of beat 1. They are far closer than
+    the gap, so exactly one survives.
+    """
+    plan = _timed(beats=2, measured=4.0, captions=[
+        "ek ladki thi jisne likha code",
+        "raat bhar wo jaagti rahi thi yahan"])
+    plan.script.beats[0].sticker = StickerCue(word="code", terms=["laptop"])
+
+    # Precondition, asserted rather than assumed: with the gap switched off
+    # both rungs fire and they land closer together than MIN_GAP_SECONDS.
+    # Without this the assertion below would pass just as happily on a plan
+    # that only ever produced one cue.
+    both = stk.find_cues(plan, min_gap=0.0)
+    assert {c.source for c in both} == {"model", "trigger"}
+    starts = sorted(c.start for c in both)
+    assert starts[1] - starts[0] < stk.MIN_GAP_SECONDS
+
+    cues = stk.find_cues(plan)
+    assert [c.source for c in cues] == ["model"], \
+        "the trigger cue is inside the gap and must lose to the script's own"
+
+
+def test_a_beat_that_asks_is_never_also_scanned_for_triggers():
+    """One sticker per beat. The script's request wins its own beat."""
+    plan = _timed(beats=1, measured=5.0,
+                  captions=["raat ke waqt code likha gaya"])
+    plan.script.beats[0].sticker = StickerCue(word="code", terms=["laptop"])
+    cues = stk.find_cues(plan)
+    assert len(cues) == 1
+    assert cues[0].source == "model"
 
 
 # --- placement, against the captions' own numbers --------------------------
