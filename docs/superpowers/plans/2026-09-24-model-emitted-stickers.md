@@ -666,17 +666,29 @@ CREATE TABLE IF NOT EXISTS sticker_choices (
 
 `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists, so `engine.db` still has the old shape. A trigger name cannot be mapped back to a beat, so the five rows are dropped rather than migrated — all five were written today against `test`, `my story` and a junk-topic plan, and the bakes they point at stay in the cache, so re-picking any of them is instant.
 
+The rows are written to a backup file first. A `DROP TABLE` cannot be undone,
+and five rows of someone's afternoon are not worth an irreversible step when
+making it reversible costs three lines.
+
 ```bash
 python - <<'PY'
-import sqlite3
+import json, sqlite3
+from pathlib import Path
 c = sqlite3.connect("engine.db")
+c.row_factory = sqlite3.Row
 cols = {r[1] for r in c.execute("PRAGMA table_info(sticker_choices)")}
-if "beat_id" not in cols:
+if "beat_id" in cols:
+    print("already migrated")
+else:
+    rows = [dict(r) for r in c.execute("SELECT * FROM sticker_choices")]
+    out = Path(".superpowers/sdd/2026-09-24-model-emitted-stickers"
+               "/sticker_choices-backup.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(rows, indent=1), encoding="utf-8")
+    print(f"backed up {len(rows)} rows to {out}")
     c.execute("DROP TABLE sticker_choices")
     c.commit()
     print("dropped; Store.init() will recreate it with the new shape")
-else:
-    print("already migrated")
 PY
 python -c "from engine.store import Store; s=Store('engine.db'); s.init(); print(s.sticker_choices('05f4456d'))"
 ```
@@ -829,6 +841,7 @@ git commit -m "fix: resolve a reel's chosen sticker by beat"
 
 **Files:**
 - Modify: `engine/assembly/sticker_choices.py` (`ensure_baked` at lines 169-190)
+- Modify: `engine/app.py` (the single `ensure_baked` call in `choose_sticker`, around line 2097) — one line, so this task leaves no broken commit behind
 - Test: `tests/test_sticker_choices.py`
 
 **Interfaces:**
@@ -947,14 +960,39 @@ Expected: PASS.
 
 Put the `for style in STYLES:` loop back, run `test_only_the_style_the_beat_needs_is_baked`, record the failure, restore.
 
-- [ ] **Step 6: Run the whole suite and commit**
+- [ ] **Step 6: Update the one caller, so this task leaves nothing broken**
 
-The only caller is `engine/app.py`, which Task 6 updates. Expect the suite to show that call failing on the missing argument if a test covers it — if so, leave it and let Task 6 fix it; note it in the report.
+`style` is required, and `engine/app.py` is the only caller. Updating it here
+rather than leaving it to Task 6 keeps this commit's suite green — a commit
+that ships a known `TypeError` makes its own review unable to tell planned
+breakage from real breakage.
+
+In `choose_sticker` (around line 2097), the call currently reads:
+
+```python
+            sticker_choices_mod.ensure_baked(
+                body.slug, root=cache, size=size, fps=int(settings.fps))
+```
+
+The route still keys on a trigger name at this point and has no beat, so it
+cannot know the beat's role yet — Task 6 gives it one. Until then pass the
+module's own default grade explicitly:
+
+```python
+            sticker_choices_mod.ensure_baked(
+                body.slug, root=cache, size=size, fps=int(settings.fps),
+                style=stickers_mod.DEFAULT_STYLE)
+```
+
+`DEFAULT_STYLE` is `"punchy"`, defined at `engine/assembly/stickers.py:101`.
+Task 6 replaces this line with the beat's real style.
+
+- [ ] **Step 7: Run the whole suite and commit**
 
 ```bash
 python -m pytest tests/ -q
 git status --porcelain
-git add engine/assembly/sticker_choices.py tests/test_sticker_choices.py
+git add engine/assembly/sticker_choices.py engine/app.py tests/test_sticker_choices.py
 git commit -m "perf: bake the one style the beat actually needs"
 ```
 
@@ -1282,15 +1320,38 @@ git commit -m "feat: pick a reel's sticker per beat, and search the catalogue by
 
 - [ ] **Step 1: Pin the asymmetry the prompt's rule exists for**
 
-Add to `tests/test_sticker_catalog.py`. This is the measurement the whole
-rule rests on, and without it the prompt's instruction is just an opinion
-in a text file:
+Create **`tests/test_sticker_vocabulary.py`** — a new file, not an addition
+to `tests/test_sticker_catalog.py`. That file's own docstring says "Nothing
+here talks to the network except `refresh`, and its test writes the sitemap
+itself": it builds a synthetic ten-slug sitemap on purpose, and loading the
+real 5.4MB cache into it would break a property it states about itself.
+This test genuinely needs the real 3,578 icons — ten synthetic slugs cannot
+show that `dream` finds nothing. Note that file imports the module as `cat`.
+
+This is the measurement the prompt's whole rule rests on. Without it, the
+instruction in `script.txt` is just an opinion in a text file.
 
 ```python
-# Measured against the 3,578-icon wired sitemap. Every word on the left is
-# an abstract noun and finds nothing; every word on the right is a thing you
-# could photograph and finds an icon. This is why `sticker.terms` is a list
-# of concrete objects and not one word for the idea.
+"""What the icon catalogue can and cannot be asked for.
+
+Measured against the real cached sitemap, not a synthetic one: the claim is
+about the shape of 3,578 real icon names, and ten fixtures cannot carry it.
+Skips rather than fetches when the cache is cold -- a test that pulls 5.4MB
+is a test people learn to skip.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from engine.assembly import sticker_catalog as cat
+
+# Every word on the left is an abstract noun and finds nothing; every word on
+# the right is a thing you could photograph and finds an icon. This is why
+# `sticker.terms` is a list of concrete objects rather than one word for the
+# idea, and why the prompt forbids abstract nouns.
 ABSTRACT = ("dream", "journey", "memory", "farewell", "goodbye", "job",
             "interview", "resume", "effort", "strength", "college",
             "friendship", "study", "failure", "luggage")
@@ -1299,33 +1360,28 @@ CONCRETE = ("cloud", "star", "road", "train", "photo", "camera",
             "code", "laptop", "heart", "muscle", "sad")
 
 
-def test_the_catalogue_is_named_for_things_not_for_ideas(catalogue):
-    empty = [w for w in ABSTRACT if sticker_catalog.search(w, catalogue)]
-    found = [w for w in CONCRETE if not sticker_catalog.search(w, catalogue)]
-    assert not empty, f"these abstract words unexpectedly hit: {empty}"
-    assert not found, f"these concrete words unexpectedly missed: {found}"
-
-
-def test_a_multi_word_term_finds_nothing(catalogue):
-    """`search` ranks against hyphen-separated slug name parts, which is
-    why `terms` is a list of single words rather than one phrase."""
-    assert sticker_catalog.search("moon night", catalogue) == []
-```
-
-The `catalogue` fixture loads the cached sitemap, skipping when it is
-absent rather than fetching 5.4MB inside a test:
-
-```python
 @pytest.fixture(scope="module")
 def catalogue():
     cache = Path("work/_lordicon")
-    if not (cache / sticker_catalog.CACHE_NAME).exists():
+    if not (cache / cat.CACHE_NAME).exists():
         pytest.skip("catalogue not cached; run sticker_catalog.refresh first")
-    return sticker_catalog.load(cache)
-```
+    slugs = cat.load(cache)
+    assert len(slugs) > 3000, f"only {len(slugs)} slugs; cache looks truncated"
+    return slugs
 
-If `tests/test_sticker_catalog.py` already defines an equivalent fixture,
-reuse it rather than adding a second.
+
+def test_the_catalogue_is_named_for_things_not_for_ideas(catalogue):
+    hit = [w for w in ABSTRACT if cat.search(w, catalogue)]
+    missed = [w for w in CONCRETE if not cat.search(w, catalogue)]
+    assert not hit, f"these abstract words unexpectedly hit: {hit}"
+    assert not missed, f"these concrete words unexpectedly missed: {missed}"
+
+
+def test_a_multi_word_term_finds_nothing(catalogue):
+    """`search` ranks against hyphen-separated slug name parts, which is why
+    `terms` is a list of single words rather than one phrase."""
+    assert cat.search("moon night", catalogue) == []
+```
 
 - [ ] **Step 2: Write the failing prompt test**
 
@@ -1410,21 +1466,40 @@ Expected: PASS, and the formatted tail prints the JSON example with single brace
 
 This is the spec's first named risk and the only way to measure it:
 
+There is no `engine/cli.py`. The entry point is
+`engine.pipeline.plan_stage(topic_raw, client, store, settings)`
+(`engine/pipeline.py:106`), driven by `OmniRouteClient` from
+`engine.omniroute` — the same client `engine/app.py` builds.
+
 ```bash
-python -m engine.cli script --topic "Rajkot ki ek ladki ka Indore mein pehla saal" 2>&1 | tail -5
-python - <<'PY'
+python - <<'MEASURE'
+from engine.config import Settings
+from engine.omniroute import OmniRouteClient
+from engine.pipeline import plan_stage
 from engine.store import Store
 from engine.assembly import stickers as S
-st = Store("engine.db"); st.init()
-row = st.list_plans(limit=1)[0]
-plan = st.get_plan(row["plan_id"])
-asked = [(b.beat_id, b.sticker) for b in plan.script.beats if b.sticker]
+from engine.assembly import sticker_catalog as cat
+
+settings = Settings()
+store = Store(settings.db_path); store.init()
+client = OmniRouteClient(settings=settings)
+plan = plan_stage("Rajkot ki ek ladki ka Indore mein pehla saal",
+                  client, store, settings)
+
+asked = [b for b in plan.script.beats if b.sticker]
 print(f"{len(asked)} of {len(plan.script.beats)} beats asked for a sticker")
-for bid, s in asked:
-    beat = next(b for b in plan.script.beats if b.beat_id == bid)
-    caption = beat.caption_text.lower().split()
-    print(f"  {bid} word={s.word!r} in_caption={S.normalise(s.word) in [S.normalise(w) for w in caption]} terms={s.terms}")
-PY
+try:
+    slugs = cat.load("work/_lordicon")
+except Exception as exc:
+    slugs = ()
+    print("catalogue unavailable, skipping the term check:", exc)
+for b in asked:
+    caption = [S.normalise(w) for w in b.caption_text.split()]
+    in_caption = S.normalise(b.sticker.word) in caption
+    hits = [t for t in b.sticker.terms if slugs and cat.search(t, slugs)]
+    print(f"  {b.beat_id} word={b.sticker.word!r} in_caption={in_caption} "
+          f"terms={b.sticker.terms} terms_that_hit={hits}")
+MEASURE
 ```
 
 Record in the report: how many beats asked, how many named a word that is genuinely in their own caption, and how many of the terms find catalogue icons. If fewer than half the words are in their captions, say so — the prompt needs another pass and that is a finding, not a failure of this task.
@@ -1434,7 +1509,7 @@ Record in the report: how many beats asked, how many named a word that is genuin
 ```bash
 python -m pytest tests/ -q
 git status --porcelain
-git add engine/prompts/script.txt tests/test_prompts.py tests/test_sticker_catalog.py
+git add engine/prompts/script.txt tests/test_prompts.py tests/test_sticker_vocabulary.py
 git commit -m "feat: ask the script for objects, because the icons are named for things"
 ```
 
