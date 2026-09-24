@@ -83,6 +83,28 @@ on_screen_text : OPTIONAL, use on 3-4 beats only, at the biggest moments.
                  2-4 words, SHOUTING CAPS, Roman only. null otherwise.
                  This is a punch card, not a subtitle.
 
+sticker        : OPTIONAL, and worth using wherever a beat has one clear
+                 thing in it. "word" MUST be a word that appears in this
+                 beat's caption_text, spelled exactly as it appears there —
+                 it is what gives the sticker its timing, and a word that is
+                 not in the caption makes the sticker land loosely.
+                 "terms" are 3-4 CONCRETE, PHOTOGRAPHABLE OBJECTS in
+                 English, best first, single words only.
+
+                 The icon library is named for THINGS, NOT IDEAS. These
+                 find nothing: dream, journey, memory, farewell, goodbye,
+                 job, interview, resume, effort, strength, college,
+                 friendship, study, failure, luggage. These find something:
+                 cloud, star, road, train, photo, camera, briefcase,
+                 office, book, graduation, student, code, laptop, heart,
+                 muscle, sad. Never emit an abstract noun — give the object
+                 that stands for it. For a beat about a dream, write
+                 ["cloud", "star", "moon"]. For one about a farewell, write
+                 ["suitcase", "train", "door"].
+
+                 Give at most one sticker per beat, and null on the beats
+                 that have no one clear thing.
+
 visual_prompt  : ENGLISH, for an image model. Describe one photographable
                  frame: subject, light, atmosphere. No text in the image, no
                  faces looking at camera, no collage. Keep a consistent dark
@@ -105,6 +127,8 @@ Return ONLY this JSON:
         "voice_text": "<Devanagari>",
         "caption_text": "<Roman Hinglish>",
         "on_screen_text": "<2-4 CAPS words or null>",
+        "sticker": {{"word": "<a word from caption_text>",
+                     "terms": ["<object>", "<object>", "<object>"]}},
         "visual_prompt": "<English image description>",
         "motion": "zoom_in",
         "transition": "fade"}}
