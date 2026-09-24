@@ -390,3 +390,95 @@ def test_a_correctly_labelled_utf8_body_still_works():
 
     assert _client(handler).chat([{"role": "user", "content": "x"}]).text \
         == DEVANAGARI
+
+
+# --- text the gateway already wrecked before we saw it ---------------------
+#
+# Measured on the wire, 2026-09-24, provider `cw`. Asked for "में", the
+# gateway returned the bytes
+#
+#     c3 a0  c2 a4  c2 ae   ...
+#
+# which is *valid UTF-8* — encoding the string "à¤®", which is itself what
+# `म` (e0 a4 ae) looks like read as cp1252. So the corruption happened
+# inside the gateway: it read Claude's UTF-8 as cp1252 and re-encoded the
+# result. Our client decodes correctly and gets mojibake, because mojibake
+# is what was sent.
+#
+# It cannot be repaired here. Reversing the round trip recovers most
+# characters but not all: cp1252 leaves 0x81, 0x8d, 0x8f, 0x90 and 0x9d
+# undefined, and `्` (U+094D) ends in 0x8d — so every conjunct loses its
+# halant. "सिर्फ" comes back as "सिर�?फ". A script repaired that way
+# would look mended and be full of holes, which is worse than one that
+# never arrived.
+#
+# So this is detected and refused, loudly, before anything is stored.
+
+from engine.omniroute import NoProviderError, looks_double_encoded
+
+
+def test_double_encoded_devanagari_is_recognised():
+    assert looks_double_encoded("1815 à¤®à¥‡à¤‚ 800 à¤²à¥‹à¤—")
+
+
+def test_double_encoded_latin_one_is_recognised():
+    """The same wreck hits accented Latin: this run produced
+    "Julie von GÃ¼ldenstubbe"."""
+    assert looks_double_encoded("Julie von GÃ¼ldenstubbe")
+
+
+def test_the_lossy_case_is_recognised_too():
+    """Where cp1252 had no mapping the character is already gone, so the
+    round trip cannot be run — but the signature is still there."""
+    wrecked = "सिर्फ".encode("utf-8").decode("cp1252", errors="replace")
+    assert "�" in wrecked
+    assert looks_double_encoded(wrecked)
+
+
+def test_clean_devanagari_is_not_flagged():
+    assert not looks_double_encoded("1815 में 800 लोग थे, सिर्फ ज्ञान")
+
+
+def test_clean_english_is_not_flagged():
+    assert not looks_double_encoded(
+        "Jaisalmer se 18 kilometre door, ek gaon jo kabhi nahi basa.")
+
+
+def test_real_accented_text_is_not_flagged():
+    """A genuine umlaut or accent must not read as mojibake — those bytes
+    are not valid UTF-8 on their own, which is what separates the two."""
+    for text in ("Julie von Güldenstubbe", "café", "Ångström", "naïve"):
+        assert not looks_double_encoded(text), text
+
+
+def test_empty_and_ascii_are_not_flagged():
+    for text in ("", "   ", "plain ascii only"):
+        assert not looks_double_encoded(text)
+
+
+def test_a_wrecked_completion_is_refused_instead_of_returned():
+    """Refused at the door. Left to run, this becomes a stored plan, a
+    voice track reading gibberish, and twelve minutes of render."""
+    wrecked = "1815 में 800 लोग".encode("utf-8").decode("cp1252",
+                                                        errors="replace")
+
+    def handler(request):
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": wrecked}}]})
+
+    with pytest.raises(NoProviderError) as caught:
+        _client(handler).chat([{"role": "user", "content": "x"}])
+
+    message = str(caught.value).lower()
+    assert "mojibake" in message or "double" in message or "utf-8" in message
+
+
+def test_a_clean_completion_still_comes_back():
+    clean = "1815 में 800 लोग थे"
+
+    def handler(request):
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": clean}}]})
+
+    assert _client(handler).chat([{"role": "user", "content": "x"}]).text \
+        == clean

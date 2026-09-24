@@ -132,6 +132,49 @@ def _utf8(response: httpx.Response) -> str:
     return response.content.decode("utf-8", errors="replace")
 
 
+# Two-character sequences that only occur when UTF-8 has been read as
+# cp1252: the lead byte of a multi-byte sequence (0xC3/0xC2 for Latin-1,
+# 0xE0 for Devanagari, 0xE2 for punctuation) landing as a printable
+# character followed by its own continuation bytes. Used only for the
+# lossy case, where the round-trip check below cannot run because a
+# character is already gone.
+_MOJIBAKE_MARKS = ("à¤", "à¥", "à¦", "Ã¤", "Ã¼", "Ã©", "Ã¶", "Ã¨", "Ãº",
+                   "Ã±", "â€", "Â ", "Â·")
+
+
+def looks_double_encoded(text: str) -> bool:
+    """Has this text already been through a UTF-8-read-as-cp1252 round trip?
+
+    Measured on the wire on 2026-09-24: asked for "में", the `cw` provider
+    returned the bytes ``c3 a0 c2 a4 c2 ae`` -- valid UTF-8, encoding the
+    string "à¤®", which is what `म` (``e0 a4 ae``) looks like read as
+    cp1252. The gateway read Claude's UTF-8 as cp1252 and re-encoded the
+    result, so the mojibake is in the bytes, not in how we read them.
+
+    The main test is the round trip itself: encode back to cp1252 and read
+    as UTF-8. Real text does not survive that -- a genuine "ü" is 0xFC,
+    which is not valid UTF-8 on its own -- so a clean decode that *changes*
+    the string is close to proof. Text containing characters cp1252 has no
+    room for, which is all real Devanagari, cannot even be encoded and is
+    rejected immediately.
+
+    The round trip cannot run when the upstream decode was lossy: cp1252
+    leaves 0x81, 0x8d, 0x8f, 0x90 and 0x9d undefined, and `्` (U+094D) ends
+    in 0x8d, so every Hindi conjunct arrives already missing its halant.
+    Those are caught by signature instead.
+    """
+    if not text:
+        return False
+    try:
+        repaired = text.encode("cp1252").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        # Either the text holds characters cp1252 cannot represent (real
+        # Devanagari, or the U+FFFD of a lossy decode), or the bytes are
+        # not UTF-8. Only the lossy case is still suspect.
+        return "\ufffd" in text and any(m in text for m in _MOJIBAKE_MARKS)
+    return repaired != text
+
+
 def _decode_completion(raw: str) -> dict:
     """Read a completion body that may be JSON or an SSE stream.
 
@@ -314,6 +357,23 @@ class OmniRouteClient:
         body = _decode_completion(_utf8(response))
         text = (body.get("choices") or [{}])[0].get(
             "message", {}).get("content") or ""
+        # Refused here rather than stored. Left to run, wrecked text
+        # becomes a saved plan, a voice track reading gibberish and twelve
+        # minutes of render before anyone sees it -- and it cannot be
+        # repaired afterwards, because the halant of every conjunct is
+        # already gone (see looks_double_encoded).
+        if looks_double_encoded(text):
+            raise NoProviderError(
+                f"the gateway returned text that had already been read as "
+                f"cp1252 and re-encoded, so every non-ASCII character in "
+                f"it is mojibake -- \"में\" arrives as \"à¤®à¥‡à¤‚\". "
+                f"This happens inside OmniRoute, not here, and it cannot "
+                f"be undone: cp1252 has no slot for 0x8D, which is the "
+                f"last byte of the halant in every Hindi conjunct. "
+                f"Refused rather than saved. Provider was "
+                f"{self.calls[-1].provider if self.calls else 'unknown'!r} "
+                f"-- try a different one.",
+                status=200)
         data = extract_json(text) if want_json else None
         return ChatResult(text=text, cost=cost, data=data, raw=body)
 
