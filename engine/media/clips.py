@@ -16,6 +16,7 @@ import math
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import NamedTuple
 
 from engine.contract import Beat, Clip, ReelPlan
 from engine.media.images import generate_beat_image
@@ -67,6 +68,56 @@ def slot_durations(total: float, count: int) -> list[float]:
     slots = [base] * (count - 1)
     # Last slot: total minus sum of others ensures exact sum by construction.
     return slots + [total - sum(slots)]
+
+
+class SlotWords(NamedTuple):
+    """One clip slot and the words that are on screen while it plays."""
+
+    slot: int
+    start: float
+    end: float
+    words: str
+
+
+def slot_words(beat: Beat) -> list[SlotWords]:
+    """Which words of the beat each of its clip slots has to carry.
+
+    A beat is one line of narration split across several clips, and until
+    now nothing said which part of the line a given slot covers. Picking
+    footage for slot 0 of "kamare me ek kursi, aur kursi par mera naam"
+    means knowing slot 0 is the chair and not the name.
+
+    Both halves already exist: ``slot_durations`` owns the spans and
+    ``beat.words`` owns the per-word timings written at VOICE. This is the
+    join.
+
+    A word straddling a cut is put in the slot holding the larger share of
+    it, so every word appears exactly once. Listing it in both is more
+    literally true -- it really is on screen across the cut -- but someone
+    scanning for "which slot says kursi" wants one answer.
+
+    Before VOICE ``beat.words`` is empty and every slot comes back empty
+    rather than guessed: the clip count follows the *measured* length, so
+    an estimate would assign words to slots that may not survive the take.
+    """
+    total = beat.seconds()
+    spans = slot_durations(total, clip_count(total))
+    bounds, cursor = [], 0.0
+    for span in spans:
+        bounds.append((cursor, cursor + span))
+        cursor += span
+
+    buckets: list[list[str]] = [[] for _ in bounds]
+    for timing in beat.words:
+        shares = [min(timing.end, hi) - max(timing.start, lo)
+                  for lo, hi in bounds]
+        # max() picks the earliest slot on a tie, and a word entirely
+        # inside a pause between slots has no positive share at all -- it
+        # still belongs to the nearest slot it touches, which is that one.
+        buckets[shares.index(max(shares))].append(timing.word)
+
+    return [SlotWords(i, lo, hi, " ".join(words))
+            for i, ((lo, hi), words) in enumerate(zip(bounds, buckets))]
 
 
 # Characters a beat id may contribute to a directory name. Everything else
@@ -183,6 +234,7 @@ def beat_clips(agent, beat: Beat, target_dir: str | Path,
         clips.append(Clip(
             path=str(match.download_path),
             query=match.query.search_query,
+            shot_intent=getattr(match.query, "shot_intent", None) or None,
             provider="pexels",
             duration=duration,
             source_url=match.video.url,

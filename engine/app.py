@@ -70,6 +70,7 @@ from engine.contract import (Beat, Claim, CleanupInfo, Clip, Metadata, Motion,
                              Role, Transition)
 from engine.gates.qc import pre_render_range
 from engine.media import clip_search as clip_search_mod
+from engine.media.clips import clip_count, slot_words
 from engine.media.align import build_aligner
 from engine.media.voice import (MIN_UPLOAD_SECONDS, UPLOAD_ENGINE,
                                 UploadRejected, apply_beat_audio,
@@ -1171,6 +1172,11 @@ def create_app(db_path: str | Path | None = None,
                 "beat_id": beat.beat_id,
                 "role": beat.role,
                 "seconds": round(beat.seconds(), 2),
+                # How many clips this length buys: ceil(seconds / 2.5).
+                # Decided here, one gate before any footage is fetched,
+                # and still changeable here -- re-speaking a beat half a
+                # second shorter can drop it a whole slot.
+                "clips": clip_count(beat.seconds()),
                 "engine": beat.voice_engine,
                 "replaced": replaced,
                 "word_timing_source": beat.word_timing_source,
@@ -1210,6 +1216,8 @@ def create_app(db_path: str | Path | None = None,
             "awaiting_review": status == VOICE_REVIEW_STATUS,
             "total": len(rows),
             "narration_seconds": round(narration, 2),
+            # Pexels requests releasing this gate commits to.
+            "clips_total": sum(row["clips"] for row in rows),
             "engines": voice_engines(plan),
             # Both windows, because they are different questions: the gate
             # decides whether the run continues at all, QC decides whether
@@ -1352,6 +1360,11 @@ def create_app(db_path: str | Path | None = None,
             "engine": UPLOAD_ENGINE,
             "seconds": round(seconds, 2),
             "was_seconds": round(before, 2),
+            # Recomputed here rather than in the panel so the count has
+            # one definition: a beat that got shorter can need one clip
+            # fewer, and a stale badge is exactly what showing it at this
+            # gate was meant to prevent.
+            "clips": clip_count(seconds),
             "word_timing_source": beat.word_timing_source,
             "bytes": written,
             # The totals, recomputed. Replacing one beat moves the whole
@@ -1539,6 +1552,7 @@ def create_app(db_path: str | Path | None = None,
             "caption_text": beat.caption_text,
             "seconds": round(beat.seconds(), 2),
             "was_seconds": round(was_seconds, 2),
+            "clips": clip_count(beat.seconds()),
             "word_timing_source": beat.word_timing_source,
             "narration_seconds": round(narration, 2),
             "in_gate": gate_min <= narration <= gate_max,
@@ -1648,6 +1662,11 @@ def create_app(db_path: str | Path | None = None,
             "engine": UPLOAD_ENGINE,
             "seconds": round(seconds, 2),
             "was_seconds": round(before, 2),
+            # Recomputed here rather than in the panel so the count has
+            # one definition: a beat that got shorter can need one clip
+            # fewer, and a stale badge is exactly what showing it at this
+            # gate was meant to prevent.
+            "clips": clip_count(seconds),
             "word_timing_source": beat.word_timing_source,
             "narration_seconds": round(narration, 2),
             "in_gate": gate_min <= narration <= gate_max,
@@ -1785,8 +1804,12 @@ def create_app(db_path: str | Path | None = None,
 
         rows: list[dict] = []
         for beat in plan.script.beats:
+            # Which words each slot has to carry. Computed per beat, not
+            # per clip, because it is one division of one line.
+            spans = {row.slot: row for row in slot_words(beat)}
             for slot, clip in enumerate(beat.clips):
                 path = Path(clip.path) if clip.path else None
+                span = spans.get(slot)
                 rows.append({
                     "beat_id": beat.beat_id,
                     "slot": slot,
@@ -1795,6 +1818,12 @@ def create_app(db_path: str | Path | None = None,
                     # Why this clip was chosen. Without it an irrelevant
                     # clip is a mystery; with it, it is usually obvious.
                     "query": clip.query,
+                    # What this slot was asked for, and what the beat as a
+                    # whole was asked for. The second is the same on every
+                    # card of a beat, which is why showing only it made
+                    # three different slots look like one repeated
+                    # request.
+                    "shot_intent": clip.shot_intent,
                     "visual_prompt": beat.visual_prompt,
                     # The line the footage has to carry. The scene
                     # description says what to show; this is what is
@@ -1804,6 +1833,16 @@ def create_app(db_path: str | Path | None = None,
                     # drifted from the line it was derived from.
                     "caption_text": beat.caption_text,
                     "voice_text": beat.voice_text,
+                    # ...and which words of it land on THIS slot. The
+                    # board showed the same beat-wide text on every card
+                    # of a beat, so three slots of one line looked like
+                    # three requests for the same picture. They are not:
+                    # "kamare me ek kursi" and "mera naam likha tha" want
+                    # different footage, and this is the only field that
+                    # says so.
+                    "slot_text": span.words if span else "",
+                    "slot_start": round(span.start, 3) if span else 0.0,
+                    "slot_end": round(span.end, 3) if span else 0.0,
                     "motion": beat.motion,
                     "role": beat.role,
                     "source_url": clip.source_url,

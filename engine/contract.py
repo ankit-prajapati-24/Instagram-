@@ -140,6 +140,13 @@ class Clip(Coercing):
     query: str
     provider: str
     duration: float
+    # What this slot was asked to show, as opposed to ``query``, which is
+    # what was typed into Pexels to find it. The generator writes one per
+    # clip; the beat's own ``visual_prompt`` is one for the whole beat, so
+    # this is the only field that distinguishes slot 0 from slot 1. None
+    # on a slot no agent filled -- a generated still was drawn to no
+    # intent, and borrowing the neighbour's would caption it wrongly.
+    shot_intent: str | None = None
     source_url: str | None = None
     pexels_id: int | None = None
     author: str | None = None

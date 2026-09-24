@@ -249,8 +249,19 @@
     font-size: 11.5px; color: var(--muted); line-height: 1.35;
     border-left: 2px solid var(--rule); padding-left: 6px;
   }
-  .clipcard .qlabel, .clipcard .scenelabel {
+  .clipcard .qlabel, .clipcard .scenelabel, .clipcard .wordslabel {
     font-size: 10.5px; color: #5f7278;
+  }
+  /* The words this one clip plays under. Set in the serif at the card's
+     largest size because it is the thing the choice is made against:
+     everything else on the card describes the clip, and this describes
+     the moment the clip has to fill. */
+  .clipcard .words {
+    font-family: var(--serif); font-size: 13.5px; line-height: 1.4;
+    color: var(--paper); word-break: break-word;
+  }
+  .clipcard .words:empty::after {
+    content: "not spoken yet"; font-style: italic; color: var(--muted);
   }
 
   /* --- the lineup ------------------------------------------------------
@@ -305,6 +316,16 @@
   .lineup .asked {
     font-size: 13.5px; color: var(--muted); line-height: 1.5;
     max-width: 62ch; margin: 0 0 16px;
+  }
+  /* The whole line is shown and this slot's share of it is lit, rather
+     than showing that share alone: which words fall here is only
+     meaningful against the words that fall either side, and a lineup
+     opened on slot 1 of 3 otherwise gives no clue where in the sentence
+     it sits. Dim rather than hide the rest -- it is context, not noise. */
+  .lineup .spoken { color: var(--muted); }
+  .lineup .spoken mark {
+    background: none; color: var(--paper);
+    box-shadow: inset 0 -2px 0 var(--gold);
   }
   /* The fade is the scroll affordance: with six 196px tiles the sixth is
      always half-cut, and a hard edge reads as a broken layout rather than
@@ -453,6 +474,7 @@
   }
   .beatrow .vhead b { color: var(--paper); font-weight: 600; }
   .beatrow .vhead .eng { color: var(--muted); }
+  .beatrow .vhead .slots { color: var(--muted); }
   .beatrow .vhead .eng.upload { color: var(--moss); }
   .beatrow .vhead .eng.weak { color: var(--gold); }
   .beatrow .vtext { display: flex; flex-direction: column; gap: 4px; }
@@ -1140,6 +1162,10 @@ function voiceLengthLine(data) {
     bar.textContent = `${secs}s of narration — inside the `
       + `${data.duration_min}-${data.duration_max}s publishing window.`;
   }
+  // Said here because releasing this gate is what spends it: one Pexels
+  // request per clip, and the count follows the measured length, which
+  // this gate can still change.
+  bar.textContent += ` Needs ${data.clips_total} clips.`;
 }
 
 /* loudnorm reports "-inf" for anything under its ~400ms gating block, and
@@ -1212,6 +1238,19 @@ function renderCleanupBlock(b) {
          id="vcleannote-${esc(b.beat_id)}">${esc(state.text)}</div>`;
 }
 
+/* The clip count after a beat's length changed. The server sends the
+   new number rather than the panel deriving it, so the 2.5s-per-clip
+   rule stays in one place; the total is summed from the rows because
+   only this one moved. */
+function setSlots(beat, clips) {
+  if (clips === undefined || clips === null) return;
+  const row = VOICE.beats.find((b) => b.beat_id === beat);
+  if (row) row.clips = clips;
+  const badge = $("vslots-" + beat);
+  if (badge) badge.textContent = `${clips} clip${clips === 1 ? "" : "s"}`;
+  VOICE.clips_total = VOICE.beats.reduce((n, b) => n + (b.clips || 0), 0);
+}
+
 function beatRowHtml(b) {
   const weak = b.engine && b.engine !== "piper" && b.engine !== "upload";
   return `
@@ -1220,6 +1259,9 @@ function beatRowHtml(b) {
       <div class="vhead">
         <b>${esc(b.beat_id)} · ${esc(b.role)}</b>
         <span id="vsecs-${esc(b.beat_id)}">${b.seconds.toFixed(2)}s</span>
+        <span class="slots" id="vslots-${esc(b.beat_id)}"
+              title="One clip per 2.5s. Re-speaking this beat can change it."
+              >${b.clips} clip${b.clips === 1 ? "" : "s"}</span>
         <span class="eng ${b.replaced ? "upload" : (weak ? "weak" : "")}"
               id="veng-${esc(b.beat_id)}">${esc(b.engine || "not spoken")}</span>
       </div>
@@ -1338,6 +1380,7 @@ async function toggleCleanup(beat, checkbox) {
     said.textContent = (data.cleaned ? "cleaned up — " : "raw level used — ")
       + `${data.seconds.toFixed(2)}s (was ${data.was_seconds.toFixed(2)}s)`;
     $("vsecs-" + beat).textContent = data.seconds.toFixed(2) + "s";
+    setSlots(beat, data.clips);
     /* Bust the browser's cache: the audio URL has not changed. */
     $("vaud-" + beat).src = `${data.audio}?t=${Date.now()}`;
 
@@ -1425,6 +1468,7 @@ async function respeakBeat(beat, button) {
       ? `${data.seconds.toFixed(2)}s (was ${data.was_seconds.toFixed(2)}s)`
       : `caption re-timed across ${data.seconds.toFixed(2)}s`;
     $("vsecs-" + beat).textContent = data.seconds.toFixed(2) + "s";
+    setSlots(beat, data.clips);
     $("veng-" + beat).textContent = data.engine;
     if (data.respoken) {
       /* Only a real re-speak changes what this row's engine badge and
@@ -1507,6 +1551,7 @@ async function replaceVoice(input) {
     $("vrow-" + beat).classList.add("swapped");
     $("vrow-" + beat).classList.remove("gone");
     $("vsecs-" + beat).textContent = data.seconds.toFixed(2) + "s";
+    setSlots(beat, data.clips);
     $("veng-" + beat).textContent = data.engine;
     $("veng-" + beat).className = "eng upload";
     /* Bust the browser's cache: the audio URL has not changed. */
@@ -1628,11 +1673,15 @@ function renderReview() {
         <b>${esc(c.beat_id)} · slot ${c.slot}</b>
         <span>${c.duration.toFixed(2)}s</span>
       </div>
+      <div class="wordslabel">Plays under</div>
+      <div class="words">${esc(c.slot_text)}</div>
       <div class="prov ${c.replaced ? "upload" : (weak ? "weak" : "")}">
         ${esc(c.provider)}${c.kind === "image" ? " · still" : " · video"}
       </div>
-      <div class="scenelabel">Scene asked for</div>
-      <div class="scene">${esc(c.visual_prompt) || "<i>none recorded</i>"}</div>
+      <div class="scenelabel">${c.shot_intent ? "Shot asked for"
+                               : "Beat's scene"}</div>
+      <div class="scene">${esc(c.shot_intent || c.visual_prompt)
+                          || "<i>none recorded</i>"}</div>
       <div class="qlabel">Searched for</div>
       <div class="q">${esc(c.query) || "<i>no query recorded</i>"}</div>
       <button class="opts" data-beat="${esc(c.beat_id)}"
@@ -1675,6 +1724,34 @@ function renderReview() {
 let LINEUP = null;
 let LINEUP_RETURN = null;
 
+/* The beat's whole line with this slot's words lit.
+
+   Word timings are whitespace tokens of caption_text (distribute_words
+   splits on \s+ and keeps punctuation), so the server's slot_text is
+   always a contiguous run of those tokens and its position is the sum of
+   the word counts of the earlier slots. That is why this can highlight by
+   counting instead of by searching for the text -- a beat that repeats a
+   phrase ("kursi ... kursi") would light the wrong copy if we searched. */
+function spokenHtml(row) {
+  const line = row.caption_text || row.voice_text || "";
+  const tokens = line.split(/\s+/).filter(Boolean);
+  const mine = (row.slot_text || "").split(/\s+/).filter(Boolean);
+  if (!tokens.length) return "";
+  if (!mine.length) return esc(line);
+
+  const earlier = REVIEW.clips
+    .filter((c) => c.beat_id === row.beat_id && c.slot < row.slot)
+    .reduce((n, c) => n + (c.slot_text || "").split(/\s+/)
+                            .filter(Boolean).length, 0);
+  const upto = earlier + mine.length;
+  // Falls back to the plain line if the counts disagree with the text,
+  // which would mean the caption was edited after VOICE measured it.
+  if (upto > tokens.length) return esc(line);
+
+  return tokens.map((word, i) => (i >= earlier && i < upto)
+    ? `<mark>${esc(word)}</mark>` : esc(word)).join(" ");
+}
+
 function openLineup(beat, slot) {
   const row = REVIEW && REVIEW.clips.find(
     (c) => c.beat_id === beat && String(c.slot) === String(slot));
@@ -1684,12 +1761,18 @@ function openLineup(beat, slot) {
 
   $("lineup-slot").textContent = `${row.beat_id} · slot ${row.slot}`;
   $("lineup-fixed").textContent =
-    `${row.duration.toFixed(2)}s, fixed by the narration`;
-  $("lineup-spoken").textContent =
-    row.caption_text || row.voice_text || "";
-  $("lineup-asked").textContent = row.visual_prompt
-    ? `Scene asked for: ${row.visual_prompt}`
-    : "This beat recorded no scene description.";
+    `${row.duration.toFixed(2)}s, fixed by the narration`
+    + ` · ${row.slot_start.toFixed(1)}\u2013${row.slot_end.toFixed(1)}s`
+    + ` into the beat`;
+  $("lineup-spoken").innerHTML = spokenHtml(row);
+  // The slot's own intent when the generator wrote one, the beat's
+  // scene otherwise -- the second is shared by every slot of the beat,
+  // so saying which is which matters.
+  $("lineup-asked").textContent = row.shot_intent
+    ? `Shot asked for: ${row.shot_intent}`
+    : row.visual_prompt
+      ? `Beat's scene: ${row.visual_prompt}`
+      : "This beat recorded no scene description.";
   $("lineup-was").textContent = row.query ? `Searched for: ${row.query}` : "";
   $("lineup-q").value = row.query || "";
   $("lineup-said").className = "said";
