@@ -297,6 +297,24 @@ RAW_UPLOAD_SUFFIX = {
 }
 
 
+# What the player is told a clip is. Guessing from the extension is what
+# ``mimetypes`` would do anyway, but its table is a system file that
+# differs between machines -- and a clip served as
+# ``application/octet-stream`` simply will not play. These are the
+# extensions this pipeline actually writes.
+CLIP_MEDIA_TYPES = {
+    ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+    ".m4v": "video/mp4",
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+
+
+def _clip_media_type(path: Path) -> str:
+    return CLIP_MEDIA_TYPES.get(path.suffix.lower(),
+                                "application/octet-stream")
+
+
 def _sniff_audio(head: bytes) -> str | None:
     """The container these bytes claim to be, or ``None``.
 
@@ -1778,6 +1796,10 @@ def create_app(db_path: str | Path | None = None,
                              f"?slot={slot}",
                     "replace": f"/api/plan/{plan_id}/clip/"
                                f"{beat.beat_id}/{slot}",
+                    # The clip itself, not a frame of it. A poster is the
+                    # first frame, and stock footage routinely opens on
+                    # something unlike the rest of the shot.
+                    "play": f"/api/clip/{plan_id}/{beat.beat_id}/{slot}",
                 })
 
         return {
@@ -2115,6 +2137,49 @@ def create_app(db_path: str | Path | None = None,
                 target.parents:
             raise HTTPException(404, "not found")
         return FileResponse(target)
+
+    @app.get("/api/clip/{plan_id}/{beat_id}/{slot}")
+    def clip_file(plan_id: str, beat_id: str, slot: int) -> FileResponse:
+        """One slot's footage, playable.
+
+        The review board used to show a poster frame per clip, and a
+        poster is the first frame -- which for stock footage is often a
+        title card, a hand entering shot, or a second of black. The gate
+        exists to catch clips that do not match the story, and it cannot
+        do that from a still.
+
+        ``FileResponse`` answers ``Range`` with a ``206``, so a browser
+        can scrub without pulling the whole file first; on a 20 MB clip
+        that is the difference between a player and a hang.
+
+        Deliberately not gated on the review status. The same board is
+        readable after a plan has moved on, and a player that stopped
+        working at that moment would be a surprise rather than a
+        safeguard -- nothing here mutates anything.
+
+        Every path is server-built today, but this is keyed by URL input
+        and reads bytes off disk, so it gets the containment check
+        ``/media``, ``/api/frame`` and ``/api/audio`` already get.
+        """
+        plan = store.get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(404, "no such plan")
+        beat = next((b for b in plan.script.beats if b.beat_id == beat_id),
+                    None)
+        if beat is None:
+            raise HTTPException(404, f"no such beat: {beat_id}")
+        if not 0 <= slot < len(beat.clips):
+            raise HTTPException(
+                404, f"beat {beat_id!r} has {len(beat.clips)} clip slots, "
+                     f"so there is no slot {slot}")
+
+        path = Path(beat.clips[slot].path or "")
+        roots = [Path(settings.work_dir), Path(settings.out_dir)]
+        if not path.is_file() or not _under_roots(path, roots):
+            raise HTTPException(
+                404, f"slot {slot} of beat {beat_id!r} has no usable file "
+                     f"on disk")
+        return FileResponse(path, media_type=_clip_media_type(path))
 
     @app.get("/api/frame/{plan_id}/{beat_id}")
     def frame(plan_id: str, beat_id: str,

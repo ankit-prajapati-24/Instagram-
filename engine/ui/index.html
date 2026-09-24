@@ -216,8 +216,29 @@
   /* clip review: one card per clip, not per beat */
   .clipgrid {
     display: grid; gap: 12px; margin-top: 14px;
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    /* 150px was too small to judge footage by -- the whole point of this
+       board is deciding whether a shot matches, and at thumbnail size
+       every grey-brown clip looks like every other one. */
+    grid-template-columns: repeat(auto-fill, minmax(216px, 1fr));
   }
+  /* The poster and the video occupy the same box, so swapping one for the
+     other does not reflow the grid mid-review. */
+  .clipcard .screen {
+    position: relative; width: 100%; aspect-ratio: 9 / 16;
+    background: #0b0f10; border: 1px solid var(--rule); cursor: pointer;
+  }
+  .clipcard .screen > img, .clipcard .screen > video {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%; object-fit: cover; display: block;
+  }
+  .clipcard .screen .play {
+    position: absolute; inset: 0; display: flex;
+    align-items: center; justify-content: center;
+    font-size: 30px; color: #fff; text-shadow: 0 1px 6px #000;
+    opacity: 0.82; pointer-events: none;
+  }
+  .clipcard .screen:hover .play { opacity: 1; }
+  .clipcard .screen.playing .play { display: none; }
   .clipcard {
     border: 1px solid var(--rule); background: var(--card); padding: 8px;
     display: flex; flex-direction: column; gap: 6px;
@@ -1407,8 +1428,13 @@ function renderReview() {
     return `
     <figure class="clipcard ${c.replaced ? "swapped" : ""}
                             ${c.exists ? "" : "gone"}" id="card-${id}">
-      <img id="thumb-${id}" alt="${esc(c.beat_id)} slot ${c.slot}"
-           loading="lazy" src="${c.thumb}">
+      <div class="screen" id="screen-${id}" data-id="${id}"
+           data-play="${c.play}" data-kind="${c.kind}"
+           title="${c.kind === "video" ? "Play this clip" : "A still"}">
+        <img id="thumb-${id}" alt="${esc(c.beat_id)} slot ${c.slot}"
+             loading="lazy" src="${c.thumb}">
+        ${c.kind === "video" && c.exists ? '<div class="play">&#9654;</div>' : ""}
+      </div>
       <div class="slotline">
         <b>${esc(c.beat_id)} · slot ${c.slot}</b>
         <span>${c.duration.toFixed(2)}s</span>
@@ -1429,7 +1455,48 @@ function renderReview() {
   $("clipgrid").querySelectorAll("input[type=file]").forEach((input) => {
     input.onchange = () => replaceClip(input);
   });
+  $("clipgrid").querySelectorAll(".screen").forEach((screen) => {
+    if (screen.dataset.kind !== "video") return;
+    screen.onclick = () => playClip(screen);
+  });
   show("s-review");
+}
+
+/* One clip at a time, muted, loaded only when asked for.
+
+   Not a style choice on either count. Twenty-two HD clips all decoding at
+   once is enough to stall the tab, so a card holds a poster until it is
+   clicked and the video element is built then. And the render drops every
+   clip's own audio -- what you would hear here is sound that will never
+   be in the video, which would be worse than silence. */
+let PLAYING = null;
+
+function stopPlaying() {
+  if (!PLAYING) return;
+  const video = PLAYING.querySelector("video");
+  if (video) { video.pause(); video.remove(); }
+  PLAYING.classList.remove("playing");
+  PLAYING = null;
+}
+
+function playClip(screen) {
+  if (screen.classList.contains("playing")) { stopPlaying(); return; }
+  stopPlaying();
+  const video = document.createElement("video");
+  video.src = screen.dataset.play;
+  video.muted = true;
+  video.loop = true;
+  video.controls = true;
+  video.playsInline = true;
+  video.preload = "metadata";
+  video.onerror = () => {
+    stopPlaying();
+    banner("That clip would not play — it may be missing on disk.", true);
+  };
+  screen.appendChild(video);
+  screen.classList.add("playing");
+  PLAYING = screen;
+  video.play().catch(() => { /* a refused autoplay still shows controls */ });
 }
 
 async function replaceClip(input) {
@@ -1467,8 +1534,11 @@ async function replaceClip(input) {
     said.textContent = `${data.kind} · ${data.duration.toFixed(2)}s slot`;
     $("card-" + id).classList.add("swapped");
     $("card-" + id).classList.remove("gone");
-    /* Bust the browser's cache: the thumbnail URL has not changed. */
+    /* Bust the browser's cache: neither URL has changed. */
+    if (PLAYING === $("screen-" + id)) stopPlaying();
     $("thumb-" + id).src = `${data.thumb}&t=${Date.now()}`;
+    const screen = $("screen-" + id);
+    if (screen) screen.dataset.kind = data.kind;
     const row = REVIEW.clips.find(
       (c) => c.beat_id === beat && String(c.slot) === String(slot));
     if (row) { row.provider = data.provider; row.replaced = true; }
