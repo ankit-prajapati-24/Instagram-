@@ -289,3 +289,104 @@ def test_sse_message_shaped_chunks_are_handled_too():
         return httpx.Response(200, content=body.encode())
 
     assert _client(handler).chat([]).text == "done"
+
+
+# --- what the server says the bytes are, versus what they are --------------
+#
+# Found on a real run, 2026-09-24: a whole plan came back from the `cw`
+# (claude-web) provider with every Devanagari character replaced by
+# mojibake -- "1815 में 800 लोग थे" stored as
+# "1815 à¤®à¥‡à¤‚ 800 à¤²à¥‹à¤— à¤¥à¥‡". The corruption was already in the
+# database, so it happened on the way in, and it was lossy: `्` (U+094D,
+# UTF-8 E0 A5 8D) came back as "à¥�" because 0x8D is an undefined slot
+# in cp1252. Round-tripping the original through
+# `.encode("utf-8").decode("cp1252", errors="replace")` reproduces the
+# stored string exactly, character for character.
+#
+# httpx only decodes as cp1252 when the response's Content-Type says so --
+# with no charset it defaults to utf-8. So the gateway declared a charset
+# its bytes were not in.
+#
+# Both payloads this client reads with `.text` are UTF-8 by specification:
+# RFC 8259 requires JSON exchanged between systems to be UTF-8, and the SSE
+# spec requires event streams to be UTF-8 as well. A server claiming
+# otherwise about such a body is wrong, and honouring the claim turns a
+# wrong header into destroyed text. So the declared charset is ignored for
+# these two.
+#
+# `.json()` was never affected -- httpx hands the raw bytes to json.loads,
+# which assumes UTF-8 -- which is why the model listing looked fine
+# throughout and only the completions were wrecked.
+
+DEVANAGARI = "1815 में 800 लोग थे, 1890 में सिर्फ 37"
+
+
+def _mislabelled(body: str, content_type: str) -> httpx.Response:
+    """A response whose bytes are UTF-8 and whose header disagrees."""
+    return httpx.Response(200, content=body.encode("utf-8"),
+                          headers={"content-type": content_type})
+
+
+@pytest.mark.parametrize("content_type", [
+    "application/json; charset=windows-1252",
+    "application/json; charset=iso-8859-1",
+    "application/json; charset=us-ascii",
+])
+def test_a_json_body_is_read_as_utf8_whatever_the_header_claims(content_type):
+    def handler(request):
+        return _mislabelled(
+            json.dumps({"choices": [{"message": {"content": DEVANAGARI}}]},
+                       ensure_ascii=False),
+            content_type)
+
+    assert _client(handler).chat([{"role": "user", "content": "x"}]).text \
+        == DEVANAGARI
+
+
+@pytest.mark.parametrize("content_type", [
+    "text/event-stream; charset=windows-1252",
+    "text/event-stream; charset=iso-8859-1",
+])
+def test_an_sse_body_is_read_as_utf8_whatever_the_header_claims(content_type):
+    def handler(request):
+        chunk = json.dumps({"choices": [{"delta": {"content": DEVANAGARI}}]},
+                           ensure_ascii=False)
+        return _mislabelled(f"data: {chunk}\n\ndata: [DONE]\n\n",
+                            content_type)
+
+    assert _client(handler).chat([{"role": "user", "content": "x"}]).text \
+        == DEVANAGARI
+
+
+def test_the_exact_corruption_seen_on_the_real_run_no_longer_happens():
+    """Pinned to the real failure, not an invented one.
+
+    The stored text is what `cp1252` with `errors="replace"` does to this
+    signature, including the U+FFFD where the virama's third byte fell in
+    an undefined slot. If the client ever honours a declared charset again,
+    this is the string it will produce.
+    """
+    wrecked = DEVANAGARI.encode("utf-8").decode("cp1252", errors="replace")
+    assert "�" in wrecked, "the fixture must reproduce the lossy decode"
+
+    def handler(request):
+        return _mislabelled(
+            json.dumps({"choices": [{"message": {"content": DEVANAGARI}}]},
+                       ensure_ascii=False),
+            "application/json; charset=cp1252")
+
+    got = _client(handler).chat([{"role": "user", "content": "x"}]).text
+    assert got == DEVANAGARI
+    assert got != wrecked
+    assert "�" not in got
+
+
+def test_a_correctly_labelled_utf8_body_still_works():
+    def handler(request):
+        return _mislabelled(
+            json.dumps({"choices": [{"message": {"content": DEVANAGARI}}]},
+                       ensure_ascii=False),
+            "application/json; charset=utf-8")
+
+    assert _client(handler).chat([{"role": "user", "content": "x"}]).text \
+        == DEVANAGARI

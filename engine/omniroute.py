@@ -108,6 +108,30 @@ class ModerationResult:
         return self.unavailable is None
 
 
+def _utf8(response: httpx.Response) -> str:
+    """The body as UTF-8, whatever the server claimed the charset was.
+
+    Both payloads this client reads as text -- a JSON completion and an SSE
+    stream -- are UTF-8 by specification: RFC 8259 requires JSON exchanged
+    between systems to be UTF-8, and the SSE spec requires the same of an
+    event stream. A gateway that declares windows-1252 on such a body is
+    simply wrong about its own bytes.
+
+    Believing it is not a cosmetic error, it is destruction. On 2026-09-24
+    a whole plan came back from the `cw` provider with every Devanagari
+    character wrecked -- "1815 में 800 लोग थे" stored as
+    "1815 à¤®à¥‡à¤‚ 800 à¤²à¥‹à¤— à¤¥à¥‡" -- and it was unrecoverable,
+    because `्` (U+094D, UTF-8 E0 A5 8D) decodes to U+FFFD in cp1252 where
+    0x8D is an undefined slot. Re-encoding cannot bring back a byte that
+    was replaced.
+
+    ``.json()`` was never affected: httpx hands the raw bytes to
+    ``json.loads``, which assumes UTF-8. That is why the model listing
+    looked healthy for weeks while every completion was being mangled.
+    """
+    return response.content.decode("utf-8", errors="replace")
+
+
 def _decode_completion(raw: str) -> dict:
     """Read a completion body that may be JSON or an SSE stream.
 
@@ -233,7 +257,7 @@ class OmniRouteClient:
             except httpx.HTTPError as exc:
                 last = exc
             else:
-                body = response.text[:600]
+                body = _utf8(response)[:600]
                 # Never burn retries on a missing provider key.
                 if response.status_code >= 400 and self._is_no_provider(body):
                     raise NoProviderError(
@@ -281,13 +305,13 @@ class OmniRouteClient:
         # An empty 200 is what a provider-less gateway returns for small
         # requests. Name it here, or it surfaces later as a confusing
         # "no JSON found in response: ''" from the agent layer.
-        if not response.text.strip():
+        if not _utf8(response).strip():
             raise NoProviderError(
                 "gateway returned 200 with an empty body — no upstream "
                 "provider completed the request",
                 status=response.status_code)
 
-        body = _decode_completion(response.text)
+        body = _decode_completion(_utf8(response))
         text = (body.get("choices") or [{}])[0].get(
             "message", {}).get("content") or ""
         data = extract_json(text) if want_json else None
@@ -410,7 +434,7 @@ class OmniRouteClient:
                             "to ~/.omniroute/.env and restart the gateway")
 
         if response.status_code >= 400:
-            body = response.text[:300]
+            body = _utf8(response)[:300]
             return {"state": "no_provider", "models": models,
                     "detail": no_provider_hint
                     if self._is_no_provider(body) else body}
@@ -419,7 +443,7 @@ class OmniRouteClient:
         # some small requests 200 with a completely empty body, so checking
         # only the status code reports a healthy gateway that cannot actually
         # complete anything. Require real content back.
-        raw = response.text.strip()
+        raw = _utf8(response).strip()
         if not raw:
             return {"state": "no_provider", "models": models,
                     "detail": f"{no_provider_hint} (gateway returned 200 with "
