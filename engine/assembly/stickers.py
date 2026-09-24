@@ -622,7 +622,15 @@ def prepare(plan: ReelPlan, settings, *,
             found = cached_sequence(
                 chosen, style, fps=fps, size=size,
                 root=cache_root(settings))
-        if found is None:
+        # Only the fallback rung's cues may wear committed art by name.
+        # ``cue.name`` is the trigger name on that rung but the beat id on
+        # the model rung, and beat ids are ours to assign -- one that ever
+        # collided with a committed-art directory name would silently wear
+        # another concept's art and set ``baked=True``, which is what
+        # drives the Lordicon attribution credit. A model cue with no
+        # chosen icon falls straight to the emoji, which is the designed
+        # behaviour, not a gap.
+        if found is None and cue.source == "trigger":
             found = baked_sequence(cue.name, style, fps=fps, size=size)
         if found is not None:
             pattern, frames, canvas = found

@@ -834,6 +834,37 @@ def test_a_choice_for_a_trigger_that_did_not_fire_is_ignored(tmp_path):
     assert [s.name for s in prepared] == ["death"]
 
 
+def test_a_model_cues_beat_id_colliding_with_a_trigger_name_borrows_no_art(
+        tmp_path):
+    """``cue.name`` is a trigger name on the fallback rung but the beat id
+    on the model rung -- and beat ids are ours to assign, so one could
+    collide with a committed-art directory name by accident. Before the
+    fix, ``baked_sequence`` was consulted by name regardless of which rung
+    the cue came from, so a beat id that happened to equal a real trigger
+    (``"death"``, which ships baked art at both grades) would silently wear
+    that trigger's art and set ``baked=True`` -- which is what drives the
+    Lordicon attribution credit on a beat the panel never touched and the
+    script never asked to borrow it from.
+
+    The beat's own script terms ("bone") deliberately do not name anything
+    that would resolve through the chosen-slug rung either, so the only way
+    this could end up ``baked`` is the name collision the fix removes.
+    """
+    plan = _timed(beats=1, captions=["Jungle mein ek kankaal mila tha"])
+    plan.script.beats[0].beat_id = "death"
+    plan.script.beats[0].sticker = StickerCue(word="kankaal", terms=["bone"])
+    settings = shipped_settings()
+    settings.work_dir = tmp_path
+
+    prepared = stk.prepare(plan, settings)
+
+    assert len(prepared) == 1
+    only = prepared[0]
+    assert only.name == "death"
+    assert only.baked is False, (
+        "a model cue must never wear committed art by name collision")
+
+
 # --- real renders ----------------------------------------------------------
 # Everything below invokes ffmpeg. This is the part that can fail when the
 # graph is well-formed but composites nothing.

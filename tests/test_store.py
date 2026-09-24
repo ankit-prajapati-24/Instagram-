@@ -216,6 +216,49 @@ def test_the_choices_table_is_added_to_a_database_that_predates_it(tmp_path):
     assert store.sticker_choices("p1") == {}
 
 
+def test_an_old_trigger_keyed_table_is_replaced_not_left_broken(tmp_path):
+    """The harder half of the sibling test above: not a database where the
+    table is *absent*, but one that pre-dates this plan and still has the
+    table in its old shape -- ``(plan_id, trigger)`` -- from before the
+    re-key to ``(plan_id, beat_id)``.
+
+    ``CREATE TABLE IF NOT EXISTS`` does nothing to a table that is already
+    there, so without a fix this reproduces
+    ``sqlite3.OperationalError: no such column: beat_id`` the moment
+    anything touches ``sticker_choices`` -- which is every render, since
+    ``engine/pipeline.py`` reads it unguarded right before ``render()``.
+    """
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    store = Store(path)
+    store.init()
+
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE sticker_choices")
+        conn.execute(
+            "CREATE TABLE sticker_choices ("
+            "  plan_id TEXT NOT NULL,"
+            "  trigger TEXT NOT NULL,"
+            "  slug TEXT NOT NULL,"
+            "  created_at TEXT NOT NULL,"
+            "  PRIMARY KEY (plan_id, trigger)"
+            ")")
+        conn.execute(
+            "INSERT INTO sticker_choices VALUES "
+            "('p1', 'death', '2130-skull-poison', '2024-01-01')")
+
+    store.init()  # must survive the old shape, not raise OperationalError
+
+    assert store.sticker_choices("p1") == {}, (
+        "the old row cannot be mapped to a beat and must be discarded")
+
+    # The table is genuinely usable afterwards, not just empty because it
+    # is still broken underneath.
+    store.choose_sticker("p1", "b0", "440-dna")
+    assert store.sticker_choices("p1") == {"b0": "440-dna"}
+
+
 def test_two_beats_round_trip_their_own_slugs(tmp_path):
     """A plain round trip, not a guard: two distinct beat ids are two
     distinct values under either the old trigger-keyed schema or the new

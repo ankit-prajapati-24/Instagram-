@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -158,6 +159,37 @@ def _apply_added_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
+# ``sticker_choices`` shipped once keyed by ``(plan_id, trigger)`` before
+# this plan re-keyed it to ``(plan_id, beat_id)``. ``CREATE TABLE IF NOT
+# EXISTS`` in ``SCHEMA`` is a no-op on a database where the old-shaped table
+# already exists, and SQLite cannot ``ALTER TABLE`` a primary key -- so
+# unlike ``ADDED_COLUMNS`` above, this needs its own step that drops and
+# recreates the table rather than widening it in place.
+#
+# The old rows genuinely cannot be migrated: a trigger name does not
+# identify a beat. Discarding them is correct; doing it silently at startup
+# is not, so this prints what it threw away rather than swallowing it.
+def _fix_table_shapes(conn: sqlite3.Connection) -> None:
+    columns = {row["name"]
+               for row in conn.execute("PRAGMA table_info(sticker_choices)")}
+    if "trigger" not in columns:
+        return
+    count = conn.execute(
+        "SELECT COUNT(*) AS n FROM sticker_choices").fetchone()["n"]
+    conn.execute("DROP TABLE sticker_choices")
+    conn.execute(
+        "CREATE TABLE sticker_choices ("
+        "  plan_id TEXT NOT NULL,"
+        "  beat_id TEXT NOT NULL,"
+        "  slug TEXT NOT NULL,"
+        "  created_at TEXT NOT NULL,"
+        "  PRIMARY KEY (plan_id, beat_id)"
+        ")")
+    print(f"[store] sticker_choices was keyed by trigger; discarded "
+          f"{count} pick(s) that cannot be mapped to a beat",
+          file=sys.stderr, flush=True)
+
+
 # A plan only blocks its own topic once it actually became something. Gate
 # rejections stay in the table for the audit trail without poisoning retries.
 COUNTED_STATUSES = ("approved", "produced", "published")
@@ -184,6 +216,7 @@ class Store:
         with self._conn() as conn:
             conn.executescript(SCHEMA)
             _apply_added_columns(conn)
+            _fix_table_shapes(conn)
 
     # -- plans ------------------------------------------------------------
     def save_plan(self, plan: ReelPlan, status: str = "draft") -> None:

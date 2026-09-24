@@ -127,8 +127,7 @@ Return ONLY this JSON:
         "voice_text": "<Devanagari>",
         "caption_text": "<Roman Hinglish>",
         "on_screen_text": "<2-4 CAPS words or null>",
-        "sticker": {{"word": "<a word from caption_text>",
-                     "terms": ["<object>", "<object>", "<object>"]}},
+        "sticker": "<{{word, terms}} object described above, or null>",
         "visual_prompt": "<English image description>",
         "motion": "zoom_in",
         "transition": "fade"}}
