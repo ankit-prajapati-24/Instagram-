@@ -490,3 +490,138 @@ def test_the_beat_count_is_checked_against_the_configured_one(client,
     response = client.post("/api/plan/manual", json=body)
     assert response.status_code == 400
     assert str(beat_count()) in response.json()["detail"]
+
+
+# --- the sticker a hand-written script asks for ---------------------------
+
+def test_a_hand_written_beat_keeps_the_sticker_it_asked_for(client,
+                                                            no_gateway):
+    """A pasted script can ask for a sticker, the same as a written one.
+
+    `read_script_json` already parses `sticker` out of a paste and hands it
+    back for the form. It was then dropped on the way in: `ManualBeat` had
+    no such field, so pydantic discarded it without a word and the beat was
+    stored with `sticker=None`. Someone who wrote the field by hand got no
+    error, no warning and no sticker.
+    """
+    body = payload()
+    body["beats"][1]["sticker"] = {"word": ROMAN, "terms": ["moon", "star"]}
+
+    response = client.post("/api/plan/manual", json=body)
+    assert response.status_code == 200, response.text
+    plan = ReelPlan.model_validate(response.json()["plan"])
+
+    asked = plan.script.beats[1].sticker
+    assert asked is not None, "the hand-written sticker was dropped"
+    assert asked.word == ROMAN
+    assert asked.terms == ["moon", "star"]
+    # And nothing else picked one up.
+    assert [b.sticker is None for b in plan.script.beats].count(False) == 1
+
+
+def test_a_hand_written_beat_without_a_sticker_is_unchanged(client,
+                                                            no_gateway):
+    """The field is optional. A script that asks for nothing still falls
+    through to the trigger map, which is what every stored plan does."""
+    plan = ReelPlan.model_validate(
+        client.post("/api/plan/manual", json=payload()).json()["plan"])
+    assert all(b.sticker is None for b in plan.script.beats)
+
+
+def test_the_import_route_hands_a_pasted_sticker_back_to_the_form(client):
+    """The paste half of the round trip, so a regression in either half
+    names itself."""
+    import json as _json
+
+    beats = [{"role": ROLES[i % len(ROLES)],
+              "voice_text": DEVA + "।", "caption_text": ROMAN + ".",
+              "visual_prompt": f"a dark lake, scene {i}"}
+             for i in range(beat_count())]
+    beats[1]["sticker"] = {"word": ROMAN, "terms": ["moon", "star"]}
+
+    body = _json.dumps({"topic": "Roopkund jheel ke 500 kankaal",
+                        "beats": beats})
+    out = client.post("/api/authoring/import", content=body).json()
+    assert out["beats"][1]["sticker"] == {"word": ROMAN,
+                                          "terms": ["moon", "star"]}
+
+
+# --- the form half of the round trip --------------------------------------
+#
+# The backend tests above prove the route keeps a sticker it is given. These
+# prove the form actually gives it one: the sticker is the only nested field
+# on a beat, so it cannot ride the generic `data-f` loop that carries every
+# other input, and a silent drop there looks exactly like a script that
+# asked for nothing.
+
+COLLECT_STUBS = """
+const ROWS = [
+  { f: { role: "hook", voice_text: "d", caption_text: "c",
+         on_screen_text: "", visual_prompt: "v", motion: "zoom_in",
+         transition: "fade",
+         sticker_word: " raat ", sticker_terms: " Moon , star ,, " } },
+  { f: { role: "setup", voice_text: "d", caption_text: "c",
+         on_screen_text: "", visual_prompt: "v", motion: "zoom_in",
+         transition: "fade", sticker_word: "  ", sticker_terms: "cloud" } }
+];
+function fakeRow(spec) {
+  const els = Object.entries(spec.f).map(([k, v]) => ({
+    dataset: { f: k }, value: v }));
+  return {
+    querySelectorAll: () => els,
+    querySelector: (sel) => els.find(
+      (e) => sel === `[data-f="${e.dataset.f}"]`) || null
+  };
+}
+const document = { querySelectorAll: (sel) =>
+  sel === "#manual-beats tr" ? ROWS.map(fakeRow) : [] };
+const $ = () => ({ value: "", checked: false });
+"""
+
+COLLECT_CHECKS = """
+const got = collectManual().beats;
+const checks = [
+  ["a word and terms become one nested object",
+   JSON.stringify(got[0].sticker) ===
+     JSON.stringify({word: "raat", terms: ["moon", "star"]})],
+  ["the flat inputs do not reach the request",
+   !("sticker_word" in got[0]) && !("sticker_terms" in got[0])],
+  ["terms are trimmed, lowercased, and empties dropped",
+   got[0].sticker.terms.length === 2],
+  ["a blank word asks for no sticker even with terms typed",
+   got[1].sticker === null],
+  ["the other fields still ride the generic loop",
+   got[0].voice_text === "d" && got[0].motion === "zoom_in"]
+];
+let bad = 0;
+for (const [name, ok] of checks) {
+  if (!ok) { console.log("FAIL " + name); bad++; }
+}
+process.exit(bad ? 1 : 0);
+"""
+
+
+def test_the_manual_form_sends_the_sticker_it_was_given(tmp_path):
+    """Run `collectManual`, do not read it.
+
+    Skips where node is absent; the backend tests still hold the line.
+    """
+    import shutil
+    import subprocess
+
+    import engine.app as app_mod
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not on PATH")
+
+    page = (app_mod.UI_DIR / "index.html").read_text(encoding="utf-8")
+    start = page.index("function collectManual()")
+    body = page[start:page.index("\n}", start) + 2]
+
+    harness = tmp_path / "collect_check.js"
+    harness.write_text(COLLECT_STUBS + body + COLLECT_CHECKS, encoding="utf-8")
+    done = subprocess.run([node, str(harness)], capture_output=True, text=True)
+    assert done.returncode == 0, (
+        f"the authoring form did not send the sticker:\n{done.stdout}"
+        f"{done.stderr}")

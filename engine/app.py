@@ -67,7 +67,7 @@ from engine.config import (Settings, beat_count, beat_word_range,
                            speech_rate, spoken_seconds, word_budget,
                            words_per_beat)
 from engine.contract import (Beat, Claim, CleanupInfo, Clip, Metadata, Motion,
-                             Role, Transition)
+                             Role, StickerCue, Transition)
 from engine.gates.qc import pre_render_range
 from engine.media import clip_search as clip_search_mod
 from engine.media import music_search as music_search_mod
@@ -520,6 +520,12 @@ class ManualBeat(BaseModel):
     voice_text: str
     caption_text: str
     on_screen_text: str | None = None
+    # A hand-written script may ask for its own sticker, exactly as a
+    # model-written one does. Without this field pydantic dropped it in
+    # silence: `read_script_json` parsed it out of the paste and handed it
+    # to the form, and posting the form back threw it away, so the writer
+    # got no error and no sticker.
+    sticker: StickerCue | None = None
     visual_prompt: str
     motion: Motion = "zoom_in"
     transition: Transition = "fade"

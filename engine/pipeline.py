@@ -401,11 +401,13 @@ def build_manual_script(beats: list[dict], settings) -> Script:
             "caption_text": str(row["caption_text"]).strip(),
             "on_screen_text": (str(row.get("on_screen_text") or "").strip()
                                or None),
-            # The manual path carries no sticker: ``ManualBeat`` has no
-            # ``sticker_word``/``sticker_terms`` fields, so a hand-authored
-            # beat is always built with ``sticker=None`` here -- which is
-            # not a gap, it is what makes it fall through to the trigger
-            # map, the same as any model-authored beat with nothing asked.
+            # Passed straight through in the shape `read_script_json`
+            # produces and `Beat` expects, so a pasted script's own sticker
+            # survives the round trip through the form. None here is not a
+            # gap: it is what makes the beat fall through to the trigger
+            # map, the same as any model-authored beat that asked for
+            # nothing.
+            "sticker": row.get("sticker") or None,
             "visual_prompt": str(row["visual_prompt"]).strip(),
             "motion": row.get("motion") or "zoom_in",
             "transition": row.get("transition") or "fade",

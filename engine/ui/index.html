@@ -195,6 +195,13 @@
             font-size: 12.5px; color: var(--muted); text-align: right; }
   .twin { display: grid; gap: 5px; min-width: 0; }
   .twin textarea.deva { font-size: 14.5px; }
+  /* The two halves of one beat's sticker request, side by side because
+     they are one decision and reading down four stacked boxes per row
+     makes the form look longer than it is. */
+  .stickerask { display: flex; gap: 5px; min-width: 0; }
+  .stickerask input[type=text] {
+    font-size: 12px; padding: 5px 7px; flex: 1; min-width: 0;
+  }
   .mini { display: flex; gap: 6px; margin-top: 5px; }
   .mini select, .mini input {
     font-size: 12px; padding: 5px 7px; width: auto; flex: 1; min-width: 0;
@@ -2831,6 +2838,12 @@ function buildManualForm() {
               placeholder="Roman Hinglish — this is burned on screen"></textarea>
             <input type="text" data-f="on_screen_text"
               placeholder="punch card, 2-4 words, optional">
+            <div class="stickerask">
+              <input type="text" data-f="sticker_word"
+                placeholder="sticker on which word? (from the caption)">
+              <input type="text" data-f="sticker_terms"
+                placeholder="icon terms: cloud, road, suitcase — things, not ideas">
+            </div>
           </div>
           <div class="deva-warn" id="warn-${id}"></div>
         </td>
@@ -2932,6 +2945,18 @@ function collectManual() {
       row.querySelectorAll("[data-f]").forEach((el) => {
         out[el.dataset.f] = el.value;
       });
+      /* The sticker is the one nested field on a beat, so it cannot ride
+         the generic data-f loop above: that maps one input to one string.
+         Two flat inputs are assembled here into the {word, terms} shape
+         the import route already emits and the contract expects. A row
+         with no word asks for no sticker and sends none, which is what
+         makes the beat fall through to the trigger map. */
+      const word = (out.sticker_word || "").trim();
+      const terms = (out.sticker_terms || "").split(",")
+        .map((t) => t.trim().toLowerCase()).filter(Boolean);
+      delete out.sticker_word;
+      delete out.sticker_terms;
+      out.sticker = word ? { word, terms } : null;
       return out;
     });
 
@@ -3088,6 +3113,17 @@ $("btn-import-fill").onclick = async () => {
           el.value = beat[key];
         }
       });
+      /* The mirror of collectManual's assembly: the route hands back a
+         nested {word, terms}, and the form holds it as two flat inputs.
+         Without this the paste parsed the sticker, showed nothing, and
+         posting the form back sent none. */
+      const asked = beat.sticker;
+      if (asked && asked.word) {
+        const wordBox = tr.querySelector('[data-f="sticker_word"]');
+        const termBox = tr.querySelector('[data-f="sticker_terms"]');
+        if (wordBox) wordBox.value = asked.word;
+        if (termBox) termBox.value = (asked.terms || []).join(", ");
+      }
     });
     updateBudget();
     hide("import-json");
