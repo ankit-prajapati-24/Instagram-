@@ -1102,3 +1102,79 @@ def test_a_chosen_icon_survives_the_route_and_reaches_a_render(tmp_path,
         "the bake the route just wrote never reached the render -- the "
         f"writer and the reader disagree about the root: {chosen.pattern}")
     assert Path(chosen.pattern % 0).exists(), "the frames must be on disk"
+
+
+# --- the sticker picker panel -----------------------------------------------
+#
+# Same test shape the voice board uses (tests/test_voice_review.py, around
+# lines 660-713): hand-written HTML with no JS harness gets no behavioural
+# coverage from these two, only the two failures that would otherwise reach
+# the browser silently -- a typo'd id, and a URL built for a route that does
+# not exist. They live here rather than in test_voice_review.py because
+# that file is the voice board's own regression guard and is off limits to
+# this change; the sticker route tests just above already live in this
+# file, so this is the section's other half.
+
+
+def test_the_sticker_panel_only_reaches_for_ids_that_exist(client):
+    """A typo'd id breaks this board the same silent way it breaks the
+    voice one: ``$("stickergird")`` is null, the handler throws, and the
+    section simply never renders. Only the statically-written ids are
+    checked here -- the per-trigger ones (``stickercard-death`` and so on)
+    are built at runtime from the trigger name, same as the voice board's
+    per-beat ids.
+    """
+    import re as _re
+
+    page = (Path(__file__).resolve().parents[1] / "engine" / "ui"
+            / "index.html").read_text(encoding="utf-8")
+    defined = set(_re.findall(r'id="([A-Za-z0-9_-]+)"', page))
+    used = set(_re.findall(r'\$\("([A-Za-z0-9_-]+)"\)', page))
+
+    assert not used - defined, f"panel reaches for missing ids: "\
+                               f"{sorted(used - defined)}"
+    # And the ids the sticker picker added are among them, so the assertion
+    # above cannot pass by this section having quietly failed to land.
+    assert {"stickergrid", "sticker-note"} <= defined
+
+
+def test_the_sticker_panel_calls_routes_that_are_registered(client):
+    """Every sticker URL the panel builds or consumes resolves to a route.
+
+    The candidates route is the only one the panel builds itself --
+    ``/api/plan/${PLAN.plan_id}/stickers`` as a template literal in
+    ``loadStickers()``. The choose and preview URLs arrive ready-made in
+    that response (each row's ``choose``, each candidate's ``preview``)
+    and the panel just forwards them to ``fetch`` and to an ``<img src>``
+    rather than rebuilding them, so there is no literal path template for
+    those two to grep for. What can still typo silently is the property
+    name the panel reads off the JSON (``row.choose``, ``c.preview``), so
+    that is what is checked for those two, alongside confirming the route
+    they point at actually exists and answers the verb the panel uses.
+    """
+    page = (Path(__file__).resolve().parents[1] / "engine" / "ui"
+            / "index.html").read_text(encoding="utf-8")
+    paths = {getattr(r, "path", "") for r in client.app.routes}
+
+    assert "/api/plan/${PLAN.plan_id}/stickers`" in page, \
+        "the panel never calls the sticker candidates route"
+    assert "/api/plan/{plan_id}/stickers" in paths
+
+    assert "row.choose" in page, \
+        "the panel never posts to the URL a row says to choose with"
+    assert "/api/plan/{plan_id}/sticker/{trigger}" in paths
+
+    assert "c.preview" in page, \
+        "the panel never shows a candidate's preview image"
+    assert "/api/sticker-preview/{slug}" in paths
+
+    verbs = {}
+    for route in client.app.routes:
+        p = getattr(route, "path", "")
+        if p in ("/api/plan/{plan_id}/stickers",
+                 "/api/plan/{plan_id}/sticker/{trigger}",
+                 "/api/sticker-preview/{slug}"):
+            verbs[p] = set(getattr(route, "methods", []))
+    assert "GET" in verbs.get("/api/plan/{plan_id}/stickers", set())
+    assert "POST" in verbs.get("/api/plan/{plan_id}/sticker/{trigger}", set())
+    assert "GET" in verbs.get("/api/sticker-preview/{slug}", set())

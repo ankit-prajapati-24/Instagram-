@@ -250,6 +250,42 @@
   .clipcard .said.bad { color: var(--stamp); }
   .clipcard .said.ok { color: var(--moss); }
 
+  /* sticker review: one card per fired cue, same idiom as the clip cards */
+  .stickergrid {
+    display: grid; gap: 12px; margin-top: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  }
+  .stickercard {
+    border: 1px solid var(--rule); background: var(--card); padding: 8px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .stickercard.busy { border-color: var(--gold); }
+  .stickercard .slotline {
+    display: flex; justify-content: space-between; font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .stickercard .slotline b { color: var(--paper); font-weight: 600; }
+  .stickercard .q {
+    font-size: 11.5px; color: var(--muted); line-height: 1.35;
+    word-break: break-word;
+  }
+  .stickercard .prov { font-size: 11px; color: var(--muted); }
+  .stickercard .stickerpicks { display: flex; flex-wrap: wrap; gap: 6px; }
+  .stickercard .stickerpicks img {
+    width: 44px; height: 44px; object-fit: cover; cursor: pointer;
+    background: #0b0f10; border: 1px solid var(--rule); display: block;
+  }
+  .stickercard .stickerpicks img:hover { border-color: var(--gold); }
+  .stickercard .stickerpicks img.chosen {
+    border-color: var(--moss); border-width: 2px;
+  }
+  .stickercard.busy .stickerpicks img {
+    pointer-events: none; opacity: .45; cursor: default;
+  }
+  .stickercard .said { font-size: 11px; min-height: 13px; }
+  .stickercard .said.bad { color: var(--stamp); }
+  .stickercard .said.ok { color: var(--moss); }
+
   /* voice review: one row per beat, because a beat is mostly text */
   .beatlist { display: flex; flex-direction: column; gap: 10px;
               margin-top: 14px; }
@@ -597,6 +633,15 @@
         trims or loops to it. A still gets the Ken Burns move
         automatically.</p>
       <div class="clipgrid" id="clipgrid"></div>
+
+      <h3 style="margin-top:30px">Sticker art <em id="sticker-note"></em></h3>
+      <p class="hint">One card per sticker cue that actually fired in this
+        reel — a trigger that never fired has nothing to show here. Five
+        triggers ship with art already committed; the rest fall back to an
+        emoji unless a candidate below is chosen instead. Choosing one bakes
+        it into this reel, which takes about 17 seconds.</p>
+      <div class="stickergrid" id="stickergrid"></div>
+
       <div class="entry">
         <button class="go" id="btn-release">These are right — render</button>
       </div>
@@ -1394,6 +1439,108 @@ async function replaceClip(input) {
   input.value = "";
 }
 
+/* ---------------------------------------------------------------------
+   The sticker picker: swap the icon that lands on a trigger word.
+
+   Same load/render shape as the clip grid just above: fetch, stash in a
+   module-level variable, render into a container, wire handlers over the
+   fresh nodes. One card per row the candidates route returned — a trigger
+   that never fired has no card, matching the backend's own scoping.
+
+   A choose is slow (the route downloads the icon and bakes 42 frames in
+   two styles, about 17s), so each card locks itself for the duration
+   rather than the whole grid going dark: two different triggers can bake
+   at once, but a second click on the same card while its first choose is
+   still in flight is ignored outright, and the card says plainly what it
+   is doing for that whole stretch.
+   --------------------------------------------------------------------- */
+let STICKERS = null;
+
+async function loadStickers() {
+  if (!PLAN) return;
+  STICKERS = await (await fetch(`/api/plan/${PLAN.plan_id}/stickers`)).json();
+  renderStickers();
+}
+
+function renderStickers() {
+  const data = STICKERS;
+  if (!data) return;
+  const rows = data.rows || [];
+  $("sticker-note").textContent =
+    (rows.length
+      ? `${rows.length} sticker${rows.length === 1 ? "" : "s"} fired`
+      : "no sticker cues fired in this reel")
+    + (data.note ? ` · ${data.note}` : "");
+
+  $("stickergrid").innerHTML = rows.map((r) => {
+    const used = r.chosen
+      ? `in use now: <b>${esc(r.chosen)}</b>`
+      : "in use now: the committed art / emoji default";
+    const pics = r.candidates.length ? r.candidates.map((c) => `
+      <img class="${c.slug === r.chosen ? "chosen" : ""}"
+           data-trigger="${esc(r.trigger)}" data-slug="${esc(c.slug)}"
+           loading="lazy" alt="${esc(c.slug)}" src="${c.preview}">`).join("")
+      : "<i>no alternate art offered</i>";
+    return `
+    <figure class="stickercard" id="stickercard-${r.trigger}">
+      <div class="slotline">
+        <b>${esc(r.trigger)}</b>
+        <span>${r.start.toFixed(2)}s</span>
+      </div>
+      <div class="q">&ldquo;${esc(r.word)}&rdquo;</div>
+      <div class="prov" id="stickerused-${r.trigger}">${used}</div>
+      <div class="stickerpicks">${pics}</div>
+      <div class="said" id="stickersaid-${r.trigger}"></div>
+    </figure>`;
+  }).join("");
+
+  $("stickergrid").querySelectorAll(".stickerpicks img").forEach((img) => {
+    img.onclick = () => chooseSticker(img.dataset.trigger, img.dataset.slug);
+  });
+}
+
+async function chooseSticker(trigger, slug) {
+  const row = STICKERS && (STICKERS.rows || []).find(
+    (r) => r.trigger === trigger);
+  const card = $("stickercard-" + trigger);
+  if (!row || !card || card.classList.contains("busy")) return;
+  const said = $("stickersaid-" + trigger);
+
+  card.classList.add("busy");
+  said.className = "said";
+  said.textContent =
+    "Baking this icon into the reel — about 17 seconds. Please wait…";
+  try {
+    const response = await fetch(row.choose, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      // The backend deliberately leaves the stored choice untouched on a
+      // 422 (an icon refused for a pocket of trapped white), so nothing
+      // here touches `row.chosen` or the "chosen" marker either.
+      said.className = "said bad";
+      said.textContent = String(data.detail || response.status);
+      return;
+    }
+    row.chosen = data.slug;
+    card.querySelectorAll(".stickerpicks img").forEach((img) => {
+      img.classList.toggle("chosen", img.dataset.slug === data.slug);
+    });
+    $("stickerused-" + trigger).innerHTML =
+      `in use now: <b>${esc(data.slug)}</b>`;
+    said.className = "said ok";
+    said.textContent = "In use now.";
+  } catch (err) {
+    said.className = "said bad";
+    said.textContent = String(err);
+  } finally {
+    card.classList.remove("busy");
+  }
+}
+
 $("btn-release").onclick = async () => {
   if (!PLAN) return;
   $("btn-release").disabled = true;
@@ -1442,6 +1589,7 @@ async function afterRender(ev) {
     PLAN = await (await fetch(`/api/plan/${PLAN.plan_id}`)).json();
     renderStrip(PLAN);
     await loadReview();
+    await loadStickers();
     $("s-review").scrollIntoView({ behavior: "smooth", block: "start" });
     return;
   }
