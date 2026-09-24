@@ -793,7 +793,11 @@ def _fake_bake(root, slug, style, *, size, fps):
     """Write a bake of the right shape without running the real one.
 
     ``cached_sequence`` validates fps, size and frame count, so the cheapest
-    honest fixture is the right number of correctly sized transparent PNGs.
+    honest fixture is the right number of correctly sized transparent PNGs
+    -- plus the ``meta.json`` ``_resolve`` actually reads those values from
+    (``bake_one`` writes the same shape). Without the meta file every lookup
+    reads as "nothing cached" and falls through, so a test built on frames
+    alone fails for the wrong reason.
     """
     from engine.assembly import stickers as stk
     frames = round(stk.HOLD_SECONDS * fps)
@@ -804,6 +808,10 @@ def _fake_bake(root, slug, style, *, size, fps):
     for n in range(frames):
         Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0)).save(
             folder / f"frame-{n:03d}.png")
+    (folder / "meta.json").write_text(json.dumps({
+        "source": f"{slug}.gif", "style": style, "frames": frames,
+        "fps": fps, "size": size, "canvas": canvas, "licence": "test",
+    }), encoding="utf-8")
     return folder
 ```
 
@@ -884,7 +892,7 @@ def test_only_the_style_the_beat_needs_is_baked(tmp_path, monkeypatch):
 
     def _fake_bake_one(source, folder, *, style, size, fps):
         made.append(style)
-        _fake_bake_into(folder, size=size, fps=fps)
+        _fake_bake_into(folder, size=size, fps=fps, style=style)
 
     monkeypatch.setattr("scripts.bake_stickers.bake_one", _fake_bake_one)
     monkeypatch.setattr(sticker_choices, "_source",
@@ -903,11 +911,12 @@ it at module level in `tests/test_sticker_choices.py` and have `_fake_bake`
 call it, so the PNG-writing lives in one place:
 
 ```python
-def _fake_bake_into(folder, *, size, fps):
+def _fake_bake_into(folder, *, size, fps, style="punchy", slug="fake"):
     """Write a bake of the right shape without running the real one.
 
-    ``cached_sequence`` validates fps, size and frame count, so the cheapest
-    honest fixture is the right number of correctly sized transparent PNGs.
+    The ``meta.json`` is not optional: ``_resolve`` returns None without it,
+    so a fixture of frames alone reads as "nothing cached" and every test
+    built on it fails for the wrong reason.
     """
     from engine.assembly import stickers as stk
     frames = round(stk.HOLD_SECONDS * fps)
@@ -917,6 +926,10 @@ def _fake_bake_into(folder, *, size, fps):
     for n in range(frames):
         Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0)).save(
             folder / f"frame-{n:03d}.png")
+    (folder / "meta.json").write_text(json.dumps({
+        "source": f"{slug}.gif", "style": style, "frames": frames,
+        "fps": fps, "size": size, "canvas": canvas, "licence": "test",
+    }), encoding="utf-8")
     return folder
 ```
 
