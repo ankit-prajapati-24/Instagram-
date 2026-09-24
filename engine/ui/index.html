@@ -552,6 +552,35 @@
   .hit .dupewarn { font-size: 11px; color: var(--gold); }
   .hit button { font-size: 11.5px; padding: 5px 6px; }
 
+  /* --- the music bed ---------------------------------------------------
+     Rows, not the card grid the clips use. A track has no picture, so a
+     tile would be a box of text at a width chosen for thumbnails; the
+     only things worth comparing are the title, the length and whether it
+     costs a credit, and those read across rather than down. */
+  .bedrow { display: flex; align-items: center; gap: 12px;
+            border: 1px solid var(--rule); padding: 8px 10px;
+            margin-top: 8px; flex-wrap: wrap; }
+  .bedrow.on { border-color: var(--moss); }
+  .bedrow audio { height: 32px; flex: 0 0 240px; max-width: 100%; }
+  .bedrow .who { flex: 1; min-width: 160px; }
+  .bedrow .who b { color: var(--paper); font-weight: 600;
+                   font-family: var(--serif); font-size: 14.5px; }
+  .bedrow .who span { display: block; font-size: 11.5px;
+                      color: var(--muted); }
+  .bedrow .len { font-size: 12px; color: var(--muted);
+                 font-variant-numeric: tabular-nums; }
+  /* Gold, the same colour the board uses everywhere else for "this costs
+     you something". A credit is an obligation, not a warning, so it is
+     stated rather than shouted. */
+  .bedrow .owes { font-size: 11.5px; color: var(--gold); }
+  .bedrow .free { font-size: 11.5px; color: var(--muted); }
+  .bedrow button { font-size: 12px; padding: 6px 10px; white-space: normal; }
+  .bednow { border: 1px solid var(--moss); background: var(--card);
+            padding: 10px 12px; margin: 10px 0; }
+  .bednow .credit { font-size: 11.5px; color: var(--gold);
+                    margin-top: 6px; word-break: break-word; }
+  .bednow .gone { color: var(--stamp); font-size: 11.5px; }
+
   /* light-box */
   .lightbox { display: flex; gap: 22px; flex-wrap: wrap; margin-top: 14px; }
   .lightbox video {
@@ -913,6 +942,24 @@
         emoji unless a candidate below is chosen instead. Choosing one bakes
         it into this reel, which takes about 17 seconds.</p>
       <div class="stickergrid" id="stickergrid"></div>
+
+      <h3 style="margin-top:30px">Music bed <em id="bed-note"></em></h3>
+      <p class="hint">One bed for the whole reel, ducked under the voice
+        automatically. Nothing is downloaded until you choose a track, and
+        the length does not matter — a short loop is repeated to fill the
+        video. Only tracks that may be used commercially are offered.
+        Some ask for a credit line in return; the row says which, and the
+        credit is added to the caption for you.</p>
+      <div class="bednow" id="bednow" hidden></div>
+      <div class="clipsearch">
+        <div class="row">
+          <input type="text" id="bed-q"
+                 placeholder="Search Openverse — e.g. dark ambient drone">
+          <button class="go" id="btn-bed">Search</button>
+        </div>
+        <div id="bedhits"></div>
+        <p class="hint" id="bed-said"></p>
+      </div>
 
       <div class="entry">
         <button class="go" id="btn-release">These are right — render</button>
@@ -1706,8 +1753,153 @@ function renderReview() {
     button.onclick = () => openLineup(button.dataset.beat,
                                       Number(button.dataset.slot));
   });
+  renderBedNow(data.music);
   show("s-review");
 }
+
+/* The music bed.
+
+   One per reel, chosen here because this is the last gate before the
+   render composites it. Browsing costs nothing: Openverse hands back a
+   playable URL with every result, so each row streams from the CDN and
+   the disk stays untouched until something is chosen.
+
+   The credit is the part worth being careful about. A CC-BY track
+   obliges a line in the caption, and the obligation is shown on the row
+   before it is taken on rather than discovered at publish time. CC0
+   tracks carry attribution text too and are deliberately shown as
+   costing nothing, because crediting where no credit is owed would be
+   inventing an obligation.
+
+   Nothing here derives the credit itself -- the server sends it, so the
+   rule about which licences oblige one lives in music_search and
+   nowhere else. */
+function bedSeconds(ms) {
+  const s = Math.round((ms || 0) / 1000);
+  return s >= 60 ? `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`
+                 : `${s}s`;
+}
+
+function renderBedNow(music) {
+  const box = $("bednow");
+  if (!music) { box.hidden = true; box.innerHTML = ""; return; }
+  box.hidden = false;
+  box.innerHTML = `
+    <div class="bedrow on">
+      <audio controls preload="none" src="/api/music/${esc(PLAN.plan_id)}">
+      </audio>
+      <div class="who">
+        <b>${esc(music.title) || "this reel's bed"}</b>
+        <span>${esc(music.creator)} · ${esc(music.licence)}</span>
+      </div>
+      <button id="btn-bed-clear">Use the default instead</button>
+    </div>
+    ${music.credit
+      ? `<div class="credit">Caption will carry: ${esc(music.credit)}</div>`
+      : ""}
+    ${music.exists === false
+      ? `<div class="gone">That file is no longer on disk, so the render
+           will fall back to the shared folder.</div>`
+      : ""}`;
+  $("btn-bed-clear").onclick = clearBed;
+}
+
+function bedRowHtml(track) {
+  return `
+    <div class="bedrow">
+      <audio controls preload="none" src="${track.preview}"></audio>
+      <div class="who">
+        <b>${esc(track.title)}</b>
+        <span>${esc(track.creator)} · ${esc(track.licence)}${
+          track.licence_version ? "-" + esc(track.licence_version) : ""}</span>
+      </div>
+      <span class="len">${bedSeconds(track.duration)}</span>
+      <span class="${track.needs_credit ? "owes" : "free"}">${
+        track.needs_credit ? "asks for a credit" : "no credit needed"}</span>
+      <button class="usebed" data-id="${esc(track.openverse_id)}">
+        Use this bed
+      </button>
+    </div>`;
+}
+
+async function searchBeds() {
+  const query = $("bed-q").value.trim();
+  const said = $("bed-said");
+  if (!query) { said.textContent = "Type something to search for."; return; }
+  said.textContent = "Asking Openverse…";
+  $("bedhits").innerHTML = "";
+  try {
+    const response = await fetch(
+      `/api/plan/${PLAN.plan_id}/music-search?q=${encodeURIComponent(query)}`);
+    const data = await response.json();
+    if (!response.ok) {
+      said.textContent = String(data.detail || "Search failed.");
+      return;
+    }
+    if (!data.results.length) {
+      said.textContent = "Nothing came back for that. Try a plainer word —"
+        + " \"drone\", \"suspense\", \"heartbeat\".";
+      return;
+    }
+    said.textContent = `${data.results.length} tracks — press play to hear`
+      + ` one. Nothing is downloaded until you choose.`;
+    $("bedhits").innerHTML = data.results.map(bedRowHtml).join("");
+    $("bedhits").querySelectorAll("button.usebed").forEach((button) => {
+      button.onclick = () => useBed(button.dataset.id, button);
+    });
+  } catch (err) {
+    said.textContent = "Request failed: " + String(err);
+  }
+}
+
+async function useBed(openverseId, button) {
+  const said = $("bed-said");
+  button.disabled = true;
+  said.textContent = "Downloading that track…";
+  try {
+    const response = await fetch(`/api/plan/${PLAN.plan_id}/music`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({openverse_id: openverseId}),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      said.textContent = String(data.detail || "That track did not take.");
+      button.disabled = false;
+      return;
+    }
+    if (REVIEW) REVIEW.music = data;
+    renderBedNow(data);
+    said.textContent = data.credit
+      ? "Bed set. Its credit goes in the caption automatically."
+      : "Bed set. This one asks for no credit.";
+  } catch (err) {
+    said.textContent = "Request failed: " + String(err);
+    button.disabled = false;
+  }
+}
+
+async function clearBed() {
+  const said = $("bed-said");
+  try {
+    const response = await fetch(`/api/plan/${PLAN.plan_id}/music`,
+                                 {method: "DELETE"});
+    if (!response.ok) {
+      said.textContent = "Could not clear the bed.";
+      return;
+    }
+    if (REVIEW) REVIEW.music = null;
+    renderBedNow(null);
+    said.textContent = "Back on whatever is in assets/music/.";
+  } catch (err) {
+    said.textContent = "Request failed: " + String(err);
+  }
+}
+
+$("btn-bed").onclick = searchBeds;
+$("bed-q").onkeydown = (event) => {
+  if (event.key === "Enter") { event.preventDefault(); searchBeds(); }
+};
 
 /* The lineup: the clip in the slot, and the candidates, in one row.
 
