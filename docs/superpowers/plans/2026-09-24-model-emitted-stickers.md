@@ -727,57 +727,79 @@ git commit -m "fix: a chosen sticker belongs to a beat, not to a trigger name"
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `tests/test_sticker_choices.py`:
+Add to `tests/test_sticker_choices.py`. That file imports the module as
+`sc`, not `sticker_choices` — match it.
+
+**The two cues must come from the trigger map, not from `sticker` fields.**
+`_candidates` sets `name=beat.beat_id` on the model rung, so for a
+model-asked cue `choices[cue.name]` and `choices[cue.beat_id]` are the same
+lookup and the old code would pass this test unchanged. On the trigger rung
+`cue.name` is the trigger's name, which is exactly where one reel's two
+cues of one concept collapsed onto a single key. The captions below are
+verified to produce two `water` cues, on `b1` and `b3`, whose roles give
+them two different styles:
 
 ```python
-def test_two_beats_resolve_their_own_chosen_icons(tmp_path, monkeypatch):
-    """The defect the beat key fixes, proven through prepare() rather than
-    through the store: two cues, two different bakes, both used."""
-    plan = _timed(beats=4, measured=4.0, captions=[
-        "ek ladki college gayi thi",
-        "usne raat bhar code likha",
-        "ek aur line yahan par hai",
-        "phir usne paani piya tha"])
-    plan.script.beats[1].sticker = StickerCue(word="code", terms=["laptop"])
-    plan.script.beats[3].sticker = StickerCue(word="paani", terms=["water"])
+def test_two_beats_resolve_their_own_chosen_icons(tmp_path):
+    """The defect the beat key fixes, proven where it is actually visible.
+
+    Two `water` cues in one reel. Keyed by trigger name they shared one
+    answer; keyed by beat they each get their own. Deliberately trigger-rung
+    cues: on the model rung `cue.name` already IS the beat id, so a test
+    built from `sticker` fields cannot tell the old code from the new.
+    """
+    from engine.media.voice import caption_timings
+    from engine.assembly import stickers as stk
+    from tests.factories import make_plan, shipped_settings
+
+    plan = make_plan(beats=4, measured=4.0)
+    for beat, text in zip(plan.script.beats, [
+            "ek ladki college gayi thi yahan",
+            "usne paani piya tha wahan",
+            "phir ek aur line yahan par",
+            "aur paani gira tha neeche"]):
+        beat.caption_text = text
+        beat.words = caption_timings(text, 4.0)
+
+    cues = [c for c in stk.find_cues(plan) if c.name == "water"]
+    assert len(cues) == 2, f"needed two water cues, got {cues}"
+    first, second = cues[0].beat_id, cues[1].beat_id
+    assert first != second
 
     settings = shipped_settings(work_dir=str(tmp_path), stickers=True)
     size = stk.sticker_size(settings.width, settings.sticker_scale)
     fps = int(settings.fps)
-    root = sticker_choices.cache_root(settings)
-    for slug, beat in (("27-globe", plan.script.beats[1]),
-                       ("1875-planet", plan.script.beats[3])):
-        style = stk.style_for_role(beat.role)
-        _fake_bake(root, slug, style, size=size, fps=fps)
+    root = sc.cache_root(settings)
+    by_id = {b.beat_id: b for b in plan.script.beats}
+    picks = {first: "27-globe", second: "1875-planet"}
+    for beat_id, slug in picks.items():
+        _fake_bake(root, slug, stk.style_for_role(by_id[beat_id].role),
+                   size=size, fps=fps)
 
-    prepared = stk.prepare(plan, settings, choices={
-        plan.script.beats[1].beat_id: "27-globe",
-        plan.script.beats[3].beat_id: "1875-planet"})
-
+    prepared = stk.prepare(plan, settings, choices=picks)
+    index = {b.beat_id: n for n, b in enumerate(plan.script.beats)}
     patterns = {s.beat_index: s.pattern for s in prepared}
-    assert sticker_choices.bake_key(
-        "27-globe", stk.style_for_role(plan.script.beats[1].role),
-        size, fps) in patterns[1]
-    assert sticker_choices.bake_key(
-        "1875-planet", stk.style_for_role(plan.script.beats[3].role),
-        size, fps) in patterns[3]
-    assert all(s.baked for s in prepared)
+    for beat_id, slug in picks.items():
+        want = sc.bake_key(slug, stk.style_for_role(by_id[beat_id].role),
+                           size, fps)
+        assert want in patterns[index[beat_id]],             f"{beat_id} did not resolve to {slug}"
+    assert all(s.baked for s in prepared), "the Lordicon credit depends on this"
 ```
 
 Add the bake fixture helper to the same file if it is not already there:
 
 ```python
 def _fake_bake(root, slug, style, *, size, fps):
-    """Write a bake of the right shape without running Pillow.
+    """Write a bake of the right shape without running the real one.
 
     ``cached_sequence`` validates fps, size and frame count, so the cheapest
-    honest fixture is the right number of correctly sized PNGs.
+    honest fixture is the right number of correctly sized transparent PNGs.
     """
-    from PIL import Image
+    from engine.assembly import stickers as stk
     frames = round(stk.HOLD_SECONDS * fps)
     canvas = stk.sticker_canvas(size)
-    folder = (Path(root) / sticker_choices.BAKES_DIRNAME
-              / sticker_choices.bake_key(slug, style, size, fps))
+    folder = (Path(root) / sc.BAKES_DIRNAME
+              / sc.bake_key(slug, style, size, fps))
     folder.mkdir(parents=True, exist_ok=True)
     for n in range(frames):
         Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0)).save(
@@ -788,7 +810,10 @@ def _fake_bake(root, slug, style, *, size, fps):
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `python -m pytest tests/test_sticker_choices.py -k two_beats_resolve -v`
-Expected: FAIL — `prepare` looks up `choices[cue.name]`, and `cue.name` is now the beat id on the model rung but the trigger name on the fallback rung, so the lookup is inconsistent and at least one beat falls through to the emoji.
+Expected: FAIL — `prepare` looks up `choices[cue.name]`, which for these
+two cues is `"water"` for both. The choices dict is keyed by beat id, so
+both lookups miss, both stickers fall through to the emoji, and the
+`bake_key` assertion fails on the first beat.
 
 - [ ] **Step 3: Change the lookup**
 
@@ -879,12 +904,12 @@ call it, so the PNG-writing lives in one place:
 
 ```python
 def _fake_bake_into(folder, *, size, fps):
-    """Write a bake of the right shape without running Pillow's real work.
+    """Write a bake of the right shape without running the real one.
 
     ``cached_sequence`` validates fps, size and frame count, so the cheapest
     honest fixture is the right number of correctly sized transparent PNGs.
     """
-    from PIL import Image
+    from engine.assembly import stickers as stk
     frames = round(stk.HOLD_SECONDS * fps)
     canvas = stk.sticker_canvas(size)
     folder = Path(folder)
@@ -900,8 +925,7 @@ and Task 4's helper becomes:
 ```python
 def _fake_bake(root, slug, style, *, size, fps):
     return _fake_bake_into(
-        Path(root) / sticker_choices.BAKES_DIRNAME
-        / sticker_choices.bake_key(slug, style, size, fps),
+        Path(root) / sc.BAKES_DIRNAME / sc.bake_key(slug, style, size, fps),
         size=size, fps=fps)
 ```
 
