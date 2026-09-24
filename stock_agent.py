@@ -70,6 +70,28 @@ except ImportError:
 load_dotenv()
 
 # Banned words list (abstract concepts, emotions, buzzwords, non-visual terms)
+# Dropped before a scene description is cut down to a query. Pexels
+# ranks on content words, and "A close-up of a smartphone..." truncated to
+# its first five words is "a close up of a", which matches nothing. With
+# these gone the same sentence gives "close up smartphone playing
+# youtube".
+#
+# Deliberately only function words -- articles, prepositions, conjunctions,
+# auxiliaries, and the handful of framing verbs a shot description always
+# opens with. Anything that names a thing, an action or a place has to
+# survive, because that is the whole query.
+SCENE_STOPWORDS = {
+    "a", "an", "the", "of", "on", "in", "at", "by", "for", "from", "to",
+    "with", "into", "onto", "over", "under", "near", "against", "across",
+    "beside", "behind", "beneath", "between", "through", "during",
+    "before", "after", "above", "below", "around", "along", "upon",
+    "toward", "towards",
+    "and", "or", "but", "as", "while", "then", "than", "that", "this",
+    "these", "those", "there", "here", "its", "their", "his", "her",
+    "is", "are", "was", "were", "be", "being", "been", "am",
+    "shot", "showing", "shows", "show", "view", "image", "footage",
+}
+
 BANNED_WORDS = {
     "expensive",
     "crazy",
@@ -390,6 +412,56 @@ CRITICAL RULES:
 
         return " ".join(filtered_words).lower()
 
+    def _scene_query(self, script_segment: str) -> str:
+        """A Pexels query cut from the beat's own scene description.
+
+        ``script_segment`` is ``beat.visual_prompt`` -- an English shot
+        description the script agent wrote for exactly this purpose. It is
+        a sentence, not a query, so the function words come out first;
+        _sanitize_query then applies the ban list and the 3-5 word rule to
+        what is left.
+
+        Stopwords are stripped here rather than inside _sanitize_query
+        because a query the model wrote is already three to five content
+        words, and running this over it could only damage it.
+        """
+        words = [w for w in re.sub(r"[^\w\s]", " ", script_segment).split()
+                 if w.lower() not in SCENE_STOPWORDS]
+        # Everything was a stopword: hand the original over and let
+        # _sanitize_query's own padding deal with it. Degenerate, but a
+        # beat must not die here.
+        return self._sanitize_query(" ".join(words) or script_segment)
+
+    def _queries_from_scene(
+        self, script_segment: str, clip_count: int, why: str
+    ) -> List[Dict[str, Any]]:
+        """Fill every slot from the scene description, and say so.
+
+        One query for all the slots rather than a different guess per
+        slot: there is only one description, and inventing variations on
+        it would be making things up. The slots still get different
+        footage -- the plan's used-id registry refuses to hand the same
+        Pexels video to two slots, so one query returns the next-best
+        match each time.
+
+        The ``shot_intent`` names the source on purpose. The fallback this
+        replaces was invisible -- it looked exactly like a working result
+        on the review board, which is why nobody noticed the queries were
+        the model's small talk. This one announces itself on every card.
+        """
+        print(f"[queries] falling back to the beat's scene: {why}",
+              flush=True)
+        query = self._scene_query(script_segment)
+        return [
+            {
+                "clip_index": i + 1,
+                "search_query": query,
+                "shot_intent": ("From the beat's scene — the model "
+                                "returned no queries"),
+            }
+            for i in range(clip_count)
+        ]
+
     def generate_queries(
         self, script_segment: str, duration_seconds: float
     ) -> Tuple[List[ClipQuery], int]:
@@ -407,11 +479,22 @@ CRITICAL RULES:
                 ],
                 temperature=0.3,
             )
-        except (APIError, APIConnectionError, APITimeoutError, RateLimitError) as exc:
-            raise RuntimeError(f"OmniRoute LLM generation failed: {exc}") from exc
-
-        content = response.choices[0].message.content or ""
-        parsed_clips = self._parse_json_response(content, clip_count)
+        except (APIError, APIConnectionError, APITimeoutError,
+                RateLimitError) as exc:
+            # A dead gateway is the case the scene fallback is worth most
+            # in: no model at all, and a perfectly good English shot
+            # description already in hand. Raising here instead would drop
+            # the whole beat to a generated still.
+            parsed_clips = self._queries_from_scene(
+                script_segment, clip_count,
+                f"{type(exc).__name__}: {exc}")
+        else:
+            content = response.choices[0].message.content or ""
+            try:
+                parsed_clips = self._parse_json_response(content, clip_count)
+            except ValueError as exc:
+                parsed_clips = self._queries_from_scene(
+                    script_segment, clip_count, str(exc))
 
         # Sanitize and post-process
         validated_queries: List[ClipQuery] = []
