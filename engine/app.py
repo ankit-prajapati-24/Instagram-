@@ -69,6 +69,7 @@ from engine.config import (Settings, beat_count, beat_word_range,
 from engine.contract import (Beat, Claim, CleanupInfo, Clip, Metadata, Motion,
                              Role, Transition)
 from engine.gates.qc import pre_render_range
+from engine.media import clip_search as clip_search_mod
 from engine.media.align import build_aligner
 from engine.media.voice import (MIN_UPLOAD_SECONDS, UPLOAD_ENGINE,
                                 UploadRejected, apply_beat_audio,
@@ -572,6 +573,17 @@ class ProduceRequest(BaseModel):
     # Off by default, because the one-shot path has to stay: a user who
     # does not want to look at twenty clips must not be made to.
     review_clips: bool = False
+
+
+class PickRequest(BaseModel):
+    """A searched clip chosen for a slot.
+
+    An id, deliberately, and not a link: the server resolves the download
+    address with Pexels itself, so the only URLs it ever fetches are ones
+    Pexels gave it.
+    """
+
+    pexels_id: int
 
 
 class ReleaseRequest(BaseModel):
@@ -2137,6 +2149,94 @@ def create_app(db_path: str | Path | None = None,
                 target.parents:
             raise HTTPException(404, "not found")
         return FileResponse(target)
+
+    @app.get("/api/plan/{plan_id}/clip-search")
+    def clip_search(plan_id: str, q: str = "") -> dict:
+        """Pexels results for a query the user typed.
+
+        Read-only and downloads nothing: every result carries Pexels' own
+        thumbnail and a small mp4, so the strip points the browser at
+        Pexels' CDN and the disk stays untouched until something is
+        picked.
+
+        Results already used elsewhere in this plan are marked rather
+        than hidden. Repeating a shot is occasionally deliberate, and a
+        picker that silently dropped the duplicate would be wrong more
+        often than the duplicate is.
+        """
+        plan = store.get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(404, "no such plan")
+        try:
+            results = clip_search_mod.search(q, settings)
+        except clip_search_mod.SearchUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+
+        used = clip_search_mod.used_ids(plan)
+        return {
+            "plan_id": plan_id, "query": q.strip(),
+            "results": [{**c.to_dict(),
+                         "used_in": used.get(c.pexels_id, [])}
+                        for c in results],
+        }
+
+    @app.post("/api/plan/{plan_id}/clip/{beat_id}/{slot}/pick")
+    def pick_clip(plan_id: str, beat_id: str, slot: int,
+                  request: PickRequest) -> dict:
+        """Put a searched clip into one slot.
+
+        Takes a Pexels **id**, never a URL. A route that downloaded a
+        link the browser handed it would download any link anyone handed
+        it; the download address is read back from Pexels inside
+        ``place_in_slot``.
+
+        Gated on the review status like the upload route, and for the
+        same reason: this is the one moment a clip can be swapped before
+        the render has read it.
+        """
+        plan = store.get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(404, "no such plan")
+        status = store.plan_status(plan_id)
+        if status != CLIP_REVIEW_STATUS:
+            raise HTTPException(
+                409, f"plan is '{status}', not awaiting clip review. Clips "
+                     f"are replaceable at that gate, which is the one "
+                     f"moment the render has not read them yet.")
+
+        beat = next((b for b in plan.script.beats if b.beat_id == beat_id),
+                    None)
+        if beat is None:
+            raise HTTPException(404, f"no such beat: {beat_id}")
+        if not 0 <= slot < len(beat.clips):
+            raise HTTPException(
+                404, f"beat {beat_id!r} has {len(beat.clips)} clip slots, "
+                     f"so there is no slot {slot}")
+
+        try:
+            clip = clip_search_mod.place_in_slot(
+                plan, beat, slot, request.pexels_id, settings,
+                settings.work_dir)
+        except clip_search_mod.SearchUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+
+        path = Path(clip.path)
+        if not _under_roots(path, [Path(settings.work_dir)]):
+            raise HTTPException(500, "the download escaped work_dir")
+        # The poster cache is keyed on the clip path and only re-extracted
+        # when the clip is newer, which it is -- but a replacement landing
+        # inside the same second would tie. Drop it outright.
+        _poster_path(path).unlink(missing_ok=True)
+        store.save_plan(plan, status=CLIP_REVIEW_STATUS)
+
+        return {
+            "plan_id": plan_id, "beat_id": beat_id, "slot": slot,
+            "provider": clip.provider, "pexels_id": clip.pexels_id,
+            "duration": clip.duration, "kind": "video",
+            "source_url": clip.source_url, "author": clip.author,
+            "thumb": f"/api/frame/{plan_id}/{beat_id}?slot={slot}",
+            "play": f"/api/clip/{plan_id}/{beat_id}/{slot}",
+        }
 
     @app.get("/api/clip/{plan_id}/{beat_id}/{slot}")
     def clip_file(plan_id: str, beat_id: str, slot: int) -> FileResponse:
