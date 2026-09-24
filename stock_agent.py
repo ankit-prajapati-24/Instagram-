@@ -486,20 +486,25 @@ CRITICAL RULES:
                 for i, (q, intent) in enumerate(matches)
             ]
 
-        # Last resort fallback: line-by-line fallback
-        lines = [line.strip("- *0123456789.:\" ") for line in content.splitlines() if line.strip()]
-        valid_lines = [l for l in lines if len(l.split()) >= 2][:expected_count]
-        if not valid_lines:
-            valid_lines = [f"cinematic shot clip {i+1}" for i in range(expected_count)]
-
-        return [
-            {
-                "clip_index": idx + 1,
-                "search_query": line,
-                "shot_intent": f"Scene visual for segment {idx + 1}",
-            }
-            for idx, line in enumerate(valid_lines)
-        ]
+        # No JSON anywhere: the model chatted instead of answering, and
+        # there is nothing here to recover.
+        #
+        # This used to read the prose line by line, strip the punctuation
+        # off each line and search Pexels for whatever was left, which
+        # turned "Here's a 4:1 breakdown" into the query "here s a 4 1".
+        # Every such line is a valid Pexels search that returns real
+        # footage, so the run reported success and the board filled with
+        # video chosen for the model's small talk.
+        #
+        # Refusing costs the beat nothing it was actually getting.
+        # generate_plan_clips catches a raise per beat and falls back to
+        # the generated-still chain, which draws for *this* beat -- so the
+        # old fallback never saved a beat, it only swapped a visibly
+        # missing clip for an invisibly wrong one.
+        raise ValueError(
+            f"the model did not return JSON, so there are no queries to "
+            f"read. Asked for {expected_count} clips and got back:\n"
+            f"{content.strip()[:400] or '(an empty reply)'}")
 
 
 # ============================================================================
