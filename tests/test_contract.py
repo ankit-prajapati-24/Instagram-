@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from engine.contract import Beat, Clip, Hook, ReelPlan, Script, Topic
+from engine.contract import Beat, Clip, Hook, ReelPlan, Script, StickerCue, Topic
 
 
 def test_topic_make_normalises_slug_and_hashes():
@@ -194,3 +194,40 @@ def test_beat_carries_clips():
                         "duration": 1.5}])
     assert len(beat.clips) == 2
     assert beat.clips[0].path == "a.mp4"
+
+
+# --- the sticker a script asks for -----------------------------------------
+
+def _sticker_beat(**extra):
+    base = {
+        "beat_id": "b1", "role": "setup",
+        "voice_text": "रात में कोड लिखा",
+        "caption_text": "raat mein code likha",
+        "visual_prompt": "a dark desk lit by one screen",
+        "motion": "zoom_in", "transition": "fade",
+        "target_seconds": 4.4,
+    }
+    base.update(extra)
+    return base
+
+
+def test_a_beat_carries_the_sticker_the_script_asked_for():
+    beat = Beat.model_validate(_sticker_beat(
+        sticker={"word": "code", "terms": ["code", "laptop", "keyboard"]}))
+    assert beat.sticker is not None
+    assert beat.sticker.word == "code"
+    assert beat.sticker.terms == ["code", "laptop", "keyboard"]
+
+
+def test_a_beat_without_a_sticker_is_still_a_beat():
+    """Every stored plan predates this field. None must mean 'use the
+    trigger map', not 'this plan is invalid'."""
+    beat = Beat.model_validate(_sticker_beat())
+    assert beat.sticker is None
+
+
+def test_an_empty_terms_list_is_accepted():
+    """The model can name a word and give no usable term. That is a beat
+    with no candidates, not a malformed beat."""
+    beat = Beat.model_validate(_sticker_beat(sticker={"word": "code", "terms": []}))
+    assert beat.sticker.terms == []

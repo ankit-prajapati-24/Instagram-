@@ -85,6 +85,23 @@ class WordTiming(BaseModel):
     end: float
 
 
+class StickerCue(Coercing):
+    """What the script asked for at one beat: a word to sit on, and what
+    the icon should show.
+
+    ``word`` is a word from this beat's ``caption_text``, which is where the
+    timings come from -- a sticker with no word has no clock. ``terms`` are
+    English, and single words, because ``sticker_catalog.search`` ranks
+    against hyphen-separated slug name parts and a multi-word query matches
+    nothing. They are a list rather than one term because the catalogue is
+    named for objects and not for ideas: "dream" finds nothing and "cloud"
+    finds an icon, and both mean the same beat.
+    """
+
+    word: str
+    terms: list[str] = Field(default_factory=list)
+
+
 class CleanupInfo(BaseModel):
     """What the cleanup chain did to a beat's uploaded narration, carried on
     the beat so the voice board can show it after a reload.
@@ -157,6 +174,10 @@ class Beat(Coercing):
     voice_text: str
     caption_text: str
     on_screen_text: str | None = None
+    # What the script asked for at this beat, or None to fall back to the
+    # trigger map in engine/data/stickers.json. None on every plan stored
+    # before this field existed, which is why the fallback stays.
+    sticker: StickerCue | None = None
     target_seconds: float
     visual_prompt: str
     motion: Motion

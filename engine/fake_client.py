@@ -97,6 +97,10 @@ SAMPLE_BEATS = [
      "and not out, silence"),
 ]
 
+# One beat carries a sticker request, so every test that runs the fake
+# through the pipeline exercises the model rung rather than only the
+# trigger map. Concrete nouns, because the catalogue is named for objects.
+SAMPLE_STICKERS = {2: {"word": "raat", "terms": ["moon", "star", "night"]}}
 
 MOTIONS = ["zoom_in", "move_left", "zoom_out", "move_right"]
 TRANSITIONS = ["fade", "slide_left", "fade", "fade", "fade", "fade",
@@ -132,6 +136,7 @@ def _script() -> dict:
             "voice_text": voice,
             "caption_text": caption,
             "on_screen_text": punch,
+            "sticker": SAMPLE_STICKERS.get(index),
             "target_seconds": 4.4,
             "visual_prompt": prompt,
             "motion": MOTIONS[index % len(MOTIONS)],

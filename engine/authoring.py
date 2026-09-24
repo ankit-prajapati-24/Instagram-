@@ -185,6 +185,28 @@ def _text(value) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _sticker(raw) -> dict | None:
+    """The beat's sticker request, or None when it asked for none.
+
+    Tolerant on purpose: a model that returns a bare string, drops
+    ``terms``, or returns them as one comma-joined string is asking for a
+    sticker and should get one. Only a request with no word at all is
+    nothing, because a sticker with no word has no clock.
+    """
+    if not isinstance(raw, dict):
+        return None
+    word = _text(raw.get("word"))
+    if not word:
+        return None
+    terms = raw.get("terms")
+    if isinstance(terms, str):
+        terms = terms.split(",")
+    if not isinstance(terms, (list, tuple)):
+        terms = []
+    clean = [t for t in (_text(term).lower() for term in terms) if t]
+    return {"word": word, "terms": clean}
+
+
 def read_script_json(raw: str, facts: dict, settings) -> ImportResult:
     """Turn a pasted JSON script into beats the manual form can hold.
 
@@ -277,6 +299,7 @@ def read_script_json(raw: str, facts: dict, settings) -> ImportResult:
 
         total_words += len(beat.get("voice_text", "").split())
         beat["on_screen_text"] = _text(item.get("on_screen_text")) or None
+        beat["sticker"] = _sticker(item.get("sticker"))
 
         for name, vocabulary, default in (
                 ("role", facts["roles"],

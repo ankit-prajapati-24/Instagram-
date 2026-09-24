@@ -401,6 +401,12 @@ def build_manual_script(beats: list[dict], settings) -> Script:
             "caption_text": str(row["caption_text"]).strip(),
             "on_screen_text": (str(row.get("on_screen_text") or "").strip()
                                or None),
+            "sticker": ({"word": str(row["sticker_word"]).strip(),
+                         "terms": [t.strip().lower()
+                                   for t in str(row.get("sticker_terms") or
+                                                "").split(",") if t.strip()]}
+                        if str(row.get("sticker_word") or "").strip()
+                        else None),
             "visual_prompt": str(row["visual_prompt"]).strip(),
             "motion": row.get("motion") or "zoom_in",
             "transition": row.get("transition") or "fade",
