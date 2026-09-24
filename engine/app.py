@@ -61,6 +61,8 @@ from engine.assembly import sticker_catalog
 from engine.assembly import sticker_choices as sticker_choices_mod
 from engine.assembly import stickers as stickers_mod
 from engine.assembly.render import VIDEO_SUFFIXES
+from engine.authoring import (authoring_facts, build_prompt,
+                              read_script_json)
 from engine.config import (Settings, beat_count, beat_word_range,
                            speech_rate, spoken_seconds, word_budget,
                            words_per_beat)
@@ -800,40 +802,49 @@ def create_app(db_path: str | Path | None = None,
         definition each. So the panel holds none: it fetches this and
         renders the form, the live budget meter and the duration windows
         from what comes back.
-        """
-        budget = word_budget(settings)
-        count = beat_count(settings)
-        per_beat = words_per_beat(budget, count, settings)
-        beat_words_min, beat_words_max = beat_word_range(per_beat, settings)
-        gate_min, gate_max = pre_render_range(settings.duration_min,
-                                              settings.duration_max)
-        from engine.agents import LATIN_LETTERS_RE, WORD_TOLERANCE
 
-        return {
-            "beat_count": count,
-            "word_budget": budget,
-            "word_tolerance": WORD_TOLERANCE,
-            "word_min": round(budget * (1 - WORD_TOLERANCE)),
-            "word_max": round(budget * (1 + WORD_TOLERANCE)),
-            "words_per_beat": per_beat,
-            "beat_words_min": beat_words_min,
-            "beat_words_max": beat_words_max,
-            "speech_rate": speech_rate(settings),
-            "predicted_seconds": spoken_seconds(budget, settings),
-            "target_seconds": settings.target_seconds,
-            "duration_min": settings.duration_min,
-            "duration_max": settings.duration_max,
-            "gate_min": gate_min,
-            "gate_max": gate_max,
-            "default_roles": default_roles(count, settings),
-            "roles": list(get_args(Role)),
-            "motions": list(get_args(Motion)),
-            "transitions": list(get_args(Transition)),
-            # The Devanagari rule's own regex, so the panel's live warning
-            # cannot disagree with the server's refusal.
-            "latin_pattern": LATIN_LETTERS_RE.pattern,
-            "topic_max": TOPIC_MAX,
-        }
+        The same dict builds the import prompt, so a brief handed to
+        another tool cannot ask for a different script than this form
+        accepts.
+        """
+        return authoring_facts(settings, topic_max=TOPIC_MAX)
+
+    @app.get("/api/authoring/prompt")
+    def authoring_prompt(topic: str = "") -> dict:
+        """A brief the user pastes into whatever tool they like.
+
+        Read-only and model-free, like everything on the manual path: the
+        user runs the other tool themselves and brings the JSON back.
+        """
+        facts = authoring_facts(settings, topic_max=TOPIC_MAX)
+        return {"topic": topic.strip()[:TOPIC_MAX],
+                "prompt": build_prompt(topic.strip()[:TOPIC_MAX], facts)}
+
+    @app.post("/api/authoring/import")
+    async def authoring_import(request: Request) -> dict:
+        """Read a pasted JSON script into beats the form can be filled from.
+
+        The body is the pasted text, not a JSON object, so a paste that is
+        not valid JSON gets an answer naming the line and column instead
+        of FastAPI's own 422 about a malformed request. Malformed input is
+        the expected case here, not an exception.
+
+        Always 200: a paste with four things wrong should report four
+        things. ``ok`` in the body is what says whether the form can be
+        filled.
+        """
+        limit = int(settings.upload_max_mb * 1024 * 1024)
+        raw = b""
+        async for chunk in request.stream():
+            raw += chunk
+            if len(raw) > limit:
+                raise HTTPException(
+                    413, f"that paste passed the "
+                         f"{settings.upload_max_mb:g} MB cap. A script is "
+                         f"a few kilobytes — this is not one.")
+        facts = authoring_facts(settings, topic_max=TOPIC_MAX)
+        text = raw.decode("utf-8", errors="replace")
+        return read_script_json(text, facts, settings).to_dict()
 
     @app.post("/api/plan/manual")
     def create_manual_plan(request: ManualPlanRequest) -> dict:

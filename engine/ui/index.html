@@ -347,6 +347,21 @@
   .lenbar.warn { color: var(--gold); }
   .lenbar.ok { color: var(--moss); }
 
+  /* drafting the script somewhere else */
+  .importbox { border: 1px solid var(--rule); background: var(--card);
+               padding: 12px 14px; margin: 14px 0 6px; }
+  .importbox .row { display: flex; gap: 10px; flex-wrap: wrap;
+                    align-items: center; }
+  .importbox textarea {
+    margin-top: 10px; font-family: var(--mono, monospace); font-size: 12.5px;
+  }
+  .importnote { font-size: 12.5px; line-height: 1.5; margin-top: 8px; }
+  .importnote ul { margin: 6px 0 0; padding-left: 18px; }
+  .importnote li { margin: 2px 0; }
+  .importnote .bad { color: var(--stamp); }
+  .importnote .fill { color: var(--muted); }
+  .importnote .note { color: var(--gold); }
+
   /* light-box */
   .lightbox { display: flex; gap: 22px; flex-wrap: wrap; margin-top: 14px; }
   .lightbox video {
@@ -497,6 +512,31 @@
       <p class="hint">Nothing on this path is sent to a model — not the
         script, not research, not the metadata. Devanagari is what the voice
         reads; Roman Hinglish is what gets burned on screen.</p>
+
+      <div class="importbox">
+        <div class="row">
+          <button id="btn-copy-prompt">Copy the prompt</button>
+          <button id="btn-paste-json">Paste JSON</button>
+          <span class="hint" id="import-said"></span>
+        </div>
+        <p class="hint">Drafting ten beats by hand is slow. Copy the
+          prompt into whatever tool you like, bring the JSON back, and
+          paste it here — it fills the form below, it does not submit.
+          The prompt carries this engine's real numbers, so it can never
+          ask for a script this form would refuse. It also asks for no
+          source URLs: an invented one is indistinguishable from a real
+          one once it is filed as provenance, so sources stay yours to
+          add.</p>
+        <textarea id="import-json" rows="6" spellcheck="false"
+                  class="hidden"
+                  placeholder="Paste the JSON here"></textarea>
+        <div class="row hidden" id="import-actions"
+             style="margin-top:8px">
+          <button class="go" id="btn-import-fill">Fill the form</button>
+          <button id="btn-import-cancel">Cancel</button>
+        </div>
+        <div class="importnote" id="import-report"></div>
+      </div>
 
       <div class="meter" id="budget"></div>
 
@@ -1960,6 +2000,112 @@ $("btn-manual").onclick = () => {
   show("s-manual");
   updateBudget();
   $("s-manual").scrollIntoView({ behavior: "smooth", block: "start" });
+};
+
+/* ---------------------------------------------------------------------
+   Drafting the script in another tool.
+
+   The prompt is fetched, never built here: every number in it comes from
+   /api/authoring, the same dict this form is rendered from, so a brief
+   handed to another tool cannot ask for a script this form would refuse.
+   The paste goes to /api/authoring/import, which is where the tolerance
+   and the refusals live — the panel only renders what it is told.
+   --------------------------------------------------------------------- */
+$("btn-copy-prompt").onclick = async () => {
+  const topic = $("topic").value.trim();
+  const said = $("import-said");
+  said.textContent = "building…";
+  try {
+    const url = `/api/authoring/prompt?topic=${encodeURIComponent(topic)}`;
+    const data = await (await fetch(url)).json();
+    await navigator.clipboard.writeText(data.prompt);
+    said.textContent = topic
+      ? "copied — paste it into any AI"
+      : "copied (no topic typed, so it says <your topic>)";
+    setTimeout(() => { said.textContent = ""; }, 4000);
+  } catch (err) {
+    said.textContent = "";
+    banner("Could not copy the prompt: " + esc(String(err)), true);
+  }
+};
+
+$("btn-paste-json").onclick = () => {
+  show("import-json");
+  show("import-actions");
+  $("import-json").focus();
+};
+
+$("btn-import-cancel").onclick = () => {
+  hide("import-json");
+  hide("import-actions");
+  $("import-json").value = "";
+  $("import-report").innerHTML = "";
+};
+
+function renderImportReport(data) {
+  const bits = [];
+  if (data.problems.length) {
+    bits.push(`<b class="bad">Not imported — ${data.problems.length}
+      problem(s):</b><ul>`
+      + data.problems.map((p) => `<li class="bad">${esc(p)}</li>`).join("")
+      + "</ul>");
+  }
+  if (data.notes.length) {
+    bits.push("<ul>" + data.notes.map(
+      (n) => `<li class="note">${esc(n)}</li>`).join("") + "</ul>");
+  }
+  if (data.ok && data.filled.length) {
+    bits.push(`<span class="fill">Filled in for you:
+      ${data.filled.map(esc).join(", ")}.</span>`);
+  }
+  $("import-report").innerHTML = bits.join("");
+}
+
+$("btn-import-fill").onclick = async () => {
+  const raw = $("import-json").value.trim();
+  if (!raw) { $("import-json").focus(); return; }
+  $("btn-import-fill").disabled = true;
+  $("import-said").textContent = "reading…";
+  try {
+    const response = await fetch("/api/authoring/import", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: raw
+    });
+    if (response.status === 413) {
+      const err = await response.json();
+      banner(esc(String(err.detail)), true);
+      return;
+    }
+    const data = await response.json();
+    renderImportReport(data);
+    $("import-said").textContent = "";
+    if (!data.ok) return;
+
+    /* Fill the rows the form already built, rather than rebuilding it —
+       the row markup, its handlers and the live budget meter all stay
+       exactly as they are for a hand-typed script. */
+    if (data.topic) $("topic").value = data.topic;
+    document.querySelectorAll("#manual-beats tr").forEach((tr, i) => {
+      const beat = data.beats[i];
+      if (!beat) return;
+      tr.querySelectorAll("[data-f]").forEach((el) => {
+        const key = el.dataset.f;
+        if (beat[key] !== undefined && beat[key] !== null) {
+          el.value = beat[key];
+        }
+      });
+    });
+    updateBudget();
+    hide("import-json");
+    hide("import-actions");
+    $("import-json").value = "";
+  } catch (err) {
+    $("import-said").textContent = "";
+    banner("Import failed: " + esc(String(err)), true);
+  } finally {
+    $("btn-import-fill").disabled = false;
+  }
 };
 
 $("btn-add-source").onclick = addSource;
