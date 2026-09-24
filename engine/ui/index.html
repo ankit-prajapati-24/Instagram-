@@ -245,29 +245,117 @@
   .screen:hover .play { opacity: 1; }
   .screen.playing .play { display: none; }
 
-  /* Options for one slot, shown under its own card. */
-  .clipcard .options { display: none; }
-  .clipcard.open .options { display: block; }
-  .clipcard .options .strip {
-    display: grid; gap: 6px; margin-top: 6px;
-    grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
-  }
-  .clipcard .options .opt { display: flex; flex-direction: column; gap: 3px; }
-  .clipcard .options .opt .meta {
-    font-size: 10px; color: var(--muted);
-    font-variant-numeric: tabular-nums;
-  }
-  .clipcard .options .opt.dupe .meta { color: var(--gold); }
-  .clipcard .options button.use {
-    font-size: 10.5px; padding: 3px 4px;
-  }
   .clipcard .scene {
     font-size: 11.5px; color: var(--muted); line-height: 1.35;
     border-left: 2px solid var(--rule); padding-left: 6px;
   }
   .clipcard .qlabel, .clipcard .scenelabel {
-    font-size: 9.5px; color: #5f7278; text-transform: uppercase;
-    letter-spacing: 0.06em;
+    font-size: 10.5px; color: #5f7278;
+  }
+
+  /* --- the lineup ------------------------------------------------------
+     Judging "is this better than what I have" is impossible when what you
+     have is drawn somewhere else at another size. So the clip currently in
+     the slot stands in the same row as the candidates, same dimensions,
+     same light, separated by one dotted rule -- left of it is what you
+     have, right of it is what you could have. That rule is the only
+     decoration in here; everything else is the footage.
+
+     A horizontal scroller rather than a grid, because portrait video wants
+     height and a grid of 9:16 tiles wastes the screen on gutters. CSS
+     scroll-snap does this natively: no carousel library, keyboard arrows
+     work, and it degrades to a plain scroll if anything is unsupported. */
+  .lineup {
+    position: fixed; inset: 0; z-index: 60;
+    background: rgba(9, 13, 15, 0.93);
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  .lineup[hidden] { display: none; }
+  .lineup .frame {
+    background: var(--ink); border: 1px solid var(--rule);
+    width: min(1180px, 100%); max-height: 100%;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .lineup header {
+    display: flex; align-items: baseline; gap: 14px;
+    padding: 14px 18px 10px; border-bottom: 1px solid var(--rule);
+    position: static; background: none;
+  }
+  .lineup header b { font-size: 14px; color: var(--paper); }
+  .lineup header .fixed {
+    font-size: 12px; color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .lineup header .shut {
+    margin-left: auto; background: none; border: 0; color: var(--muted);
+    font-size: 20px; line-height: 1; padding: 2px 8px; cursor: pointer;
+  }
+  .lineup header .shut:hover { color: var(--paper); }
+  .lineup .body { overflow-y: auto; padding: 16px 18px 18px; }
+  /* The question being answered, so it reads before anything else. */
+  .lineup .asked {
+    font-family: var(--serif); font-size: 19px; line-height: 1.45;
+    color: var(--paper); max-width: 62ch; margin: 0 0 4px;
+  }
+  .lineup .spoken {
+    font-size: 13px; color: var(--muted); line-height: 1.5;
+    max-width: 62ch; margin: 0 0 16px;
+  }
+  /* The fade is the scroll affordance: with six 196px tiles the sixth is
+     always half-cut, and a hard edge reads as a broken layout rather than
+     as more to see. */
+  .lineup .railwrap { position: relative; }
+  .lineup .railwrap::after {
+    content: ""; position: absolute; top: 0; bottom: 10px; right: 0;
+    width: 56px; pointer-events: none;
+    background: linear-gradient(to right, rgba(18,25,28,0), var(--ink));
+  }
+  .lineup .rail {
+    display: flex; gap: 12px; overflow-x: auto; padding-bottom: 10px;
+    scroll-snap-type: x proximity;
+  }
+  .lineup .rail > * { scroll-snap-align: start; flex: 0 0 auto; }
+  .lineup .subject { width: 196px; display: flex; flex-direction: column;
+                     gap: 6px; }
+  .lineup .subject .screen { width: 196px; }
+  .lineup .subject .line {
+    font-size: 11.5px; color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .lineup .subject.dupe .line { color: var(--gold); }
+  .lineup .subject .use { width: 100%; }
+  /* What is in the slot now: held apart by a rule, and unusable, because
+     choosing what you already have is not a choice. */
+  /* What the slot holds now, marked by the gold frame the rest of the
+     panel already uses for "this is the live one". A dividing rule was
+     tried here too and removed: with the frame doing the same job it was
+     a second answer to a question already answered. */
+  .lineup .incumbent { margin-right: 6px; }
+  .lineup .incumbent .line { color: var(--gold); }
+  .lineup .incumbent .screen { border-color: var(--gold); }
+  .lineup .hunt {
+    display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap;
+    align-items: center;
+  }
+  .lineup .hunt input[type=text] {
+    flex: 1; min-width: 220px; max-width: 520px;
+  }
+  .lineup .was {
+    font-size: 12px; color: var(--muted); margin: 16px 0 0;
+  }
+  .lineup .said { font-size: 12.5px; margin-top: 10px; min-height: 16px; }
+  .lineup .said.bad { color: var(--stamp); }
+  .lineup .said.ok { color: var(--moss); }
+  .lineup .empty { color: var(--muted); font-size: 13px; padding: 30px 0; }
+  @media (max-width: 720px) {
+    .lineup { padding: 0; }
+    .lineup .frame { max-height: 100%; height: 100%; }
+    .lineup .subject, .lineup .subject .screen { width: 150px; }
+    .lineup .asked { font-size: 17px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .lineup .rail { scroll-behavior: auto; }
   }
   .clipcard {
     border: 1px solid var(--rule); background: var(--card); padding: 8px;
@@ -757,6 +845,32 @@
       </div>
 
       <div class="clipgrid" id="clipgrid"></div>
+
+      <div class="lineup" id="lineup" hidden role="dialog" aria-modal="true"
+           aria-labelledby="lineup-slot">
+        <div class="frame">
+          <header>
+            <b id="lineup-slot"></b>
+            <span class="fixed" id="lineup-fixed"></span>
+            <button class="shut" id="lineup-shut"
+                    aria-label="Close">&times;</button>
+          </header>
+          <div class="body">
+            <p class="asked" id="lineup-asked"></p>
+            <p class="spoken" id="lineup-spoken"></p>
+            <div class="railwrap">
+              <div class="rail" id="lineup-rail"></div>
+            </div>
+            <div class="said" id="lineup-said"></div>
+            <p class="was" id="lineup-was"></p>
+            <div class="hunt">
+              <input type="text" id="lineup-q"
+                     placeholder="Search Pexels for a better shot">
+              <button class="go" id="lineup-go">Search</button>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <h3 style="margin-top:30px">Sticker art <em id="sticker-note"></em></h3>
       <p class="hint">One card per sticker cue that actually fired in this
@@ -1505,28 +1619,17 @@ function renderReview() {
       <div class="prov ${c.replaced ? "upload" : (weak ? "weak" : "")}">
         ${esc(c.provider)}${c.kind === "image" ? " · still" : " · video"}
       </div>
-      <div class="scenelabel">the scene this beat asked for</div>
+      <div class="scenelabel">Scene asked for</div>
       <div class="scene">${esc(c.visual_prompt) || "<i>none recorded</i>"}</div>
-      <div class="qlabel">what the search was given</div>
+      <div class="qlabel">Searched for</div>
       <div class="q">${esc(c.query) || "<i>no query recorded</i>"}</div>
       <button class="opts" data-beat="${esc(c.beat_id)}"
-              data-slot="${c.slot}" data-q="${esc(c.query || "")}"
-              data-id="${id}">Show other options</button>
+              data-slot="${c.slot}">Compare other clips</button>
       <label class="pick">
         Upload my own
         <input type="file" accept="video/*,image/*"
                data-beat="${esc(c.beat_id)}" data-slot="${c.slot}">
       </label>
-      <div class="options" id="opts-${id}">
-        <div class="row" style="display:flex;gap:6px;margin-top:6px">
-          <input type="text" id="optq-${id}" value="${esc(c.query || "")}"
-                 style="font-size:11.5px;padding:5px 6px">
-          <button class="again" data-id="${id}"
-                  data-beat="${esc(c.beat_id)}"
-                  data-slot="${c.slot}">Go</button>
-        </div>
-        <div class="strip" id="optstrip-${id}"></div>
-      </div>
       <div class="said" id="said-${id}"></div>
     </figure>`;
   }).join("");
@@ -1539,51 +1642,106 @@ function renderReview() {
     screen.onclick = () => playClip(screen);
   });
   $("clipgrid").querySelectorAll("button.opts").forEach((button) => {
-    button.onclick = () => showOptions(button);
-  });
-  $("clipgrid").querySelectorAll("button.again").forEach((button) => {
-    button.onclick = () => loadOptions(
-      button.dataset.id, button.dataset.beat, Number(button.dataset.slot),
-      $("optq-" + button.dataset.id).value);
+    button.onclick = () => openLineup(button.dataset.beat,
+                                      Number(button.dataset.slot));
   });
   show("s-review");
 }
 
-/* Options for one slot, under that slot's own card.
+/* The lineup: the clip in the slot, and the candidates, in one row.
 
-   Fetched when asked for rather than with the board: each one is a
-   Pexels request, and twenty-two of them on every page load would spend
-   a tenth of the hourly allowance before anyone looked at anything.
+   Judging "is this better than what I have" is impossible when what you
+   have is drawn somewhere else at another size, so the incumbent stands
+   in the same row at the same dimensions, held apart by one dotted rule.
+   It has no Use button -- choosing what you already have is not a choice.
 
-   The query box is prefilled with the query that produced the clip,
-   because that query is usually why the clip is wrong -- a real run
-   searched "ancient greek temple columns" for a beat about a Himalayan
-   lake, and no result of that search would have helped. Seeing it is
-   half the fix. */
-function showOptions(button) {
-  const id = button.dataset.id;
-  const card = $("card-" + id);
-  if (card.classList.contains("open")) {
-    card.classList.remove("open");
-    button.textContent = "Show other options";
-    return;
-  }
-  card.classList.add("open");
-  button.textContent = "Hide options";
-  if (!$("optstrip-" + id).innerHTML) {
-    loadOptions(id, button.dataset.beat, Number(button.dataset.slot),
-                button.dataset.q);
-  }
+   Candidates are fetched when the lineup opens, not with the board: each
+   one is a Pexels request, and twenty-two on every page load would spend
+   a tenth of the hourly allowance before anyone looked at anything. The
+   query box starts on the query that produced the clip, because that
+   query is usually why the clip is wrong. */
+let LINEUP = null;
+let LINEUP_RETURN = null;
+
+function openLineup(beat, slot) {
+  const row = REVIEW && REVIEW.clips.find(
+    (c) => c.beat_id === beat && String(c.slot) === String(slot));
+  if (!row) return;
+  LINEUP = row;
+  LINEUP_RETURN = document.activeElement;
+
+  $("lineup-slot").textContent = `${row.beat_id} · slot ${row.slot}`;
+  $("lineup-fixed").textContent =
+    `${row.duration.toFixed(2)}s, fixed by the narration`;
+  $("lineup-asked").textContent =
+    row.visual_prompt || "This beat recorded no scene description.";
+  $("lineup-spoken").textContent = row.query
+    ? "" : "No search query was recorded for this slot.";
+  $("lineup-was").textContent = row.query ? `Searched for: ${row.query}` : "";
+  $("lineup-q").value = row.query || "";
+  $("lineup-said").className = "said";
+  $("lineup-said").textContent = "";
+  $("lineup-rail").innerHTML = incumbentHtml(row);
+  wireRail();
+
+  $("lineup").hidden = false;
+  document.addEventListener("keydown", lineupKeys);
+  $("lineup-shut").focus();
+  if (row.query) runLineupSearch(row.query);
 }
 
-async function loadOptions(id, beat, slot, query) {
-  const strip = $("optstrip-" + id);
-  const said = $("said-" + id);
-  if (!query || !query.trim()) { said.className = "said bad";
-    said.textContent = "type something to search for"; return; }
+function closeLineup() {
+  stopPlaying();
+  $("lineup").hidden = true;
+  document.removeEventListener("keydown", lineupKeys);
+  LINEUP = null;
+  if (LINEUP_RETURN && LINEUP_RETURN.focus) LINEUP_RETURN.focus();
+}
+
+function lineupKeys(event) {
+  if (event.key === "Escape") { closeLineup(); return; }
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  if (event.target && event.target.tagName === "INPUT") return;
+  const rail = $("lineup-rail");
+  rail.scrollBy({ left: event.key === "ArrowRight" ? 208 : -208,
+                  behavior: "smooth" });
+}
+
+function incumbentHtml(row) {
+  return `
+    <div class="subject incumbent">
+      <div class="screen" data-play="${row.play}" data-kind="${row.kind}"
+           id="lin-now" title="Play what is in the slot now">
+        <img alt="in the slot now" src="${row.thumb}">
+        ${row.kind === "video" ? '<div class="play">&#9654;</div>' : ""}
+      </div>
+      <div class="line">in the slot now · ${esc(row.provider)}</div>
+    </div>`;
+}
+
+function wireRail() {
+  $("lineup-rail").querySelectorAll(".screen").forEach((screen) => {
+    if (screen.dataset.kind === "image") return;
+    screen.onclick = () => playClip(screen);
+  });
+  $("lineup-rail").querySelectorAll("button.use").forEach((button) => {
+    button.onclick = () => useFromLineup(button);
+  });
+}
+
+async function runLineupSearch(query) {
+  if (!LINEUP || !PLAN) return;
+  const said = $("lineup-said");
+  const rail = $("lineup-rail");
+  if (!query || !query.trim()) {
+    said.className = "said bad";
+    said.textContent = "Type what the shot should show.";
+    return;
+  }
   said.className = "said";
-  said.textContent = "asking Pexels…";
-  strip.innerHTML = "";
+  said.textContent = "Asking Pexels\u2026";
+  rail.innerHTML = incumbentHtml(LINEUP);
+  wireRail();
   try {
     const response = await fetch(
       `/api/plan/${PLAN.plan_id}/clip-search?q=${encodeURIComponent(query)}`);
@@ -1594,41 +1752,40 @@ async function loadOptions(id, beat, slot, query) {
       return;
     }
     if (!data.results.length) {
-      said.textContent = "nothing for that. Try fewer words, or plainer ones.";
+      said.textContent = "";
+      rail.innerHTML += `<p class="empty">Nothing came back for that.
+        Try fewer words, or plainer ones \u2014 "empty street at night"
+        finds more than "abandoned haveli of Kuldhara".</p>`;
       return;
     }
-    strip.innerHTML = data.results.map((r, i) => `
-      <div class="opt ${r.used_in.length ? "dupe" : ""}">
+    rail.innerHTML += data.results.map((r) => `
+      <div class="subject ${r.used_in.length ? "dupe" : ""}">
         <div class="screen" data-play="${r.play}" data-kind="video"
-             id="opt-${id}-${i}" title="Play">
-          <img loading="lazy" alt="option ${i + 1}" src="${r.preview}">
+             title="Play">
+          <img loading="lazy" alt="candidate" src="${r.preview}">
           <div class="play">&#9654;</div>
         </div>
-        <div class="meta">${r.duration}s${r.portrait ? "" : " · wide"}${
-          r.used_in.length ? " · already used" : ""}</div>
-        <button class="use" data-id="${id}" data-beat="${esc(beat)}"
-                data-slot="${slot}" data-pid="${r.pexels_id}">Use</button>
+        <div class="line">${r.duration}s${r.portrait ? "" : " · wide"}${
+          r.used_in.length ? ` · already in ${esc(r.used_in[0])}` : ""}</div>
+        <button class="use" data-pid="${r.pexels_id}">Use this</button>
       </div>`).join("");
-    strip.querySelectorAll(".screen").forEach(
-      (screen) => { screen.onclick = () => playClip(screen); });
-    strip.querySelectorAll("button.use").forEach((b) => {
-      b.onclick = () => useOption(b);
-    });
-    said.textContent = `${data.results.length} options — play one, then Use`;
+    wireRail();
+    said.textContent = `${data.results.length} to compare. Click one to
+      play it.`;
   } catch (err) {
     said.className = "said bad";
     said.textContent = String(err);
   }
 }
 
-async function useOption(button) {
-  const id = button.dataset.id;
-  const beat = button.dataset.beat;
-  const slot = Number(button.dataset.slot);
-  const said = $("said-" + id);
+async function useFromLineup(button) {
+  if (!LINEUP) return;
+  const beat = LINEUP.beat_id;
+  const slot = LINEUP.slot;
+  const said = $("lineup-said");
   button.disabled = true;
   said.className = "said";
-  said.textContent = "downloading…";
+  said.textContent = "Downloading\u2026";
   try {
     const response = await fetch(
       `/api/plan/${PLAN.plan_id}/clip/${beat}/${slot}/pick`, {
@@ -1641,14 +1798,22 @@ async function useOption(button) {
       said.textContent = String(data.detail || response.status);
       return;
     }
-    if (PLAYING === $("screen-" + id)) stopPlaying();
+    const id = `${beat}-${slot}`;
+    if (PLAYING) stopPlaying();
     $("thumb-" + id).src = `${data.thumb}&t=${Date.now()}`;
     $("card-" + id).classList.remove("gone");
-    said.className = "said ok";
-    said.textContent = `now Pexels ${data.pexels_id}`;
     const row = REVIEW.clips.find(
       (c) => c.beat_id === beat && String(c.slot) === String(slot));
-    if (row) { row.provider = data.provider; row.kind = data.kind; }
+    if (row) {
+      row.provider = data.provider; row.kind = data.kind;
+      row.thumb = `${data.thumb}&t=${Date.now()}`;
+      row.play = data.play;
+    }
+    $("said-" + id).className = "said ok";
+    $("said-" + id).textContent = `now Pexels ${data.pexels_id}`;
+    said.className = "said ok";
+    said.textContent = `${beat} · slot ${slot} now uses this clip.`;
+    closeLineup();
   } catch (err) {
     said.className = "said bad";
     said.textContent = String(err);
@@ -1656,6 +1821,15 @@ async function useOption(button) {
     button.disabled = false;
   }
 }
+
+$("lineup-shut").onclick = closeLineup;
+$("lineup").onclick = (event) => {
+  if (event.target === $("lineup")) closeLineup();
+};
+$("lineup-go").onclick = () => runLineupSearch($("lineup-q").value);
+$("lineup-q").onkeydown = (event) => {
+  if (event.key === "Enter") runLineupSearch($("lineup-q").value);
+};
 
 /* Searching Pexels by hand.
 
