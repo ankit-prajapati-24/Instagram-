@@ -250,3 +250,75 @@ def test_a_nonsense_slug_reads_as_no_bake_rather_than_raising(tmp_path):
     # The write paths still refuse the same slugs.
     with pytest.raises(ValueError):
         sc.bake_key("../../../evil", "dark", 184, 30)
+
+
+def _fake_bake(root, slug, style, *, size, fps):
+    """Write a bake of the right shape without running the real one.
+
+    ``cached_sequence`` validates fps, size and frame count, so the cheapest
+    honest fixture is the right number of correctly sized transparent PNGs
+    -- plus the ``meta.json`` ``_resolve`` actually reads those values from
+    (``bake_one`` writes the same shape); without it every lookup here
+    reads as "nothing cached" and falls through, not as a resolved bake.
+    """
+    from engine.assembly import stickers as stk
+    frames = round(stk.HOLD_SECONDS * fps)
+    canvas = stk.sticker_canvas(size)
+    folder = (Path(root) / sc.BAKES_DIRNAME
+              / sc.bake_key(slug, style, size, fps))
+    folder.mkdir(parents=True, exist_ok=True)
+    for n in range(frames):
+        Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0)).save(
+            folder / f"frame-{n:03d}.png")
+    (folder / "meta.json").write_text(json.dumps({
+        "source": f"{slug}.gif", "style": style, "frames": frames,
+        "fps": fps, "size": size, "canvas": canvas, "licence": "test",
+    }), encoding="utf-8")
+    return folder
+
+
+def test_two_beats_resolve_their_own_chosen_icons(tmp_path):
+    """The defect the beat key fixes, proven where it is actually visible.
+
+    Two `water` cues in one reel. Keyed by trigger name they shared one
+    answer; keyed by beat they each get their own. Deliberately trigger-rung
+    cues: on the model rung `cue.name` already IS the beat id, so a test
+    built from `sticker` fields cannot tell the old code from the new.
+    """
+    from engine.media.voice import caption_timings
+    from engine.assembly import stickers as stk
+    from tests.factories import make_plan, shipped_settings
+
+    plan = make_plan(beats=4, measured=4.0)
+    for beat, text in zip(plan.script.beats, [
+            "ek ladki college gayi thi yahan",
+            "usne paani piya tha wahan",
+            "phir ek aur line yahan par",
+            "aur paani gira tha neeche"]):
+        beat.caption_text = text
+        beat.words = caption_timings(text, 4.0)
+
+    cues = [c for c in stk.find_cues(plan) if c.name == "water"]
+    assert len(cues) == 2, f"needed two water cues, got {cues}"
+    first, second = cues[0].beat_id, cues[1].beat_id
+    assert first != second
+
+    settings = shipped_settings(work_dir=str(tmp_path), stickers=True)
+    size = stk.sticker_size(settings.width, settings.sticker_scale)
+    fps = int(settings.fps)
+    root = sc.cache_root(settings)
+    by_id = {b.beat_id: b for b in plan.script.beats}
+    picks = {first: "27-globe", second: "1875-planet"}
+    for beat_id, slug in picks.items():
+        _fake_bake(root, slug, stk.style_for_role(by_id[beat_id].role),
+                   size=size, fps=fps)
+
+    prepared = stk.prepare(plan, settings, choices=picks)
+    index = {b.beat_id: n for n, b in enumerate(plan.script.beats)}
+    patterns = {s.beat_index: s.pattern for s in prepared}
+    for beat_id, slug in picks.items():
+        want = sc.bake_key(slug, stk.style_for_role(by_id[beat_id].role),
+                           size, fps)
+        assert want in patterns[index[beat_id]], \
+            f"{beat_id} did not resolve to {slug}"
+    assert all(s.baked for s in prepared), "the Lordicon credit depends on this"

@@ -742,8 +742,10 @@ def test_a_chosen_slug_wins_over_the_committed_art(tmp_path):
     # test needs no network.
     _bake_into_the_choice_cache(settings, "2813-creepy-eye-ball")
 
+    # Keyed by beat id, not by trigger name -- the first "death" cue this
+    # plan fires lands on beat 0, i.e. "b0".
     chosen = stk.prepare(plan, settings,
-                         choices={"death": "2813-creepy-eye-ball"})
+                         choices={"b0": "2813-creepy-eye-ball"})
     assert chosen, "expected a sticker"
     assert chosen[0].baked is True
     assert sc.bake_key("2813-creepy-eye-ball", "punchy", size,
@@ -796,7 +798,8 @@ def test_a_choice_whose_cache_is_gone_falls_through_and_does_not_raise(
     size = stk.sticker_size(settings.width, settings.sticker_scale)
     key = sc.bake_key("2813-creepy-eye-ball", "punchy", size,
                       int(settings.fps))
-    choices = {"death": "2813-creepy-eye-ball"}
+    # Keyed by beat id, not by trigger name -- see the sibling test above.
+    choices = {"b0": "2813-creepy-eye-ball"}
 
     folder = _bake_into_the_choice_cache(settings, "2813-creepy-eye-ball")
     live = stk.prepare(plan, settings, choices=choices)

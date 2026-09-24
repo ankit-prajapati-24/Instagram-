@@ -574,7 +574,7 @@ def prepare(plan: ReelPlan, settings, *,
     other stickers either. Baked art needs no font, so on a box without one
     a plan still gets every designed sticker it triggered.
 
-    ``choices`` maps a trigger to a Lordicon slug someone picked for this
+    ``choices`` maps a beat id to a Lordicon slug someone picked for this
     reel in the panel. It is the top rung: a chosen icon beats the committed
     art, which beats the emoji glyph. A slug whose bake is missing falls
     through to the rung below rather than failing, so cleaning the cache
@@ -606,7 +606,10 @@ def prepare(plan: ReelPlan, settings, *,
         beat = plan.script.beats[cue.beat_index]
         style = style_for_role(getattr(beat, "role", None))
         found = None
-        chosen = (choices or {}).get(cue.name)
+        # By beat, not by name: ``cue.name`` is a trigger on the fallback
+        # rung and a beat id on the model rung, and a reel's two cues of one
+        # trigger used to be unable to wear two different icons.
+        chosen = (choices or {}).get(cue.beat_id)
         if chosen:
             # Imported here, not at module scope: this module is loaded on
             # every render and `sticker_choices` pulls in the catalogue, the
