@@ -454,6 +454,16 @@
   .stickercard.busy .stickerpicks img {
     pointer-events: none; opacity: .45; cursor: default;
   }
+  /* Mirrors `.lineup .hunt`, sized for a card rather than a panel: the
+     box has to stay usable when the grid is three cards wide. */
+  .stickercard .stickerfind {
+    display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  }
+  .stickercard .stickerfind input[type=text] {
+    flex: 1; min-width: 120px; font-size: 11px; padding: 4px 6px;
+  }
+  .stickercard .stickerfind button.go { font-size: 11px; padding: 4px 10px; }
+  .stickercard.busy .stickerfind { opacity: .45; pointer-events: none; }
   .stickercard .said { font-size: 11px; min-height: 13px; }
   .stickercard .said.bad { color: var(--stamp); }
   .stickercard .said.ok { color: var(--moss); }
@@ -937,10 +947,15 @@
 
       <h3 style="margin-top:30px">Sticker art <em id="sticker-note"></em></h3>
       <p class="hint">One card per sticker cue that actually fired in this
-        reel — a trigger that never fired has nothing to show here. Five
-        triggers ship with art already committed; the rest fall back to an
-        emoji unless a candidate below is chosen instead. Choosing one bakes
-        it into this reel, which takes about 17 seconds.</p>
+        reel — a beat with no cue has nothing to show here. The candidates
+        under each card come from the terms the script asked for; where it
+        asked for nothing, the built-in word list decides. Five concepts
+        ship with art already committed and the rest fall back to an emoji,
+        so a card with no candidates still renders something. The icon
+        library is named for things rather than ideas, so if the script's
+        terms found nothing useful, search it yourself — “cloud” finds an
+        icon where “dream” finds none. Choosing one bakes it into this
+        reel, which takes about eight seconds.</p>
       <div class="stickergrid" id="stickergrid"></div>
 
       <h3 style="margin-top:30px">Music bed <em id="bed-note"></em></h3>
@@ -2319,19 +2334,31 @@ async function replaceClip(input) {
 }
 
 /* ---------------------------------------------------------------------
-   The sticker picker: swap the icon that lands on a trigger word.
+   The sticker picker: swap the icon that lands on one beat's cue.
 
    Same load/render shape as the clip grid just above: fetch, stash in a
    module-level variable, render into a container, wire handlers over the
-   fresh nodes. One card per row the candidates route returned — a trigger
-   that never fired has no card, matching the backend's own scoping.
+   fresh nodes. One card per row the candidates route returned — a beat
+   with no cue has no card, matching the backend's own scoping.
+
+   Everything here keys on `beat_id`, never on the trigger name. A reel can
+   fire one trigger at two beats; keyed by name those two cards would share
+   an id, the second would find the first one's node, and clicking it would
+   post to the first beat's URL. That is the same collision the beat-keyed
+   store removed from the backend, and it was live in this file until the
+   store moved.
 
    A choose is slow (the route downloads the icon and bakes 42 frames in
-   two styles, about 17s), so each card locks itself for the duration
-   rather than the whole grid going dark: two different triggers can bake
-   at once, but a second click on the same card while its first choose is
-   still in flight is ignored outright, and the card says plainly what it
-   is doing for that whole stretch.
+   the one style this beat's role calls for, about 8s), so each card locks
+   itself for the duration rather than the whole grid going dark: two
+   different beats can bake at once, but a second click on the same card
+   while its first choose is still in flight is ignored outright, and the
+   card says plainly what it is doing for that whole stretch.
+
+   Each card also carries its own search box, because the icon library is
+   named for objects and not for ideas: a script that asked for "dream" or
+   "journey" gets no candidates at all, and without a way to type "cloud"
+   the person would be stuck with the emoji.
    --------------------------------------------------------------------- */
 let STICKERS = null;
 
@@ -2355,33 +2382,61 @@ function renderStickers() {
     const used = r.chosen
       ? `in use now: <b>${esc(r.chosen)}</b>`
       : "in use now: the committed art / emoji default";
-    /* The still is the resting state on purpose: it is matted and
-       graded, so it shows what the icon will look like in the reel. But
-       every one of these is an animation, and a spinning lock and a
-       wobbling lock are the same picture -- so hovering swaps in the
-       source GIF. */
-    const pics = r.candidates.length ? r.candidates.map((c) => `
-      <img class="${c.slug === r.chosen ? "chosen" : ""}"
-           data-trigger="${esc(r.trigger)}" data-slug="${esc(c.slug)}"
-           data-still="${c.preview}" data-motion="${c.motion}"
-           title="hover to see it move"
-           loading="lazy" alt="${esc(c.slug)}" src="${c.preview}">`).join("")
-      : "<i>no alternate art offered</i>";
+    /* Where this cue came from, because it changes what the person can
+       expect: a cue the script asked for carries its own search terms,
+       and one the word list found carries the trigger's. */
+    const from = r.source === "model"
+      ? `the script asked for it${r.terms.length
+          ? ` &middot; ${esc(r.terms.join(", "))}` : ""}`
+      : `matched <b>${esc(r.trigger)}</b>`;
     return `
-    <figure class="stickercard" id="stickercard-${r.trigger}">
+    <figure class="stickercard" id="stickercard-${r.beat_id}">
       <div class="slotline">
-        <b>${esc(r.trigger)}</b>
+        <b>${esc(r.beat_id)}</b>
         <span>${r.start.toFixed(2)}s</span>
       </div>
       <div class="q">&ldquo;${esc(r.word)}&rdquo;</div>
-      <div class="prov" id="stickerused-${r.trigger}">${used}</div>
-      <div class="stickerpicks">${pics}</div>
-      <div class="said" id="stickersaid-${r.trigger}"></div>
+      <div class="prov">${from}</div>
+      <div class="prov" id="stickerused-${r.beat_id}">${used}</div>
+      <div class="stickerpicks" id="stickerpicks-${r.beat_id}">
+        ${stickerPicks(r)}</div>
+      <div class="stickerfind">
+        <input type="text" data-beat="${esc(r.beat_id)}"
+               id="stickerq-${r.beat_id}"
+               placeholder="Search icons — one word, a thing not an idea">
+        <button class="go" data-beat="${esc(r.beat_id)}">Search</button>
+      </div>
+      <div class="said" id="stickersaid-${r.beat_id}"></div>
     </figure>`;
   }).join("");
 
+  wireStickerCards();
+}
+
+/* The candidate thumbnails for one row, as HTML.
+
+   Factored out of renderStickers because a search replaces just this part
+   of one card; re-rendering the whole grid would throw away every other
+   card's typed term and any bake in flight. */
+function stickerPicks(r) {
+  if (!r.candidates.length) {
+    return "<i>no candidates — search for one below</i>";
+  }
+  /* The still is the resting state on purpose: it is matted and graded,
+     so it shows what the icon will look like in the reel. But every one
+     of these is an animation, and a spinning lock and a wobbling lock
+     are the same picture -- so hovering swaps in the source GIF. */
+  return r.candidates.map((c) => `
+      <img class="${c.slug === r.chosen ? "chosen" : ""}"
+           data-beat="${esc(r.beat_id)}" data-slug="${esc(c.slug)}"
+           data-still="${c.preview}" data-motion="${c.motion}"
+           title="hover to see it move"
+           loading="lazy" alt="${esc(c.slug)}" src="${c.preview}">`).join("");
+}
+
+function wireStickerCards() {
   $("stickergrid").querySelectorAll(".stickerpicks img").forEach((img) => {
-    img.onclick = () => chooseSticker(img.dataset.trigger, img.dataset.slug);
+    img.onclick = () => chooseSticker(img.dataset.beat, img.dataset.slug);
     if (!img.dataset.motion) return;
     /* The GIF downloads on first hover and the browser caches it, so a
        card costs nothing until someone looks at it. A source that fails
@@ -2393,19 +2448,81 @@ function renderStickers() {
     };
     img.onmouseleave = () => { img.src = img.dataset.still; };
   });
+
+  $("stickergrid").querySelectorAll(".stickerfind button").forEach((btn) => {
+    btn.onclick = () => searchStickers(btn.dataset.beat);
+  });
+  $("stickergrid").querySelectorAll(".stickerfind input").forEach((box) => {
+    box.onkeydown = (event) => {
+      if (event.key === "Enter") searchStickers(box.dataset.beat);
+    };
+  });
 }
 
-async function chooseSticker(trigger, slug) {
-  const row = STICKERS && (STICKERS.rows || []).find(
-    (r) => r.trigger === trigger);
-  const card = $("stickercard-" + trigger);
+/* Look the catalogue up by hand for one card.
+
+   Needed because the library is named for objects: a script that asked
+   for "dream", "journey" or "farewell" gets an empty candidate list, and
+   the icon it wanted is sitting there under "cloud", "road" or "suitcase".
+
+   The route is the one the row carries, never spelled out here. Results
+   replace that card's thumbnails only; the row's `candidates` are updated
+   too, so a later choose still finds the slug it is clicking. */
+async function searchStickers(beatId) {
+  const row = (STICKERS && (STICKERS.rows || []).find(
+    (r) => r.beat_id === beatId)) || null;
+  const card = $("stickercard-" + beatId);
   if (!row || !card || card.classList.contains("busy")) return;
-  const said = $("stickersaid-" + trigger);
+  const term = ($("stickerq-" + beatId).value || "").trim();
+  const said = $("stickersaid-" + beatId);
+  if (!term) {
+    said.className = "said bad";
+    said.textContent = "Type a word to search for.";
+    return;
+  }
+
+  said.className = "said";
+  said.textContent = `Searching for “${term}”…`;
+  try {
+    const url = `${row.search}?term=${encodeURIComponent(term)}`;
+    const response = await fetch(url);
+    const data = await response.json();
+    if (!response.ok) {
+      said.className = "said bad";
+      said.textContent = String(data.detail || response.status);
+      return;
+    }
+    const found = data.candidates || [];
+    if (!found.length) {
+      said.className = "said bad";
+      said.textContent =
+        `Nothing named “${term}”. The library is named for things, ` +
+        `not ideas — try the object that stands for it.`;
+      return;
+    }
+    row.candidates = found;
+    $("stickerpicks-" + beatId).innerHTML = stickerPicks(row);
+    wireStickerCards();
+    said.className = "said ok";
+    said.textContent =
+      `${found.length} icon${found.length === 1 ? "" : "s"} for “${term}”.`;
+  } catch (err) {
+    said.className = "said bad";
+    said.textContent = String(err);
+  }
+}
+
+async function chooseSticker(beatId, slug) {
+  const row = STICKERS && (STICKERS.rows || []).find(
+    (r) => r.beat_id === beatId);
+  const card = $("stickercard-" + beatId);
+  if (!row || !card || card.classList.contains("busy")) return;
+  const said = $("stickersaid-" + beatId);
 
   card.classList.add("busy");
   said.className = "said";
   said.textContent =
-    "Baking this icon into the reel — about 17 seconds. Please wait…";
+    "Baking this icon into the reel — about eight seconds. Please wait…";
   try {
     const response = await fetch(row.choose, {
       method: "POST",
@@ -2425,7 +2542,7 @@ async function chooseSticker(trigger, slug) {
     card.querySelectorAll(".stickerpicks img").forEach((img) => {
       img.classList.toggle("chosen", img.dataset.slug === data.slug);
     });
-    $("stickerused-" + trigger).innerHTML =
+    $("stickerused-" + beatId).innerHTML =
       `in use now: <b>${esc(data.slug)}</b>`;
     said.className = "said ok";
     said.textContent = "In use now.";
