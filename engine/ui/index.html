@@ -223,22 +223,52 @@
   }
   /* The poster and the video occupy the same box, so swapping one for the
      other does not reflow the grid mid-review. */
-  .clipcard .screen {
+  /* Scoped to .screen, not to .clipcard .screen. It was the second, and
+     the search results reuse the same class outside a .clipcard -- so
+     they got no sizing at all, rendered every thumbnail at its natural
+     size, and piled on top of each other. */
+  .screen {
     position: relative; width: 100%; aspect-ratio: 9 / 16;
     background: #0b0f10; border: 1px solid var(--rule); cursor: pointer;
+    overflow: hidden;
   }
-  .clipcard .screen > img, .clipcard .screen > video {
+  .screen > img, .screen > video {
     position: absolute; inset: 0;
     width: 100%; height: 100%; object-fit: cover; display: block;
   }
-  .clipcard .screen .play {
+  .screen .play {
     position: absolute; inset: 0; display: flex;
     align-items: center; justify-content: center;
     font-size: 30px; color: #fff; text-shadow: 0 1px 6px #000;
     opacity: 0.82; pointer-events: none;
   }
-  .clipcard .screen:hover .play { opacity: 1; }
-  .clipcard .screen.playing .play { display: none; }
+  .screen:hover .play { opacity: 1; }
+  .screen.playing .play { display: none; }
+
+  /* Options for one slot, shown under its own card. */
+  .clipcard .options { display: none; }
+  .clipcard.open .options { display: block; }
+  .clipcard .options .strip {
+    display: grid; gap: 6px; margin-top: 6px;
+    grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  }
+  .clipcard .options .opt { display: flex; flex-direction: column; gap: 3px; }
+  .clipcard .options .opt .meta {
+    font-size: 10px; color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .clipcard .options .opt.dupe .meta { color: var(--gold); }
+  .clipcard .options button.use {
+    font-size: 10.5px; padding: 3px 4px;
+  }
+  .clipcard .scene {
+    font-size: 11.5px; color: var(--muted); line-height: 1.35;
+    border-left: 2px solid var(--rule); padding-left: 6px;
+  }
+  .clipcard .qlabel, .clipcard .scenelabel {
+    font-size: 9.5px; color: #5f7278; text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
   .clipcard {
     border: 1px solid var(--rule); background: var(--card); padding: 8px;
     display: flex; flex-direction: column; gap: 6px;
@@ -1475,15 +1505,28 @@ function renderReview() {
       <div class="prov ${c.replaced ? "upload" : (weak ? "weak" : "")}">
         ${esc(c.provider)}${c.kind === "image" ? " · still" : " · video"}
       </div>
+      <div class="scenelabel">the scene this beat asked for</div>
+      <div class="scene">${esc(c.visual_prompt) || "<i>none recorded</i>"}</div>
+      <div class="qlabel">what the search was given</div>
       <div class="q">${esc(c.query) || "<i>no query recorded</i>"}</div>
-      <button class="hunt" data-beat="${esc(c.beat_id)}"
-              data-slot="${c.slot}" data-q="${esc(c.query || "")}">Search a
-        replacement</button>
+      <button class="opts" data-beat="${esc(c.beat_id)}"
+              data-slot="${c.slot}" data-q="${esc(c.query || "")}"
+              data-id="${id}">Show other options</button>
       <label class="pick">
         Upload my own
         <input type="file" accept="video/*,image/*"
                data-beat="${esc(c.beat_id)}" data-slot="${c.slot}">
       </label>
+      <div class="options" id="opts-${id}">
+        <div class="row" style="display:flex;gap:6px;margin-top:6px">
+          <input type="text" id="optq-${id}" value="${esc(c.query || "")}"
+                 style="font-size:11.5px;padding:5px 6px">
+          <button class="again" data-id="${id}"
+                  data-beat="${esc(c.beat_id)}"
+                  data-slot="${c.slot}">Go</button>
+        </div>
+        <div class="strip" id="optstrip-${id}"></div>
+      </div>
       <div class="said" id="said-${id}"></div>
     </figure>`;
   }).join("");
@@ -1495,18 +1538,123 @@ function renderReview() {
     if (screen.dataset.kind !== "video") return;
     screen.onclick = () => playClip(screen);
   });
-  $("clipgrid").querySelectorAll("button.hunt").forEach((button) => {
-    button.onclick = () => {
-      /* Prefilled with the query that produced the wrong clip, because
-         that query is usually why it is wrong -- seeing it is half the
-         fix. */
-      aimAt(button.dataset.beat, Number(button.dataset.slot));
-      $("hunt-q").value = button.dataset.q || "";
-      $("hunt-q").focus();
-      $("hunt-q").scrollIntoView({ behavior: "smooth", block: "center" });
-    };
+  $("clipgrid").querySelectorAll("button.opts").forEach((button) => {
+    button.onclick = () => showOptions(button);
+  });
+  $("clipgrid").querySelectorAll("button.again").forEach((button) => {
+    button.onclick = () => loadOptions(
+      button.dataset.id, button.dataset.beat, Number(button.dataset.slot),
+      $("optq-" + button.dataset.id).value);
   });
   show("s-review");
+}
+
+/* Options for one slot, under that slot's own card.
+
+   Fetched when asked for rather than with the board: each one is a
+   Pexels request, and twenty-two of them on every page load would spend
+   a tenth of the hourly allowance before anyone looked at anything.
+
+   The query box is prefilled with the query that produced the clip,
+   because that query is usually why the clip is wrong -- a real run
+   searched "ancient greek temple columns" for a beat about a Himalayan
+   lake, and no result of that search would have helped. Seeing it is
+   half the fix. */
+function showOptions(button) {
+  const id = button.dataset.id;
+  const card = $("card-" + id);
+  if (card.classList.contains("open")) {
+    card.classList.remove("open");
+    button.textContent = "Show other options";
+    return;
+  }
+  card.classList.add("open");
+  button.textContent = "Hide options";
+  if (!$("optstrip-" + id).innerHTML) {
+    loadOptions(id, button.dataset.beat, Number(button.dataset.slot),
+                button.dataset.q);
+  }
+}
+
+async function loadOptions(id, beat, slot, query) {
+  const strip = $("optstrip-" + id);
+  const said = $("said-" + id);
+  if (!query || !query.trim()) { said.className = "said bad";
+    said.textContent = "type something to search for"; return; }
+  said.className = "said";
+  said.textContent = "asking Pexels…";
+  strip.innerHTML = "";
+  try {
+    const response = await fetch(
+      `/api/plan/${PLAN.plan_id}/clip-search?q=${encodeURIComponent(query)}`);
+    const data = await response.json();
+    if (!response.ok) {
+      said.className = "said bad";
+      said.textContent = String(data.detail || response.status);
+      return;
+    }
+    if (!data.results.length) {
+      said.textContent = "nothing for that. Try fewer words, or plainer ones.";
+      return;
+    }
+    strip.innerHTML = data.results.map((r, i) => `
+      <div class="opt ${r.used_in.length ? "dupe" : ""}">
+        <div class="screen" data-play="${r.play}" data-kind="video"
+             id="opt-${id}-${i}" title="Play">
+          <img loading="lazy" alt="option ${i + 1}" src="${r.preview}">
+          <div class="play">&#9654;</div>
+        </div>
+        <div class="meta">${r.duration}s${r.portrait ? "" : " · wide"}${
+          r.used_in.length ? " · already used" : ""}</div>
+        <button class="use" data-id="${id}" data-beat="${esc(beat)}"
+                data-slot="${slot}" data-pid="${r.pexels_id}">Use</button>
+      </div>`).join("");
+    strip.querySelectorAll(".screen").forEach(
+      (screen) => { screen.onclick = () => playClip(screen); });
+    strip.querySelectorAll("button.use").forEach((b) => {
+      b.onclick = () => useOption(b);
+    });
+    said.textContent = `${data.results.length} options — play one, then Use`;
+  } catch (err) {
+    said.className = "said bad";
+    said.textContent = String(err);
+  }
+}
+
+async function useOption(button) {
+  const id = button.dataset.id;
+  const beat = button.dataset.beat;
+  const slot = Number(button.dataset.slot);
+  const said = $("said-" + id);
+  button.disabled = true;
+  said.className = "said";
+  said.textContent = "downloading…";
+  try {
+    const response = await fetch(
+      `/api/plan/${PLAN.plan_id}/clip/${beat}/${slot}/pick`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pexels_id: Number(button.dataset.pid) })
+      });
+    const data = await response.json();
+    if (!response.ok) {
+      said.className = "said bad";
+      said.textContent = String(data.detail || response.status);
+      return;
+    }
+    if (PLAYING === $("screen-" + id)) stopPlaying();
+    $("thumb-" + id).src = `${data.thumb}&t=${Date.now()}`;
+    $("card-" + id).classList.remove("gone");
+    said.className = "said ok";
+    said.textContent = `now Pexels ${data.pexels_id}`;
+    const row = REVIEW.clips.find(
+      (c) => c.beat_id === beat && String(c.slot) === String(slot));
+    if (row) { row.provider = data.provider; row.kind = data.kind; }
+  } catch (err) {
+    said.className = "said bad";
+    said.textContent = String(err);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 /* Searching Pexels by hand.
