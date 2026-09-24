@@ -124,3 +124,17 @@ def test_choosing_a_slug_that_is_not_in_the_catalogue_is_refused(client, plan_wi
     r = client.post(f"/api/plan/{plan_with_stickers}/sticker/b2",
                     json={"slug": "../../../evil"})
     assert r.status_code == 400
+
+
+def test_choosing_a_well_formed_slug_that_is_not_in_the_catalogue_is_refused(
+        client, plan_with_stickers):
+    """The membership check on its own, with nothing else covering for it.
+
+    `../../../evil` is also rejected by `safe_slug`'s shape regex, so it
+    cannot show what this gate does. `9999-not-a-real-icon` has a perfectly
+    valid slug shape and simply is not in the sitemap -- without the
+    membership check this route would fetch whatever URL that slug builds.
+    """
+    r = client.post(f"/api/plan/{plan_with_stickers}/sticker/b2",
+                    json={"slug": "9999-not-a-real-icon"})
+    assert r.status_code == 400
