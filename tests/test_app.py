@@ -964,7 +964,7 @@ def test_choosing_a_slug_outside_the_catalogue_is_refused_without_fetching(
     monkeypatch.setattr(sc, "ensure_baked",
                         lambda *a, **k: fetched.append(a))
 
-    resp = client.post(f"/api/plan/{plan_id}/sticker/death",
+    resp = client.post(f"/api/plan/{plan_id}/sticker/b0",
                        json={"slug": "http://evil.test/x.gif"})
     assert resp.status_code == 400
     assert fetched == [], "nothing may be fetched for an unknown slug"
@@ -981,19 +981,19 @@ def test_a_refused_icon_leaves_the_previous_choice_alone(tmp_path,
     monkeypatch.setattr(cat, "load", lambda *a, **k: (
         "2130-skull-poison", "2816-skull-halloween"))
     monkeypatch.setattr(sc, "ensure_baked", lambda *a, **k: None)
-    client.post(f"/api/plan/{plan_id}/sticker/death",
+    client.post(f"/api/plan/{plan_id}/sticker/b0",
                 json={"slug": "2130-skull-poison"})
 
     def holed(*a, **k):
         raise ValueError("2816-skull-halloween has a pocket of white")
 
     monkeypatch.setattr(sc, "ensure_baked", holed)
-    resp = client.post(f"/api/plan/{plan_id}/sticker/death",
+    resp = client.post(f"/api/plan/{plan_id}/sticker/b0",
                        json={"slug": "2816-skull-halloween"})
 
     assert resp.status_code == 422
     assert "pocket of white" in resp.json()["detail"]
-    assert store.sticker_choices(plan_id) == {"death": "2130-skull-poison"}
+    assert store.sticker_choices(plan_id) == {"b0": "2130-skull-poison"}
 
 
 def test_a_slug_outside_the_catalogue_404s_before_anything_is_fetched(
@@ -1085,10 +1085,10 @@ def test_a_chosen_icon_survives_the_route_and_reaches_a_render(tmp_path,
     monkeypatch.setattr(sc, "_download",
                         lambda s, dest: shutil.copyfile(source, dest))
 
-    resp = client.post(f"/api/plan/{plan_id}/sticker/death",
+    resp = client.post(f"/api/plan/{plan_id}/sticker/b0",
                        json={"slug": slug})
     assert resp.status_code == 200, resp.text
-    assert store.sticker_choices(plan_id) == {"death": slug}
+    assert store.sticker_choices(plan_id) == {"b0": slug}
 
     plan = store.get_plan(plan_id)
     prepared = stk.prepare(plan, settings,
@@ -1162,7 +1162,7 @@ def test_the_sticker_panel_calls_routes_that_are_registered(client):
 
     assert "row.choose" in page, \
         "the panel never posts to the URL a row says to choose with"
-    assert "/api/plan/{plan_id}/sticker/{trigger}" in paths
+    assert "/api/plan/{plan_id}/sticker/{beat_id}" in paths
 
     assert "c.preview" in page, \
         "the panel never shows a candidate's preview image"
@@ -1172,9 +1172,9 @@ def test_the_sticker_panel_calls_routes_that_are_registered(client):
     for route in client.app.routes:
         p = getattr(route, "path", "")
         if p in ("/api/plan/{plan_id}/stickers",
-                 "/api/plan/{plan_id}/sticker/{trigger}",
+                 "/api/plan/{plan_id}/sticker/{beat_id}",
                  "/api/sticker-preview/{slug}"):
             verbs[p] = set(getattr(route, "methods", []))
     assert "GET" in verbs.get("/api/plan/{plan_id}/stickers", set())
-    assert "POST" in verbs.get("/api/plan/{plan_id}/sticker/{trigger}", set())
+    assert "POST" in verbs.get("/api/plan/{plan_id}/sticker/{beat_id}", set())
     assert "GET" in verbs.get("/api/sticker-preview/{slug}", set())

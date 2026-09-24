@@ -130,7 +130,8 @@ def test_the_server_hands_the_motion_url_to_the_panel(client, tmp_path,
     # One cue, stubbed: this test is about the URL the row carries, and
     # make_plan's text contains no trigger word to fire on.
     cue = SimpleNamespace(name="night", word="raat", start=1.5,
-                          beat_index=0)
+                          beat_index=0, beat_id="b0", terms=("night",),
+                          source="trigger")
     monkeypatch.setattr(app_mod.stickers_mod, "find_cues",
                         lambda plan, cap=None: [cue])
 

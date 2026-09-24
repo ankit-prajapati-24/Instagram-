@@ -2049,29 +2049,34 @@ def create_app(db_path: str | Path | None = None,
             note = f"catalogue unavailable: {exc}"
 
         chosen = store.sticker_choices(plan_id)
-        triggers = {t.name: t for t in stickers_mod.load_triggers()}
+        by_id = {beat.beat_id: beat for beat in plan.script.beats}
 
         rows = []
         for cue in stickers_mod.find_cues(plan,
                                           cap=int(settings.sticker_max)):
-            trigger = triggers.get(cue.name)
             seen: list[str] = []
-            for term in (trigger.search if trigger else ()):
+            for term in cue.terms:
                 for slug in sticker_catalog.search(term, slugs):
                     if slug not in seen:
                         seen.append(slug)
+            beat = by_id.get(cue.beat_id)
             rows.append({
+                "beat_id": cue.beat_id,
                 "trigger": cue.name,
+                "source": cue.source,
                 "word": cue.word,
+                "terms": list(cue.terms),
                 "start": round(cue.start, 2),
-                "beat_id": plan.script.beats[cue.beat_index].beat_id,
-                "chosen": chosen.get(cue.name),
+                "style": stickers_mod.style_for_role(
+                    getattr(beat, "role", None)),
+                "chosen": chosen.get(cue.beat_id),
                 "candidates": [
                     {"slug": slug,
                      "preview": f"/api/sticker-preview/{slug}",
                      "motion": f"/api/sticker-motion/{slug}"}
                     for slug in seen[:8]],
-                "choose": f"/api/plan/{plan_id}/sticker/{cue.name}",
+                "choose": f"/api/plan/{plan_id}/sticker/{cue.beat_id}",
+                "search": "/api/sticker-search",
             })
         return {"plan_id": plan_id, "rows": rows, "note": note}
 
@@ -2118,17 +2123,49 @@ def create_app(db_path: str | Path | None = None,
                                      f"{exc}") from exc
         return FileResponse(gif, media_type="image/gif")
 
-    @app.post("/api/plan/{plan_id}/sticker/{trigger}")
-    def choose_sticker(plan_id: str, trigger: str,
+    @app.get("/api/sticker-search")
+    def sticker_search(term: str) -> dict:
+        """Catalogue slugs for a term someone typed.
+
+        Needed because the catalogue is named for objects and not for ideas:
+        a script that asks for "dream" or "journey" finds nothing, and
+        without this the person is left with an emoji and no way to reach
+        the 3,578 icons that are sitting right there.
+
+        ``term`` never becomes a path. It is matched against slugs already
+        in the cached sitemap, and a term that matches none returns none.
+        """
+        cache = sticker_choices_mod.cache_root(settings)
+        try:
+            sticker_catalog.refresh(cache)
+            slugs = sticker_catalog.load(cache)
+        except sticker_catalog.CatalogUnavailable as exc:
+            raise HTTPException(503, f"catalogue unavailable: {exc}") from exc
+        found = sticker_catalog.search(term, slugs, limit=12)
+        return {"term": term,
+                "slugs": found,
+                "candidates": [
+                    {"slug": slug,
+                     "preview": f"/api/sticker-preview/{slug}",
+                     "motion": f"/api/sticker-motion/{slug}"}
+                    for slug in found]}
+
+    @app.post("/api/plan/{plan_id}/sticker/{beat_id}")
+    def choose_sticker(plan_id: str, beat_id: str,
                        body: StickerChoice) -> dict:
-        """Bake one icon for this reel and remember it.
+        """Bake one icon for this reel's beat and remember it.
 
         The slug is checked against the catalogue before anything is
         fetched. Without that check this route is an arbitrary URL fetcher
         with the panel's network access.
         """
-        if store.get_plan(plan_id) is None:
+        plan = store.get_plan(plan_id)
+        if plan is None:
             raise HTTPException(404, "no such plan")
+        beat = next((b for b in plan.script.beats if b.beat_id == beat_id),
+                    None)
+        if beat is None:
+            raise HTTPException(404, "no such beat")
 
         cache = sticker_choices_mod.cache_root(settings)
         try:
@@ -2140,24 +2177,23 @@ def create_app(db_path: str | Path | None = None,
 
         size = stickers_mod.sticker_size(settings.width,
                                          settings.sticker_scale)
+        style = stickers_mod.style_for_role(beat.role)
         try:
             sticker_choices_mod.ensure_baked(
                 body.slug, root=cache, size=size, fps=int(settings.fps),
-                style=stickers_mod.DEFAULT_STYLE)
+                style=style)
         except ValueError as exc:
             # Two refusals land here, and the detail below is `str(exc)`, so
             # the caller sees whichever it was:
             #   - `bake_one` refusing an icon with a pocket of trapped white,
             #     which would render with a blob in it;
             #   - `safe_slug` refusing a slug that could not become a path.
-            #     The catalogue check above already rejects anything not in
-            #     the sitemap, so this is the module's own defence in depth
-            #     rather than the gate that matters.
             # Either way, refusing keeps whatever was chosen before.
             raise HTTPException(422, str(exc)) from exc
 
-        store.choose_sticker(plan_id, trigger, body.slug)
-        return {"plan_id": plan_id, "trigger": trigger, "slug": body.slug,
+        store.choose_sticker(plan_id, beat_id, body.slug)
+        return {"plan_id": plan_id, "beat_id": beat_id, "slug": body.slug,
+                "style": style,
                 "preview": f"/api/sticker-preview/{body.slug}"}
 
     @app.get("/api/plan/{plan_id}/publish")
