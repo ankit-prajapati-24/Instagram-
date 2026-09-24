@@ -422,6 +422,16 @@ class Settings:
     daily_usd_ceiling: float = field(
         default_factory=lambda: float(
             os.getenv("RAHASYA_DAILY_USD", "2.0")))
+    # The dedup gate refuses a topic already produced, or one too close
+    # to it. That is right for a channel and wrong for building: the same
+    # topic gets run a dozen times while the pipeline is worked on, and a
+    # gate that blocks every one of them is only in the way. So it is off
+    # unless asked for -- and when it is off it says so rather than
+    # reporting itself clean, which is the part that matters.
+    dedup_enabled: bool = field(
+        default_factory=lambda: os.getenv(
+            "RAHASYA_DEDUP", "0").strip().lower()
+        not in {"0", "false", "no", "off", ""})
     dedup_trigram: float = 0.6
     dedup_cosine: float = 0.88
     entity_cooldown_days: int = 45

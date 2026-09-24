@@ -203,6 +203,13 @@ more than 0.35s.
    same refusal. Voice comes before clips because a beat's clip count and
    slot lengths are derived from how long its audio measures.
 2. Semantic dedup before production — cosine 0.88, 45-day entity cooldown.
+   **Off by default**, because while the pipeline is being built the same
+   topic gets run a dozen times and a gate that refuses every attempt is
+   only in the way. `RAHASYA_DEDUP=1` turns it on, and it belongs on for a
+   channel that is actually publishing: uploading two near-identical
+   videos is the thing that gets one flagged. When it is off the DEDUP
+   stage says so rather than reporting a pass — a disabled gate that
+   looked clean would be a lie the panel repeats.
    `scripts/reset_cooldown.py` shows what is blocked and can clear it when
    the recorded entities are wrong.
 3. No auto-publish. `engine/publish/payloads.py` imports no HTTP library, and a

@@ -403,6 +403,11 @@ def test_a_manual_plan_never_looks_moderated(client, no_gateway):
 
 def test_the_cheap_dedup_layers_still_run_without_a_gateway(client,
                                                             no_gateway):
+    """Turned on explicitly: the gate ships off, because while the
+    pipeline is being built the same topic gets run over and over. This
+    test is about what the layers do when they run, not about the
+    default, so it says which it wants."""
+    client.app.state.settings.dedup_enabled = True
     first = client.post("/api/plan/manual", json=payload())
     assert first.status_code == 200
     plan_id = first.json()["plan"]["plan_id"]
@@ -415,6 +420,7 @@ def test_the_cheap_dedup_layers_still_run_without_a_gateway(client,
 
 
 def test_entities_supplied_by_hand_drive_the_cooldown(client, no_gateway):
+    client.app.state.settings.dedup_enabled = True
     body = payload(entities=["Roopkund", "Uttarakhand"])
     plan = ReelPlan.model_validate(
         client.post("/api/plan/manual", json=body).json()["plan"])
@@ -427,6 +433,32 @@ def test_entities_supplied_by_hand_drive_the_cooldown(client, no_gateway):
         entities=["Roopkund"], topic="Ek pahaadi jheel ka anjaana sach"))
     assert clash.status_code == 409
     assert "cooldown" in clash.json()["detail"]
+
+
+def test_the_same_script_can_be_submitted_again_with_the_gate_off(
+        client, no_gateway):
+    """The default, and the reason the switch exists: a script gets
+    rewritten and resubmitted a dozen times while it is being tuned."""
+    first = client.post("/api/plan/manual", json=payload())
+    assert first.status_code == 200
+    client.app.state.store.set_status(first.json()["plan"]["plan_id"],
+                                      "produced")
+
+    again = client.post("/api/plan/manual", json=payload())
+
+    assert again.status_code == 200
+    assert again.json()["plan"]["plan_id"] !=         first.json()["plan"]["plan_id"]
+
+
+def test_an_off_gate_says_so_on_the_manual_path_too(client, no_gateway):
+    """Off must not read as clean here either."""
+    body = client.post("/api/plan/manual", json=payload()).json()
+    rows = [e for e in body.get("events", [])
+            if e.get("stage") == "dedup"]
+    assert rows, "the dedup stage vanished instead of reporting itself off"
+    said = " ".join(str(e.get("detail", "")).lower() for e in rows)
+    assert "off" in said
+    assert all(e.get("status") != "done" for e in rows)
 
 
 def test_without_entities_the_cooldown_layer_is_simply_inert(client,

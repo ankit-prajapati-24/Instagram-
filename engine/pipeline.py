@@ -109,14 +109,21 @@ def plan_stage(topic_raw: str, client, store, settings, *,
     _check_budget(store, settings)
     topic = Topic.make(topic_raw)
 
-    # Cheap layers first, before a single token is spent.
-    early = dedup.check(topic, store, None,
-                        trigram_threshold=settings.dedup_trigram,
-                        cooldown_days=settings.entity_cooldown_days)
-    if not early.passed:
-        emit(PipelineEvent(Stage.DEDUP, "failed", early.detail,
-                           {"layer": early.layer}))
-        raise GateError("dedup", f"[{early.layer}] {early.detail}")
+    # Cheap layers first, before a single token is spent -- unless the
+    # gate is off, in which case it is announced rather than skipped
+    # quietly. A disabled gate that looked like a passing one would be a
+    # lie the panel then repeats.
+    if not settings.dedup_enabled:
+        emit(PipelineEvent(Stage.DEDUP, "info", "the dedup gate is off (RAHASYA_DEDUP=0), so a topic already produced will not be refused",
+                           {"enabled": False}))
+    else:
+        early = dedup.check(topic, store, None,
+                            trigram_threshold=settings.dedup_trigram,
+                            cooldown_days=settings.entity_cooldown_days)
+        if not early.passed:
+            emit(PipelineEvent(Stage.DEDUP, "failed", early.detail,
+                               {"layer": early.layer}))
+            raise GateError("dedup", f"[{early.layer}] {early.detail}")
 
     plan = ReelPlan(topic=topic,
                     script=Script(total_seconds=settings.target_seconds,
@@ -141,7 +148,7 @@ def plan_stage(topic_raw: str, client, store, settings, *,
         # Cooldown is checked here, as soon as the entities exist, rather than
         # after metadata. Waiting meant a rejection cost three more agent
         # calls (hooks, script, metadata) for a plan that was never viable.
-        if provenance.entities:
+        if provenance.entities and settings.dedup_enabled:
             cooling = store.cooldown_detail(provenance.entities,
                                             settings.entity_cooldown_days)
             if cooling:
@@ -211,18 +218,23 @@ def plan_stage(topic_raw: str, client, store, settings, *,
         plan.safety.moderation_passed = True
         emit(PipelineEvent(Stage.MODERATION, "done", "clean"))
 
-    emit(PipelineEvent(Stage.DEDUP, "started", "semantic layer"))
-    result = dedup.check(topic, store, client,
-                         embed_text=f"{topic.raw} :: {plan.metadata.yt_title}",
-                         trigram_threshold=settings.dedup_trigram,
-                         cosine_threshold=settings.dedup_cosine,
-                         cooldown_days=settings.entity_cooldown_days)
-    if not result.passed:
-        emit(PipelineEvent(Stage.DEDUP, "failed", result.detail,
-                           {"layer": result.layer}))
-        store.save_plan(plan, status="rejected_dedup")
-        raise GateError("dedup", f"[{result.layer}] {result.detail}")
-    emit(PipelineEvent(Stage.DEDUP, "done", result.detail))
+    if not settings.dedup_enabled:
+        emit(PipelineEvent(Stage.DEDUP, "info", "the dedup gate is off (RAHASYA_DEDUP=0), so a topic already produced will not be refused",
+                           {"enabled": False}))
+    else:
+        emit(PipelineEvent(Stage.DEDUP, "started", "semantic layer"))
+        result = dedup.check(
+            topic, store, client,
+            embed_text=f"{topic.raw} :: {plan.metadata.yt_title}",
+            trigram_threshold=settings.dedup_trigram,
+            cosine_threshold=settings.dedup_cosine,
+            cooldown_days=settings.entity_cooldown_days)
+        if not result.passed:
+            emit(PipelineEvent(Stage.DEDUP, "failed", result.detail,
+                               {"layer": result.layer}))
+            store.save_plan(plan, status="rejected_dedup")
+            raise GateError("dedup", f"[{result.layer}] {result.detail}")
+        emit(PipelineEvent(Stage.DEDUP, "done", result.detail))
 
     plan.cost.usd = store.plan_cost(plan.plan_id)
     store.save_plan(plan, status="awaiting_approval")
@@ -542,18 +554,25 @@ def manual_plan_stage(topic_raw: str, beats: list[dict], store, settings, *,
     # means the cooldown layer has nothing to compare and is inert, not
     # bypassed, and approve then records nothing for future cooldowns
     # either.
-    emit(PipelineEvent(Stage.DEDUP, "started",
-                       "exact, trigram and cooldown layers "
-                       "(semantic needs an embedding provider)"))
-    result = dedup.check(topic, store, None,
-                         trigram_threshold=settings.dedup_trigram,
-                         cooldown_days=settings.entity_cooldown_days)
-    if not result.passed:
-        emit(PipelineEvent(Stage.DEDUP, "failed", result.detail,
-                           {"layer": result.layer}))
-        raise GateError("dedup", f"[{result.layer}] {result.detail}")
-    emit(PipelineEvent(Stage.DEDUP, "done",
-                       f"{result.detail} (semantic layer skipped: no model)"))
+    if not settings.dedup_enabled:
+        emit(PipelineEvent(
+            Stage.DEDUP, "info",
+            "the dedup gate is off (RAHASYA_DEDUP=0), so a topic already "
+            "produced will not be refused", {"enabled": False}))
+    else:
+        emit(PipelineEvent(Stage.DEDUP, "started",
+                           "exact, trigram and cooldown layers "
+                           "(semantic needs an embedding provider)"))
+        result = dedup.check(topic, store, None,
+                             trigram_threshold=settings.dedup_trigram,
+                             cooldown_days=settings.entity_cooldown_days)
+        if not result.passed:
+            emit(PipelineEvent(Stage.DEDUP, "failed", result.detail,
+                               {"layer": result.layer}))
+            raise GateError("dedup", f"[{result.layer}] {result.detail}")
+        emit(PipelineEvent(
+            Stage.DEDUP, "done",
+            f"{result.detail} (semantic layer skipped: no model)"))
 
     store.save_plan(plan, status="awaiting_approval")
     return plan
