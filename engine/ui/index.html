@@ -2017,7 +2017,23 @@ $("btn-copy-prompt").onclick = async () => {
   said.textContent = "building…";
   try {
     const url = `/api/authoring/prompt?topic=${encodeURIComponent(topic)}`;
-    const data = await (await fetch(url)).json();
+    const response = await fetch(url);
+    /* A 404 here means the server is running code older than this page —
+       the panel is served from disk on every request, the routes are not.
+       Without this check the missing field reads as `undefined` and that
+       is the word that lands on the clipboard. */
+    if (response.status === 404) {
+      said.textContent = "";
+      banner("The panel is newer than the server it is talking to — "
+             + "restart the engine to pick up this route.", true);
+      return;
+    }
+    const data = await response.json();
+    if (!response.ok || typeof data.prompt !== "string") {
+      said.textContent = "";
+      banner("No prompt came back: " + esc(String(data.detail || response.status)), true);
+      return;
+    }
     await navigator.clipboard.writeText(data.prompt);
     said.textContent = topic
       ? "copied — paste it into any AI"
@@ -2072,12 +2088,16 @@ $("btn-import-fill").onclick = async () => {
       headers: { "Content-Type": "text/plain" },
       body: raw
     });
-    if (response.status === 413) {
-      const err = await response.json();
-      banner(esc(String(err.detail)), true);
+    if (response.status === 404) {
+      banner("The panel is newer than the server it is talking to — "
+             + "restart the engine to pick up this route.", true);
       return;
     }
     const data = await response.json();
+    if (!response.ok) {
+      banner(esc(String(data.detail || response.status)), true);
+      return;
+    }
     renderImportReport(data);
     $("import-said").textContent = "";
     if (!data.ok) return;
