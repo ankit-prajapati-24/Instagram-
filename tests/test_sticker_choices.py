@@ -57,7 +57,8 @@ def test_a_baked_slug_resolves_like_the_committed_art_does(tmp_path,
     src = _gif(tmp_path / "src.gif")
     monkeypatch.setattr(sc, "_download", lambda slug, dest: src.replace(dest))
 
-    sc.ensure_baked("27-globe", root=tmp_path, size=60, fps=30)
+    sc.ensure_baked("27-globe", root=tmp_path, size=60, fps=30,
+                    style="punchy")
 
     found = sc.cached_sequence("27-globe", "punchy", fps=30, size=60,
                                root=tmp_path)
@@ -77,7 +78,7 @@ def test_choosing_the_same_slug_twice_re_bakes_nothing(tmp_path,
     Counting downloads alone does not do it: a download is 0.4s and is
     guarded by ``_source``'s own ``dest.exists()``, so that count stays at
     one even with ``ensure_baked``'s cache check deleted -- while every
-    re-choose silently pays sixteen seconds to bake both styles again. The
+    re-choose silently pays eight seconds to bake the style again. The
     spy wraps the real ``bake_one`` rather than replacing it, because a
     stub that writes nothing would leave the cache empty and make the
     second round bake legitimately.
@@ -99,11 +100,11 @@ def test_choosing_the_same_slug_twice_re_bakes_nothing(tmp_path,
     monkeypatch.setattr(sc, "_download", fake_download)
     monkeypatch.setattr(bakery, "bake_one", spy_bake_one)
 
-    sc.ensure_baked("27-globe", root=tmp_path, size=60, fps=30)
+    sc.ensure_baked("27-globe", root=tmp_path, size=60, fps=30, style="dark")
     first = list(bakes)
-    assert len(first) == 2, f"both styles bake the first time: {first}"
+    assert len(first) == 1, f"only the one style bakes the first time: {first}"
 
-    sc.ensure_baked("27-globe", root=tmp_path, size=60, fps=30)
+    sc.ensure_baked("27-globe", root=tmp_path, size=60, fps=30, style="dark")
 
     assert bakes == first, f"the second choose must bake nothing: {bakes}"
     assert downloads == ["27-globe"], f"and fetch nothing: {downloads}"
@@ -141,7 +142,7 @@ def test_an_icon_with_a_trapped_white_pocket_is_refused_by_name(tmp_path,
 
     with pytest.raises(ValueError, match="2816-skull-halloween"):
         sc.ensure_baked("2816-skull-halloween", root=tmp_path, size=60,
-                        fps=30)
+                        fps=30, style="dark")
 
 
 @pytest.mark.parametrize("slug", [
@@ -231,7 +232,8 @@ def test_a_failed_download_leaves_no_stage_behind(tmp_path, monkeypatch):
     monkeypatch.setattr(sc, "_download", boom)
 
     with pytest.raises(OSError, match="no route to host"):
-        sc.ensure_baked("27-globe", root=tmp_path, size=60, fps=30)
+        sc.ensure_baked("27-globe", root=tmp_path, size=60, fps=30,
+                        style="dark")
     assert not list((tmp_path / "sources").glob("*.part")), \
         "staging file left behind"
 
@@ -252,20 +254,17 @@ def test_a_nonsense_slug_reads_as_no_bake_rather_than_raising(tmp_path):
         sc.bake_key("../../../evil", "dark", 184, 30)
 
 
-def _fake_bake(root, slug, style, *, size, fps):
+def _fake_bake_into(folder, *, size, fps, style="punchy", slug="fake"):
     """Write a bake of the right shape without running the real one.
 
-    ``cached_sequence`` validates fps, size and frame count, so the cheapest
-    honest fixture is the right number of correctly sized transparent PNGs
-    -- plus the ``meta.json`` ``_resolve`` actually reads those values from
-    (``bake_one`` writes the same shape); without it every lookup here
-    reads as "nothing cached" and falls through, not as a resolved bake.
+    The ``meta.json`` is not optional: ``_resolve`` returns None without it,
+    so a fixture of frames alone reads as "nothing cached" and every test
+    built on it fails for the wrong reason.
     """
     from engine.assembly import stickers as stk
     frames = round(stk.HOLD_SECONDS * fps)
     canvas = stk.sticker_canvas(size)
-    folder = (Path(root) / sc.BAKES_DIRNAME
-              / sc.bake_key(slug, style, size, fps))
+    folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     for n in range(frames):
         Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0)).save(
@@ -275,6 +274,34 @@ def _fake_bake(root, slug, style, *, size, fps):
         "fps": fps, "size": size, "canvas": canvas, "licence": "test",
     }), encoding="utf-8")
     return folder
+
+
+def _fake_bake(root, slug, style, *, size, fps):
+    return _fake_bake_into(
+        Path(root) / sc.BAKES_DIRNAME / sc.bake_key(slug, style, size, fps),
+        size=size, fps=fps)
+
+
+def test_only_the_style_the_beat_needs_is_baked(tmp_path, monkeypatch):
+    """A bake is ~8s a style. Keyed by trigger, both had to be made because
+    the role was not knowable; keyed by beat, one is."""
+    from engine.assembly import sticker_art
+    made = []
+
+    def _fake_bake_one(source, folder, *, style, size, fps):
+        made.append(style)
+        _fake_bake_into(folder, size=size, fps=fps, style=style)
+
+    monkeypatch.setattr("scripts.bake_stickers.bake_one", _fake_bake_one)
+    monkeypatch.setattr(sc, "_source",
+                        lambda slug, root: tmp_path / "src.gif")
+    (tmp_path / "src.gif").write_bytes(b"GIF89a")
+
+    sc.ensure_baked("27-globe", root=tmp_path, size=220,
+                    fps=30, style="dark")
+    assert made == ["dark"], f"baked {made}, wanted only the one needed"
+    assert set(sticker_art.STYLES) == {"punchy", "dark"}, \
+        "this test is only meaningful while there is another style to skip"
 
 
 def test_two_beats_resolve_their_own_chosen_icons(tmp_path):

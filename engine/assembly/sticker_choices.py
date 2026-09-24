@@ -166,30 +166,38 @@ def _resolve(folder: Path, *, fps: int, size: int
     return str(folder / "frame-%03d.png"), frames, canvas
 
 
-def ensure_baked(slug: str, *, root: Path, size: int, fps: int) -> None:
-    """Bake both styles of one icon into the cache, if they are not there.
+def ensure_baked(slug: str, *, root: Path, size: int, fps: int,
+                 style: str) -> None:
+    """Bake one style of one icon into the cache, if it is not there.
+
+    ``style`` is required. This used to bake every style in ``STYLES``,
+    because a choice keyed by trigger name could be used by beats of
+    different roles and ``style_for_role`` could not be resolved in advance.
+    A choice keyed by a beat has exactly one role and therefore exactly one
+    style, which halves the wait on the click that commits.
 
     Raises ``ValueError`` when the icon has a pocket of trapped white --
     ``bake_one``'s own refusal, passed straight through, because an icon
     that would render with a white blob in it is a choice to reject rather
     than a failure to swallow.
     """
-    # Guarded, not unconditional: this runs on every call, and Task 5 calls
-    # it from a long-lived server process where an unconditional insert
-    # would grow sys.path by one duplicate entry per request forever.
+    # Guarded, not unconditional: this runs on every call, from a
+    # long-lived server process where an unconditional insert would grow
+    # sys.path by one duplicate entry per request forever.
     repo_root = str(Path(__file__).resolve().parent.parent.parent)
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
     from engine.assembly.sticker_art import STYLES
     from scripts.bake_stickers import bake_one
 
+    if style not in STYLES:
+        raise ValueError(f"unknown sticker style {style!r}")
+
     root = Path(root)
-    source = _source(slug, root)
-    for style in STYLES:
-        folder = root / BAKES_DIRNAME / bake_key(slug, style, size, fps)
-        if _resolve(folder, fps=fps, size=size) is not None:
-            continue
-        bake_one(source, folder, style=style, size=size, fps=fps)
+    folder = root / BAKES_DIRNAME / bake_key(slug, style, size, fps)
+    if _resolve(folder, fps=fps, size=size) is not None:
+        return
+    bake_one(_source(slug, root), folder, style=style, size=size, fps=fps)
 
 
 def source_gif(slug: str, *, root: Path) -> Path:

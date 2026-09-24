@@ -2142,7 +2142,8 @@ def create_app(db_path: str | Path | None = None,
                                          settings.sticker_scale)
         try:
             sticker_choices_mod.ensure_baked(
-                body.slug, root=cache, size=size, fps=int(settings.fps))
+                body.slug, root=cache, size=size, fps=int(settings.fps),
+                style=stickers_mod.DEFAULT_STYLE)
         except ValueError as exc:
             # Two refusals land here, and the detail below is `str(exc)`, so
             # the caller sees whichever it was:
