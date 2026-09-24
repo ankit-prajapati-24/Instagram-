@@ -33,7 +33,9 @@ browser handed it would fetch any link anyone handed it.
 
 from __future__ import annotations
 
+import math
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -64,6 +66,41 @@ NO_CREDIT_LICENCES = frozenset({"cc0", "pdm"})
 # What a chosen track is recorded as, alongside "pexels" and "upload" on
 # the clip side.
 PICKED_PROVIDER = "openverse"
+
+# How much of a track is ever worth having. The render loops the bed to
+# fill the video (``aloop=loop=-1`` in engine/assembly/render.py) and the
+# longest reel this pipeline will render is 66 seconds, so anything past
+# this is audio nobody can hear.
+#
+# It is a download bound, not a taste one. Measured against the CDN
+# Openverse serves from, at roughly 75 KB/s:
+#
+#      16s   0.4 MB     5.9s
+#      59s   1.3 MB    19.3s
+#     152s   3.5 MB    46.2s
+#     457s  10.2 MB   134.4s
+#     803s  18.2 MB   238.8s
+#
+# Four minutes to put a bed on a forty-second reel is not a gate anyone
+# will use twice.
+#
+# 75s because the longest reel this pipeline will render is 66.1s
+# (``pre_render_range`` against the shipped duration window), so a bed
+# this long covers every renderable reel outright and never even reaches
+# its loop seam. It is deliberately not much more than that: the margin
+# is audio nobody can hear, bought at roughly 23 KB of download a
+# second. Raise it if the duration window is ever widened.
+MAX_BED_SECONDS = 75.0
+
+# Asked for on top of the bound, because the prefix is estimated from an
+# average bitrate and a VBR track's opening can be denser than its mean.
+# Cheap insurance: 15% of two minutes is about 250 KB.
+PREFIX_MARGIN = 1.15
+
+# When the track's length or the file's size is unknown there is nothing
+# to estimate from, so a flat cap applies. Comfortably more than two
+# minutes of anything Openverse serves.
+PREFIX_BYTE_CAP = 6 * 1024 * 1024
 
 _AUDIO_SUFFIXES = {".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".opus"}
 
@@ -216,6 +253,74 @@ def _suffix(url: str, fallback: str = ".mp3") -> str:
     return suffix if suffix in _AUDIO_SUFFIXES else fallback
 
 
+def _prefix_bytes(track: "Candidate", total: int | None) -> int | None:
+    """How many bytes hold ``MAX_BED_SECONDS`` of this track.
+
+    None means "take the whole thing": either there is nothing to
+    estimate from, or the track is already short enough that asking for
+    a prefix would be a range past the end of the file.
+    """
+    seconds = track.duration / 1000.0
+    if not total or seconds <= MAX_BED_SECONDS:
+        return None
+    share = (MAX_BED_SECONDS / seconds) * PREFIX_MARGIN
+    wanted = min(int(math.ceil(total * share)), PREFIX_BYTE_CAP)
+    return wanted if wanted < total else None
+
+
+def _fetch_prefix(client: httpx.Client, track: "Candidate",
+                  part: Path) -> None:
+    """Download enough of ``track`` to fill a reel, into ``part``.
+
+    Range is a request, not a requirement. A host that answers 200 with
+    the whole file has given a slower answer, not a wrong one, and the
+    trim downstream makes the two identical on disk.
+    """
+    # HEAD, so the size is learned without pulling a body that would
+    # then be pulled again. A host that refuses HEAD simply leaves the
+    # size unknown, and the flat cap applies instead.
+    total = None
+    try:
+        probe = client.head(track.preview, headers=_headers())
+        if probe.status_code < 400:
+            total = int(probe.headers.get("Content-Length") or 0) or None
+    except httpx.HTTPError:
+        pass
+
+    headers = dict(_headers())
+    wanted = _prefix_bytes(track, total)
+    if wanted:
+        headers["Range"] = f"bytes=0-{wanted - 1}"
+
+    response = client.get(track.preview, headers=headers)
+    if response.status_code not in (200, 206):
+        raise SearchUnavailable(
+            f"the audio file answered {response.status_code}.")
+    part.write_bytes(response.content)
+
+
+def _trim(part: Path, target: Path, settings) -> None:
+    """Re-encode the fetched prefix into a clean, bounded mp3.
+
+    Re-encoded rather than copied because a prefix of an mp3 ends
+    mid-frame, and the bed is composited into the reel -- a torn last
+    frame is audible. Running ffmpeg over it is also the check that what
+    came back is audio at all: an HTML error page saved under a .mp3
+    name would otherwise fail much later, inside the render, wearing
+    ffmpeg's wording instead of this gate's.
+    """
+    result = subprocess.run(
+        [settings.ffmpeg, "-hide_banner", "-v", "error", "-y",
+         "-i", str(part), "-t", f"{MAX_BED_SECONDS:.3f}", "-vn",
+         "-c:a", "libmp3lame", "-q:a", "2", "-f", "mp3", str(target)],
+        capture_output=True, text=True)
+    if result.returncode != 0 or not target.is_file() \
+            or target.stat().st_size == 0:
+        raise SearchUnavailable(
+            "that track did not decode as audio, so it cannot be used as "
+            f"a bed: {(result.stderr or '').strip()[-200:]}")
+
+
 def fetch_for_plan(plan_id: str, openverse_id: str, settings,
                    work_dir: str | Path, *,
                    client: httpx.Client | None = None) -> MusicChoice:
@@ -252,24 +357,24 @@ def fetch_for_plan(plan_id: str, openverse_id: str, settings,
 
         target_dir = Path(work_dir) / plan_id / "music"
         target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / f"{openverse_id}{_suffix(track.preview)}"
-        # Written to .part and renamed, as every other download here
-        # does: a bed half on disk is one the render would happily
-        # composite.
-        part = target.with_suffix(target.suffix + ".part")
+        # Always mp3: the fetched prefix is re-encoded below, so the
+        # source container stops mattering once it is on disk.
+        target = target_dir / f"{openverse_id}.mp3"
+        # Fetched to .part and only renamed once ffmpeg has accepted it,
+        # as every other download here does: a bed half on disk is one
+        # the render would happily composite.
+        part = target_dir / f"{openverse_id}.part"
         try:
-            audio = client.get(track.preview, headers=_headers())
-            if audio.status_code != 200:
-                raise SearchUnavailable(
-                    f"the audio file answered {audio.status_code}.")
-            part.write_bytes(audio.content)
-            os.replace(part, target)
-        except httpx.HTTPError as exc:
+            _fetch_prefix(client, track, part)
+            _trim(part, target, settings)
+        except (httpx.HTTPError, SearchUnavailable, OSError) as exc:
             part.unlink(missing_ok=True)
+            target.unlink(missing_ok=True)
+            if isinstance(exc, SearchUnavailable):
+                raise
             raise SearchUnavailable(f"the audio file did not download: {exc}")
-        except SearchUnavailable:
+        finally:
             part.unlink(missing_ok=True)
-            raise
 
         return MusicChoice(
             openverse_id=track.openverse_id,
