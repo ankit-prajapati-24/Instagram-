@@ -1039,7 +1039,19 @@ git commit -m "perf: bake the one style the beat actually needs"
 
 **Files:**
 - Modify: `engine/app.py` (`sticker_candidates` at lines 1980-2028, `choose_sticker` at lines 2075-2112, and the `StickerChoice` model at module level)
+- Modify: `tests/test_app.py` (`test_a_chosen_icon_survives_the_route_and_reaches_a_render`) — see below
 - Test: `tests/test_sticker_routes.py` (create if absent; otherwise add to the file that already covers the picker routes)
+
+**This task closes a known-red test.** Since Task 3 changed
+`Store.choose_sticker`'s second parameter from a trigger name to a beat id,
+the unmigrated route has been passing a trigger name into it — so the route
+writes `beat_id="death"` while `prepare()` looks up `"b0"`, every lookup
+misses, and the chosen icon silently falls through to the committed art.
+`tests/test_app.py::test_a_chosen_icon_survives_the_route_and_reaches_a_render`
+has been failing on the branch since then and is the proof that the picker is
+currently inert end to end. Migrating the route is what fixes it. **That test
+must pass when this task is done, and it must still be asserting that a choice
+made through the route reaches the render — not weakened to assert less.**
 
 **Interfaces:**
 - Consumes: `Cue.beat_id`, `Cue.terms` (Task 2); `Store.choose_sticker(plan_id, beat_id, slug)` (Task 3); `ensure_baked(..., style=...)` (Task 5); `stickers_mod.style_for_role(role)`.
