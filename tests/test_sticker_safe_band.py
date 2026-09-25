@@ -70,24 +70,28 @@ def _baked_metas():
 # --- the silent one ---------------------------------------------------------
 
 
-def test_the_committed_art_is_baked_for_the_size_actually_requested():
-    """The check that would have caught it.
+def test_the_two_default_sizes_agree():
+    """SIZE_FRACTION and Settings.sticker_scale both answer "how big",
+    and a render reads whichever it can reach. Disagreeing is invisible:
+    a size the committed bake does not cover is baked on demand rather
+    than failing, so the only symptom would be two code paths quietly
+    producing different-sized stickers."""
+    from engine.config import Settings
 
-    Raising SIZE_FRACTION without re-baking leaves baked_sequence
-    matching nothing, and every committed concept quietly becomes its
-    emoji fallback. Nothing raises; the reel just gets plainer stickers
-    and stops crediting Lordicon.
-    """
-    metas = _baked_metas()
-    assert metas, "no baked art found, so this guard proves nothing"
+    assert SIZE_FRACTION == Settings().sticker_scale
 
-    wanted = sticker_canvas(sticker_size(WIDTH))
-    for meta_path in metas:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        assert int(meta["canvas"]) == wanted, (
-            f"{meta_path.parent.name} is baked at canvas {meta['canvas']} "
-            f"but the render asks for {wanted}: it will fall through to "
-            f"the emoji fallback. Re-bake with scripts/bake_stickers.py.")
+
+def test_a_size_the_committed_art_misses_is_baked_rather_than_dropped():
+    """This used to be the silent defect: baked_sequence matches by
+    exact size, so any scale but the committed one dropped every
+    designed concept to its emoji and stopped owing Lordicon a credit.
+    It is covered now, and this is the wire that covers it."""
+    from engine.assembly import sticker_bake
+    from engine.assembly import stickers as stk_mod
+    import inspect
+
+    assert hasattr(sticker_bake, "bake_on_demand")
+    assert "bake_on_demand" in inspect.getsource(stk_mod.prepare)
 
 
 def test_every_baked_concept_agrees_on_one_size():

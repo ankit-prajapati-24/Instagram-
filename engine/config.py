@@ -376,16 +376,24 @@ class Settings:
         default_factory=lambda: os.getenv(
             "RAHASYA_STICKER_FONT",
             r"C:\Windows\Fonts\seguiemj.ttf"))
-    # Resting size as a fraction of frame width. 0.17 of 1080 is ~184px.
+    # Resting size as a fraction of frame width. 0.294 of 1080 is 318px.
     #
-    # Raising it is not a one-line change: the committed art under
-    # engine/data/stickers is baked at one exact canvas, and
-    # baked_sequence only uses art whose size matches the request, so a
-    # bigger sticker silently drops every baked concept to its emoji
-    # fallback. See tests/test_sticker_safe_band.py.
+    # Two ceilings set that number, and both were measured.
+    #
+    # The source art is 400x400, and sticker_canvas(318) is exactly 400 --
+    # so this is the largest size that is still a reduction of the art
+    # rather than an upscale of it. A size the committed bake does not
+    # cover is baked from that source on demand (sticker_bake), so the
+    # scale is now a real setting rather than a constant pretending to be
+    # one.
+    #
+    # And the pop overshoots to 1.25x on the way in, which at 318px peaks
+    # at 397px: y 224 to 620 on a 1920 frame, clearing the platform's own
+    # controls above (~200) and the centred Punch caption below (~900).
+    # See tests/test_sticker_safe_band.py.
     sticker_scale: float = field(
         default_factory=lambda: float(
-            os.getenv("RAHASYA_STICKER_SCALE", "0.17")))
+            os.getenv("RAHASYA_STICKER_SCALE", "0.294")))
 
     # --- Captions ----------------------------------------------------------
     captions_source: str = field(

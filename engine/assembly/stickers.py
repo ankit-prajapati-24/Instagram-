@@ -78,9 +78,20 @@ HOLD_SECONDS = 1.40
 FADE_OUT_SECONDS = 0.18
 
 # --- geometry ---------------------------------------------------------------
-# Size as a fraction of frame width. 0.17 of 1080 is ~184px: big enough to
-# read on a phone at arm's length, small enough not to become the shot.
-SIZE_FRACTION = 0.17
+# Size as a fraction of frame width, and the fallback for a settings
+# object that carries no sticker_scale. 0.294 of 1080 is 318px.
+#
+# It was 0.17 (184px), which a reviewer watching a finished reel read as
+# decoration rather than punctuation. Two measured ceilings put it here:
+# sticker_canvas(318) is exactly 400, the resolution of the source art in
+# assets/lordicon, so this is the largest size that is still a reduction
+# of that art; and the pop overshoots to 397px, which clears the
+# platform's controls above and the centred Punch caption below.
+#
+# Kept equal to Settings.sticker_scale's default on purpose -- the two
+# disagreeing is invisible, because a size the committed bake does not
+# cover is simply baked on demand instead of failing.
+SIZE_FRACTION = 0.294
 # The safe band. Captions are Alignment 2 with MarginV 300 and wrap to two
 # or three lines of 72px, so they own everything below ~y=1360; the Punch
 # style is Alignment 5, dead centre. That leaves the upper third, and 0.22
@@ -632,6 +643,16 @@ def prepare(plan: ReelPlan, settings, *,
         # behaviour, not a gap.
         if found is None and cue.source == "trigger":
             found = baked_sequence(cue.name, style, fps=fps, size=size)
+            if found is None:
+                # The committed bake covers one size. Anything else is
+                # baked from the source art into the same cache the emoji
+                # pop uses, so sticker_scale is a setting rather than a
+                # constant that silently drops every designed concept to
+                # its emoji when moved. About seven seconds per concept,
+                # once, into a cache shared by every reel on the machine.
+                from engine.assembly.sticker_bake import bake_on_demand
+                found = bake_on_demand(cue.name, style, root,
+                                       fps=fps, size=size)
         if found is not None:
             pattern, frames, canvas = found
         else:
