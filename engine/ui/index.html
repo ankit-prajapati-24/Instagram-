@@ -434,6 +434,18 @@
     display: grid; gap: 12px; margin-top: 14px;
     grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   }
+  /* Both boards lay their cards out as <figure>, which the browser gives
+     40px of side margin by default -- so every card was 80px narrower
+     than the track it sits in. Measured: the sticker grid handed out
+     174px tracks and got 94px cards, the clip grid 221px tracks and
+     141px cards.
+
+     That one number caused everything the board looked wrong for. In
+     94px a 44px icon fits once per row, so eight candidates became an
+     eight-row column 394px tall and a card 637px high; and the search
+     input's 120px min-width could not fit at all, so it hung 35px out
+     of its own card -- the overlap. */
+  .clipcard, .stickercard { margin: 0; }
   .stickercard {
     border: 1px solid var(--rule); background: var(--card); padding: 8px;
     display: flex; flex-direction: column; gap: 6px;
@@ -449,6 +461,35 @@
     word-break: break-word;
   }
   .stickercard .prov { font-size: 11px; color: var(--muted); }
+  /* Results from the one search box above the board. Wider tiles than
+     the in-card thumbnails because this is where the choosing happens:
+     a 44px icon is a reminder of what you already have, not something
+     you can pick between. */
+  .stkhits {
+    display: grid; gap: 10px; margin-top: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(136px, 1fr));
+  }
+  .stkhit {
+    border: 1px solid var(--rule); padding: 8px; display: flex;
+    flex-direction: column; gap: 6px; align-items: stretch; margin: 0;
+  }
+  .stkhit img {
+    width: 100%; height: 88px; object-fit: contain; background: #0b0f10;
+    display: block;
+  }
+  .stkhit .slug {
+    font-size: 11px; color: var(--muted); word-break: break-word;
+    text-align: center;
+  }
+  /* Fixed layout, because a long slug in a select stretches the tile and
+     then the grid, which is the same class of bug as the figure margin
+     above. */
+  .stkhit select {
+    width: 100%; max-width: 100%; font-size: 11px; padding: 3px 4px;
+    display: block;
+  }
+  .stkhit button { width: 100%; font-size: 11.5px; padding: 5px 6px;
+                   white-space: normal; line-height: 1.3; }
   .stickercard .stickerpicks { display: flex; flex-wrap: wrap; gap: 6px; }
   .stickercard .stickerpicks img {
     width: 44px; height: 44px; object-fit: cover; cursor: pointer;
@@ -461,16 +502,6 @@
   .stickercard.busy .stickerpicks img {
     pointer-events: none; opacity: .45; cursor: default;
   }
-  /* Mirrors `.lineup .hunt`, sized for a card rather than a panel: the
-     box has to stay usable when the grid is three cards wide. */
-  .stickercard .stickerfind {
-    display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
-  }
-  .stickercard .stickerfind input[type=text] {
-    flex: 1; min-width: 120px; font-size: 11px; padding: 4px 6px;
-  }
-  .stickercard .stickerfind button.go { font-size: 11px; padding: 4px 10px; }
-  .stickercard.busy .stickerfind { opacity: .45; pointer-events: none; }
   .stickercard .said { font-size: 11px; min-height: 13px; }
   .stickercard .said.bad { color: var(--stamp); }
   .stickercard .said.ok { color: var(--moss); }
@@ -963,6 +994,20 @@
         terms found nothing useful, search it yourself — “cloud” finds an
         icon where “dream” finds none. Choosing one bakes it into this
         reel, which takes about eight seconds.</p>
+      <div class="clipsearch">
+        <div class="row">
+          <input type="text" id="stk-q"
+                 placeholder="Search icons — one word, a thing not an idea">
+          <button class="go" id="btn-stk">Search</button>
+        </div>
+        <p class="hint">The library is named for objects, so search the
+          thing that stands for the idea — &ldquo;dream&rdquo; finds
+          nothing, &ldquo;cloud&rdquo; does. Every result can go on any
+          of the stickers below; choose which one under the icon.</p>
+        <div class="stkhits" id="stkhits"></div>
+        <p class="hint" id="stk-said"></p>
+      </div>
+
       <div class="stickergrid" id="stickergrid"></div>
 
       <h3 style="margin-top:30px">Music bed <em id="bed-note"></em></h3>
@@ -2407,12 +2452,6 @@ function renderStickers() {
       <div class="prov" id="stickerused-${r.beat_id}">${used}</div>
       <div class="stickerpicks" id="stickerpicks-${r.beat_id}">
         ${stickerPicks(r)}</div>
-      <div class="stickerfind">
-        <input type="text" data-beat="${esc(r.beat_id)}"
-               id="stickerq-${r.beat_id}"
-               placeholder="Search icons — one word, a thing not an idea">
-        <button class="go" data-beat="${esc(r.beat_id)}">Search</button>
-      </div>
       <div class="said" id="stickersaid-${r.beat_id}"></div>
     </figure>`;
   }).join("");
@@ -2456,68 +2495,118 @@ function wireStickerCards() {
     img.onmouseleave = () => { img.src = img.dataset.still; };
   });
 
-  $("stickergrid").querySelectorAll(".stickerfind button").forEach((btn) => {
-    btn.onclick = () => searchStickers(btn.dataset.beat);
+}
+
+/* The one search box above the board, mirroring the clip board's.
+
+   The library is named for objects, so a script that asked for "dream",
+   "journey" or "farewell" gets an empty candidate list while the icon it
+   wanted sits under "cloud", "road" or "suitcase". Searching used to be
+   per card, which meant repeating the same search once per sticker and
+   left every card carrying an input too narrow to type in.
+
+   A result is not tied to the search that found it: each one carries a
+   dropdown of every cue in the reel, so one search can answer several
+   stickers. The route comes off a row rather than being spelled out
+   here, the same way the per-card search took it. */
+function stickerCueOptions() {
+  const rows = (STICKERS && STICKERS.rows) || [];
+  return rows.map((r) => `<option value="${esc(r.beat_id)}">${
+    esc(r.beat_id)} · ${esc(r.word)}</option>`).join("");
+}
+
+function renderStickerHits(found) {
+  const options = stickerCueOptions();
+  $("stkhits").innerHTML = found.map((c, i) => `
+    <figure class="stkhit">
+      <img loading="lazy" alt="${esc(c.slug)}" src="${c.preview}"
+           data-still="${c.preview}" data-motion="${c.motion}"
+           title="hover to see it move">
+      <div class="slug">${esc(c.slug)}</div>
+      <select id="stkaim-${i}" aria-label="which sticker to replace">
+        ${options}
+      </select>
+      <button class="use" data-slug="${esc(c.slug)}" data-index="${i}">
+        Use this icon
+      </button>
+    </figure>`).join("");
+
+  $("stkhits").querySelectorAll("img").forEach((img) => {
+    if (!img.dataset.motion) return;
+    img.onmouseenter = () => { img.src = img.dataset.motion; };
+    img.onmouseleave = () => { img.src = img.dataset.still; };
   });
-  $("stickergrid").querySelectorAll(".stickerfind input").forEach((box) => {
-    box.onkeydown = (event) => {
-      if (event.key === "Enter") searchStickers(box.dataset.beat);
+  $("stkhits").querySelectorAll("button.use").forEach((button) => {
+    button.onclick = () => {
+      const beat = $("stkaim-" + button.dataset.index).value;
+      useStickerHere(beat, button.dataset.slug);
     };
   });
 }
 
-/* Look the catalogue up by hand for one card.
+/* Send a searched icon to a cue.
 
-   Needed because the library is named for objects: a script that asked
-   for "dream", "journey" or "farewell" gets an empty candidate list, and
-   the icon it wanted is sitting there under "cloud", "road" or "suitcase".
-
-   The route is the one the row carries, never spelled out here. Results
-   replace that card's thumbnails only; the row's `candidates` are updated
-   too, so a later choose still finds the slug it is clicking. */
-async function searchStickers(beatId) {
+   The chosen slug is pushed onto that row's candidates first, so the
+   card can show it as chosen -- chooseSticker marks the thumbnail whose
+   slug matches, and an icon found up here is not in that card's strip
+   yet. */
+function useStickerHere(beatId, slug) {
   const row = (STICKERS && (STICKERS.rows || []).find(
     (r) => r.beat_id === beatId)) || null;
-  const card = $("stickercard-" + beatId);
-  if (!row || !card || card.classList.contains("busy")) return;
-  const term = ($("stickerq-" + beatId).value || "").trim();
-  const said = $("stickersaid-" + beatId);
-  if (!term) {
-    said.className = "said bad";
-    said.textContent = "Type a word to search for.";
+  if (!row) return;
+  if (!row.candidates.some((c) => c.slug === slug)) {
+    const hit = (LAST_STICKER_HITS || []).find((c) => c.slug === slug);
+    if (hit) {
+      row.candidates = [hit].concat(row.candidates).slice(0, 8);
+      $("stickerpicks-" + beatId).innerHTML = stickerPicks(row);
+      wireStickerCards();
+    }
+  }
+  chooseSticker(beatId, slug);
+}
+
+let LAST_STICKER_HITS = [];
+
+async function searchStickerLibrary() {
+  const term = $("stk-q").value.trim();
+  const said = $("stk-said");
+  const rows = (STICKERS && STICKERS.rows) || [];
+  if (!term) { said.textContent = "Type one word to search for."; return; }
+  if (!rows.length) {
+    said.textContent = "No sticker cues fired in this reel, so there is "
+      + "nothing to put an icon on.";
     return;
   }
-
-  said.className = "said";
-  said.textContent = `Searching for “${term}”…`;
+  said.textContent = "Searching the icon library…";
+  $("stkhits").innerHTML = "";
   try {
-    const url = `${row.search}?term=${encodeURIComponent(term)}`;
-    const response = await fetch(url);
+    const response = await fetch(
+      `${rows[0].search}?term=${encodeURIComponent(term)}`);
     const data = await response.json();
     if (!response.ok) {
-      said.className = "said bad";
       said.textContent = String(data.detail || response.status);
       return;
     }
     const found = data.candidates || [];
     if (!found.length) {
-      said.className = "said bad";
       said.textContent =
-        `Nothing named “${term}”. The library is named for things, ` +
-        `not ideas — try the object that stands for it.`;
+        `Nothing named “${term}”. The library is named for things, `
+        + `not ideas — try the object that stands for it.`;
       return;
     }
-    row.candidates = found;
-    $("stickerpicks-" + beatId).innerHTML = stickerPicks(row);
-    wireStickerCards();
-    said.className = "said ok";
-    said.textContent =
-      `${found.length} icon${found.length === 1 ? "" : "s"} for “${term}”.`;
+    LAST_STICKER_HITS = found;
+    renderStickerHits(found);
+    said.textContent = `${found.length} icon${found.length === 1 ? "" : "s"}`
+      + ` for “${term}”. Choose which sticker each one replaces.`;
   } catch (err) {
-    said.className = "said bad";
     said.textContent = String(err);
   }
 }
+
+$("btn-stk").onclick = searchStickerLibrary;
+$("stk-q").onkeydown = (event) => {
+  if (event.key === "Enter") { event.preventDefault(); searchStickerLibrary(); }
+};
 
 async function chooseSticker(beatId, slug) {
   const row = STICKERS && (STICKERS.rows || []).find(

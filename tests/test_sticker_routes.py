@@ -176,8 +176,9 @@ def test_the_panel_searches_through_the_url_the_server_gives_it():
     page = _panel()
     assert "/api/sticker-search" not in page, \
         "the panel hardcodes a route the server already provides"
-    assert "dataset.search" in page or "row.search" in page or \
-        "r.search" in page, "the panel ignores the search URL it is given"
+    assert ("dataset.search" in page or "row.search" in page
+            or "r.search" in page or "rows[0].search" in page), \
+        "the panel ignores the search URL it is given"
 
 
 def test_the_panel_does_not_still_promise_a_seventeen_second_bake():
@@ -229,7 +230,10 @@ const checks = [
   ["thumbs carry the beat", out.includes('data-beat="b1"')],
   ["b3 keeps its own chosen marker", /class="chosen"[^>]*data-beat="b3"/.test(out)],
   ["b1 is not marked chosen", !/class="chosen"[^>]*data-beat="b1"/.test(out)],
-  ["every card has a search box", (out.match(/class="stickerfind"/g)||[]).length === 3],
+  // Searching moved above the board: one box for the reel instead of one
+  // per card, which meant typing the same search once per sticker into an
+  // input that did not fit the card holding it.
+  ["no card carries its own search box", !out.includes("stickerfind")],
   ["a model cue says the script asked", out.includes("the script asked for it")],
   ["empty candidates invite a search", out.includes("no candidates")]
 ];
