@@ -106,9 +106,20 @@ def test_choosing_for_a_beat_that_does_not_exist_is_a_404(client, plan_with_stic
 
 
 def test_search_by_hand_returns_catalogue_slugs(client):
+    """Every result names the library it came from.
+
+    A bare slug cannot say which of the two libraries it belongs to, and
+    both end up as filenames, so the qualification is what keeps them
+    apart rather than a convention the caller has to remember.
+    """
+    from engine.assembly.sticker_choices import LIBRARIES
+
     body = client.get("/api/sticker-search", params={"term": "cloud"}).json()
     assert body["slugs"], "cloud is in the catalogue"
-    assert all("-" in slug for slug in body["slugs"])
+    for slug in body["slugs"]:
+        library, sep, bare = slug.partition(":")
+        assert sep and library in LIBRARIES, f"unqualified slug {slug!r}"
+        assert bare
 
 
 def test_search_never_treats_the_term_as_a_path(client, tmp_path):
@@ -228,8 +239,10 @@ const checks = [
   ["three cards, no collided id", (out.match(/id="stickercard-/g)||[]).length === 3],
   ["no trigger-keyed card id", !out.includes("stickercard-water")],
   ["thumbs carry the beat", out.includes('data-beat="b1"')],
-  ["b3 keeps its own chosen marker", /class="chosen"[^>]*data-beat="b3"/.test(out)],
-  ["b1 is not marked chosen", !/class="chosen"[^>]*data-beat="b1"/.test(out)],
+  ["b3 keeps its own chosen marker",
+   /class="[^"]*chosen[^"]*"[^>]*data-beat="b3"/.test(out)],
+  ["b1 is not marked chosen",
+   !/class="[^"]*chosen[^"]*"[^>]*data-beat="b1"/.test(out)],
   // Searching moved above the board: one box for the reel instead of one
   // per card, which meant typing the same search once per sticker into an
   // input that did not fit the card holding it.
@@ -278,3 +291,30 @@ def test_the_panel_renders_two_cues_of_one_trigger_as_two_cards(tmp_path):
     assert done.returncode == 0, (
         f"the sticker board did not render as it must:\n{done.stdout}"
         f"{done.stderr}")
+
+
+def test_a_search_offers_both_libraries(client):
+    """The point of the second library, at the layer the panel sees.
+
+    Lordicon is four times the size, so a search that merely took the best
+    results overall would show only Lordicon on almost every word and the
+    second library would exist in name only.
+    """
+    body = client.get("/api/sticker-search", params={"term": "skull"}).json()
+    libraries = {s.split(":")[0] for s in body["slugs"]}
+    assert libraries == {"lordicon", "noto"}, \
+        f"only {libraries} reached the panel"
+
+
+def test_a_noto_codepoint_is_previewable_through_the_route(client):
+    """A codepoint is not a Lordicon slug, so the preview gate has to judge
+    it against its own catalogue rather than one shared list."""
+    body = client.get("/api/sticker-search", params={"term": "skull"}).json()
+    noto = next(s for s in body["slugs"] if s.startswith("noto:"))
+    assert client.get(f"/api/sticker-preview/{noto}").status_code == 200
+
+
+def test_a_real_noto_codepoint_offered_as_lordicon_is_refused(client):
+    """`1f480` exists, but not in Lordicon's catalogue. Checking a slug
+    against the library it claims is what makes the gate meaningful."""
+    assert client.get("/api/sticker-preview/lordicon:1f480").status_code == 404

@@ -74,7 +74,20 @@ PEAK_SECONDS = 0.12
 OVERSHOOT = 1.25
 # How long it stays before it leaves, and how long the exit takes. Short:
 # it is punctuation, not a lower third.
-HOLD_SECONDS = 1.40
+#
+# 1.80 rather than 1.40 because the source animations are longer than this
+# window and were being run fast to fit it. Measured natively: Lordicon's
+# own GIFs are 1.87-3.60s, and a sample of 24 Noto emoji had a median of
+# 1.81s, only 3 of them inside 1.40. At 1.40 the median emoji played at
+# 1.3x and the long ones at 2.5-3.7x, which reads as a flicker rather than
+# a gesture.
+#
+# Free in density: how many stickers fit a reel is set by MIN_GAP_SECONDS,
+# not by this. The one rule this must not break is HOLD < MIN_GAP, which is
+# what guarantees two are never on screen together -- 1.80 against 2.50
+# keeps it. Moving this invalidates every cached bake by design; see the
+# frame-count check in `baked_sequence`.
+HOLD_SECONDS = 1.80
 FADE_OUT_SECONDS = 0.18
 
 # --- geometry ---------------------------------------------------------------
@@ -124,8 +137,13 @@ def style_for_role(role: str | None) -> str:
 
 def baked_sequence(name: str, style: str, *, fps: int, size: int,
                    root: Path | None = None
-                   ) -> tuple[str, int, int] | None:
-    """``(pattern, frames, canvas)`` for baked art, or None to fall back.
+                   ) -> tuple[str, int, int, str | None] | None:
+    """``(pattern, frames, canvas, licence)`` for baked art, or None.
+
+    The licence is read from the bake's own ``meta.json`` rather than
+    assumed, because two icon libraries are in play and the credit a render
+    owes has to follow the art it used. A bake written before that field
+    existed reports None: it genuinely cannot say what it was made from.
 
     Returns None rather than raising for every kind of absence -- no art for
     this trigger, a bake made at another fps or another size, a bake that is
@@ -159,7 +177,11 @@ def baked_sequence(name: str, style: str, *, fps: int, size: int,
         return None
     if len(list(folder.glob("frame-*.png"))) != frames:
         return None
-    return str(folder / "frame-%03d.png"), frames, canvas
+    # Lordicon when the bake does not say: this rung serves the art
+    # committed to engine/data/stickers/, which came from there. Crediting
+    # nothing would drop a credit that is actually owed.
+    return (str(folder / "frame-%03d.png"), frames, canvas,
+            meta.get("licence") or LICENCES["lordicon"])
 
 
 _PUNCTUATION = "\"'`.,!?;:()[]{}<>\u2014\u2013-\u2018\u2019\u201c\u201d" \
@@ -231,6 +253,11 @@ class Sticker:
     frames: int      # how many PNGs the pop is
     pattern: str     # ffmpeg image2 pattern for those PNGs
     png: str         # the resting frame, handy to look at
+    # The credit this sticker's art carries, read from the bake's own
+    # meta.json. None for the emoji fallback, which is a system font glyph
+    # and owes nothing. Carried per sticker because two libraries are in
+    # play and the credit has to follow the art.
+    licence: str | None = None
 
 
 # --- the trigger map --------------------------------------------------------
@@ -648,14 +675,17 @@ def prepare(plan: ReelPlan, settings, *,
                 # baked from the source art into the same cache the emoji
                 # pop uses, so sticker_scale is a setting rather than a
                 # constant that silently drops every designed concept to
-                # its emoji when moved. About seven seconds per concept,
-                # once, into a cache shared by every reel on the machine.
+                # its emoji when moved. Costs about seven seconds per
+                # concept, once.
                 from engine.assembly.sticker_bake import bake_on_demand
                 found = bake_on_demand(cue.name, style, root,
                                        fps=fps, size=size)
         if found is not None:
-            pattern, frames, canvas = found
+            pattern, frames, canvas, licence = found
         else:
+            # The emoji rung owes nothing: it is a glyph from a system font,
+            # not art from a library.
+            licence = None
             try:
                 pattern, frames, canvas = render_pop_frames(
                     cue.emoji, root, size=size, fps=fps, font_path=font)
@@ -673,7 +703,8 @@ def prepare(plan: ReelPlan, settings, *,
             name=cue.name, emoji=cue.emoji, word=cue.word,
             beat_index=cue.beat_index, start=cue.start, slot=slot,
             style=style, baked=found is not None, size=size, canvas=canvas,
-            frames=frames, pattern=pattern, png=pattern % (frames - 1)))
+            frames=frames, pattern=pattern, png=pattern % (frames - 1),
+            licence=licence))
         slot += 1
     return prepared
 
@@ -754,9 +785,35 @@ def sticker_chain(stickers: list[Sticker], video_label: str,
 # used. It is derived from the stickers that actually rendered, not set as a
 # flag someone has to remember, so the credit and the thing it credits
 # cannot drift apart.
-ATTRIBUTION = "Animated icons by Lordicon.com"
+# What each icon library asks for in return. Keyed by the name a bake
+# records in its ``meta.json``, so the credit follows the art rather than
+# being inferred from the fact that some art rendered.
+LICENCES = {
+    "lordicon": "Animated icons by Lordicon.com",
+    "noto": "Animated emoji by Google, Noto Emoji (CC BY 4.0)",
+}
+
+# The Lordicon line under its old name. Kept because it is the credit
+# already recorded against every render made before a second library
+# existed, and those rows are never rewritten.
+ATTRIBUTION = LICENCES["lordicon"]
 
 
 def attribution_for(stickers: list["Sticker"]) -> str | None:
-    """The credit line this render owes, or None if it owes none."""
-    return ATTRIBUTION if any(s.baked for s in stickers) else None
+    """The credit line this render owes, or None if it owes none.
+
+    Built from what actually rendered, not from whether anything did. With
+    one library "any baked sticker" and "owes the Lordicon credit" were the
+    same question; with two they are not, and answering the old one would
+    put a false claim on every reel -- a Lordicon notice on a reel made of
+    emoji, or a CC BY notice on a reel that owes none.
+
+    Each library is named once however many of its icons appear: two skulls
+    from one library is one obligation.
+    """
+    seen: list[str] = []
+    for sticker in stickers:
+        credit = getattr(sticker, "licence", None)
+        if sticker.baked and credit and credit not in seen:
+            seen.append(credit)
+    return " · ".join(seen) if seen else None

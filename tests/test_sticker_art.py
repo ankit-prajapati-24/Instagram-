@@ -330,9 +330,12 @@ def test_the_window_is_exactly_the_span_the_chain_lets_through():
 
 
 def test_the_frame_count_follows_the_configured_fps():
-    assert frame_count(30) == 42
-    assert frame_count(60) == 84
-    assert frame_count(24) == 34
+    """Literals, not `round(WINDOW_SECONDS * fps)` -- recomputing the
+    formula under test would assert nothing. These are the counts for a
+    1.80s window; a change to it updates them deliberately."""
+    assert frame_count(30) == 54
+    assert frame_count(60) == 108
+    assert frame_count(24) == 43
 
 
 def test_baking_writes_one_png_per_output_frame_and_a_meta(tmp_path):
@@ -383,3 +386,88 @@ def test_an_icon_with_trapped_white_is_refused_by_name(tmp_path):
 
     with pytest.raises(ValueError, match="holed.gif"):
         bake_one(gif, tmp_path / "baked", style="punchy", size=48, fps=30)
+
+
+# --- a source that already has transparency ------------------------------
+#
+# Lordicon serves its icons on a white ground and `matte` cuts that away to
+# make the transparency. Noto's animated emoji arrive with real alpha
+# already. Running the flood fill over those does nothing -- their ground is
+# not white -- so the whole square stayed opaque and the sticker rendered as
+# a coloured block over the footage. Measured on 1f480: every background
+# pixel came out (187, 215, 226, 255) where a Lordicon bake gives (0,0,0,0).
+
+
+def _white_ground_gif(path, frames=4, side=64):
+    """A source shaped like Lordicon's: art on opaque white."""
+    from PIL import Image, ImageDraw
+    out = []
+    for i in range(frames):
+        im = Image.new("RGB", (side, side), (255, 255, 255))
+        ImageDraw.Draw(im).ellipse((10, 10, side - 10, side - 10),
+                                   fill=(20 + i * 5, 40, 60))
+        out.append(im)
+    out[0].save(path, save_all=True, append_images=out[1:], duration=40,
+                loop=0, format="GIF")
+    return path
+
+
+def _transparent_gif(path, frames=4, side=64):
+    """A source shaped like Noto's: art on real transparency."""
+    from PIL import Image, ImageDraw
+    out = []
+    for i in range(frames):
+        im = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+        ImageDraw.Draw(im).ellipse((10, 10, side - 10, side - 10),
+                                   fill=(20 + i * 5, 40, 60, 255))
+        out.append(im.convert("P", palette=Image.ADAPTIVE, colors=64))
+    out[0].save(path, save_all=True, append_images=out[1:], duration=40,
+                loop=0, format="GIF", transparency=0, disposal=2)
+    return path
+
+
+def _corner_alpha(folder):
+    """The alpha just inside the sticker square, where background lives."""
+    from PIL import Image
+    import json
+    meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
+    frame = Image.open(folder / "frame-001.png").convert("RGBA")
+    inset = (meta["canvas"] - meta["size"]) // 2
+    return frame.getpixel((inset + 4, inset + 4))[3]
+
+
+def test_a_source_that_is_already_transparent_keeps_its_transparency(tmp_path):
+    """The Noto case. Its ground is pale blue, not white, so the flood fill
+    never starts and the sticker ships as an opaque block."""
+    from engine.assembly.sticker_bake import bake_one
+    gif = _transparent_gif(tmp_path / "noto.gif")
+    out = tmp_path / "baked"
+    bake_one(gif, out, style="punchy", size=64, fps=30)
+    # Not exactly zero: `matte` blurs the alpha edge by half a pixel and
+    # `ground` lays a shadow under the art, so background pixels carry a
+    # few units. The defect this guards gives 255.
+    assert _corner_alpha(out) < 32,         "the background of an already-transparent source came out opaque"
+
+
+def test_a_source_on_white_is_still_matted(tmp_path):
+    """The Lordicon case, unchanged. Keeping the source alpha must not
+    stop the flood fill running where there is no alpha to keep."""
+    from engine.assembly.sticker_bake import bake_one
+    gif = _white_ground_gif(tmp_path / "lordicon.gif")
+    out = tmp_path / "baked"
+    bake_one(gif, out, style="punchy", size=64, fps=30)
+    assert _corner_alpha(out) < 32, "the white ground was not cut away"
+
+
+def test_a_bake_records_the_licence_it_was_made_under(tmp_path):
+    """Two libraries, so the credit has to be written per bake rather than
+    stamped from one constant."""
+    import json
+    from engine.assembly.sticker_bake import bake_one
+    gif = _transparent_gif(tmp_path / "noto.gif")
+    out = tmp_path / "baked"
+    bake_one(gif, out, style="punchy", size=64, fps=30,
+             licence="Animated emoji by Google, Noto Emoji (CC BY 4.0)")
+    meta = json.loads((out / "meta.json").read_text(encoding="utf-8"))
+    assert meta["licence"] == "Animated emoji by Google, Noto Emoji (CC BY 4.0)"
+    assert "Lordicon" not in meta["licence"]

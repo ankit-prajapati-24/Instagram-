@@ -56,40 +56,108 @@ _SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 def safe_slug(slug: str) -> str:
-    """The slug, or raise. The only way a slug becomes part of a path."""
+    """A bare Lordicon slug, or raise."""
     if not isinstance(slug, str) or not _SLUG.fullmatch(slug):
         raise ValueError(f"not a Lordicon slug: {slug!r}")
     return slug
+
+
+# Two libraries, two shapes. Lordicon serves `1875-planet`; Noto serves a
+# codepoint, which for skin tones and variation selectors is several hex
+# groups joined by underscores -- `1f44b_1f3ff`, `2620_fe0f`. One regex
+# covering both would also accept each library's nonsense as the other's.
+DEFAULT_LIBRARY = "lordicon"
+_SLUG_RULES = {
+    "lordicon": _SLUG,
+    "noto": re.compile(r"^[0-9a-f]+(?:_[0-9a-f]+)*$"),
+}
+LIBRARIES = tuple(_SLUG_RULES)
+# How each library is spelled when refusing something. The name a person
+# reads, not the key the code uses.
+_LIBRARY_NAMES = {"lordicon": "Lordicon", "noto": "Noto"}
+
+
+def split_slug(qualified: str) -> tuple[str, str]:
+    """``("noto", "1f480")`` from ``"noto:1f480"``, or raise.
+
+    The only way a stored choice becomes a path, and the only place the
+    ``library:slug`` spelling is understood. Everything downstream gets the
+    two parts separately, so the separator never reaches a filename -- ``:``
+    is not legal in one on Windows.
+
+    A value with no separator is Lordicon's. Every choice stored before a
+    second library existed is bare, and those rows are never rewritten.
+    """
+    if not isinstance(qualified, str):
+        raise ValueError(f"not a sticker slug: {qualified!r}")
+    library, sep, slug = qualified.partition(":")
+    if not sep:
+        library, slug = DEFAULT_LIBRARY, qualified
+    rule = _SLUG_RULES.get(library)
+    if rule is None:
+        raise ValueError(
+            f"unknown icon library {library!r}; "
+            f"expected one of {', '.join(LIBRARIES)}")
+    if not rule.fullmatch(slug):
+        raise ValueError(
+            f"not a {_LIBRARY_NAMES[library]} slug: {slug!r}")
+    return library, slug
 
 
 def bake_key(slug: str, style: str, size: int, fps: int) -> str:
     """A directory name for one baked sequence.
 
     Hashed rather than concatenated because a slug is free-form text from a
-    sitemap and this becomes a path. The slug is kept in front of the digest
-    anyway, so a human can read the cache.
+    catalogue and this becomes a path. The library and slug are kept in
+    front of the digest anyway, so a human can read the cache.
+
+    ``slug`` may be qualified (``noto:1f480``). The library is part of the
+    digest, so the same characters under two libraries are two bakes rather
+    than one that quietly serves the wrong art.
     """
-    slug = safe_slug(slug)
+    from engine.assembly.sticker_bake import BAKE_VERSION
+
+    library, bare = split_slug(slug)
+    # BAKE_VERSION is in the digest because the frame count and the size
+    # cannot see a change in how a frame is *drawn*. A sequence redrawn
+    # with the pop has the same count and size as one without it, so
+    # without this every warm cache would keep serving the old look.
     digest = hashlib.sha256(
-        f"{slug}|{style}|{size}|{fps}".encode()).hexdigest()[:12]
-    return f"{slug}-{style}-{digest}"
+        f"v{BAKE_VERSION}|{library}|{bare}|{style}|{size}|{fps}"
+        .encode()).hexdigest()[:12]
+    return f"{library}-{bare}-{style}-{digest}"
 
 
-def _download(slug: str, dest: Path) -> None:
-    """Fetch one icon's GIF. Split out so tests can replace it."""
-    urllib.request.urlretrieve(gif_url(slug), dest)
+def _download(library: str, slug: str, dest: Path) -> None:
+    """Fetch one icon's GIF. Split out so tests can replace it.
+
+    Takes the library and the bare slug rather than the qualified string,
+    because the caller has already split it and rejoining only to split
+    again is where a separator gets mishandled.
+    """
+    bare = slug
+    if library == "noto":
+        from engine.assembly.noto_catalog import gif_url as noto_gif_url
+        url = noto_gif_url(bare)
+    else:
+        url = gif_url(bare)
+    urllib.request.urlretrieve(url, dest)
 
 
 def _source(slug: str, root: Path) -> Path:
-    """The cached source GIF, downloaded on first use."""
-    slug = safe_slug(slug)
-    folder = Path(root) / SOURCES_DIRNAME
+    """The cached source GIF, downloaded on first use.
+
+    Filed under its library, so two codepoints that happen to spell the
+    same thing never share a file.
+    """
+    library, bare = split_slug(slug)
+    folder = Path(root) / SOURCES_DIRNAME / library
     folder.mkdir(parents=True, exist_ok=True)
-    dest = folder / f"{slug}.gif"
+    dest = folder / f"{bare}.gif"
     if not dest.exists():
         staged = dest.with_suffix(".part")
         try:
-            _download(slug, staged)
+            _download(library, bare, staged)
             staged.replace(dest)
         except Exception:
             # Same cleanup as sticker_catalog.refresh: no half-written
@@ -125,7 +193,7 @@ def cached_sequence(slug: str, style: str, *, fps: int, size: int,
 
 
 def _resolve(folder: Path, *, fps: int, size: int
-             ) -> tuple[str, int, int] | None:
+             ) -> tuple[str, int, int, str | None] | None:
     import json
 
     # Imported here, like json above, so that importing this module never
@@ -142,6 +210,16 @@ def _resolve(folder: Path, *, fps: int, size: int
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         frames = int(meta["frames"])
         canvas = int(meta["canvas"])
+        # Read, never assumed: the credit a render owes has to come from
+        # the art it actually used.
+        #
+        # A bake written before this field existed cannot say what it was
+        # made from, and the safe answer there is Lordicon rather than
+        # nothing: every bake that predates a second library came from it,
+        # so crediting nothing would drop a credit genuinely owed. Once a
+        # bake records its own licence this fallback never fires.
+        from engine.assembly.stickers import LICENCES
+        licence = meta.get("licence") or LICENCES["lordicon"]
         if int(meta["fps"]) != fps or int(meta["size"]) != size:
             return None
     except (OSError, ValueError, KeyError, TypeError):
@@ -163,7 +241,7 @@ def _resolve(folder: Path, *, fps: int, size: int
         return None
     if len(list(folder.glob("frame-*.png"))) != frames:
         return None
-    return str(folder / "frame-%03d.png"), frames, canvas
+    return str(folder / "frame-%03d.png"), frames, canvas, licence
 
 
 def ensure_baked(slug: str, *, root: Path, size: int, fps: int,
@@ -194,10 +272,17 @@ def ensure_baked(slug: str, *, root: Path, size: int, fps: int,
         raise ValueError(f"unknown sticker style {style!r}")
 
     root = Path(root)
+    library, _bare = split_slug(slug)
     folder = root / BAKES_DIRNAME / bake_key(slug, style, size, fps)
     if _resolve(folder, fps=fps, size=size) is not None:
         return
-    bake_one(_source(slug, root), folder, style=style, size=size, fps=fps)
+    # The credit is recorded from the library the art came from, never left
+    # to bake_one's default. That default is Lordicon's, so an emoji baked
+    # without this would claim a credit it does not owe and hide the one it
+    # does.
+    from engine.assembly.stickers import LICENCES
+    bake_one(_source(slug, root), folder, style=style, size=size, fps=fps,
+             licence=LICENCES[library])
 
 
 def source_gif(slug: str, *, root: Path) -> Path:
@@ -223,18 +308,25 @@ def preview_png(slug: str, *, root: Path, style: str = "punchy",
 
     from engine.assembly.sticker_art import apply_style, ground, matte
 
-    slug = safe_slug(slug)
+    library, bare = split_slug(slug)
     root = Path(root)
-    folder = root / PREVIEWS_DIRNAME
+    folder = root / PREVIEWS_DIRNAME / library
     folder.mkdir(parents=True, exist_ok=True)
-    dest = folder / f"{slug}-{style}-{px}.png"
+    dest = folder / f"{bare}-{style}-{px}.png"
     if dest.exists():
         return dest
 
     source = _source(slug, root)
     with Image.open(source) as src:
         src.seek(getattr(src, "n_frames", 1) // 2)
-        frame = src.convert("RGB")
-    art = ground(apply_style(matte(frame), style), style)
+        frame = src.convert("RGBA")
+    # The same rule the bake follows: a source that brought its own
+    # transparency keeps it, and only a source on an opaque ground gets the
+    # flood fill. Matting a Noto emoji does nothing -- its ground is pale
+    # blue, not white -- and the preview would show the opaque square the
+    # reel would not.
+    if frame.getchannel("A").getextrema()[0] >= 16:
+        frame = matte(frame.convert("RGB"))
+    art = ground(apply_style(frame, style), style)
     art.resize((px, px), Image.LANCZOS).save(dest)
     return dest

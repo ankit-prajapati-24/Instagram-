@@ -2432,7 +2432,8 @@ function renderStickers() {
 
   $("stickergrid").innerHTML = rows.map((r) => {
     const used = r.chosen
-      ? `in use now: <b>${esc(r.chosen)}</b>`
+      ? `in use now: <b>${esc(bareSlug(r.chosen))}</b>` +
+        ` <span class="lib">${esc(libraryLabel(r.chosen))}</span>`
       : "in use now: the committed art / emoji default";
     /* Where this cue came from, because it changes what the person can
        expect: a cue the script asked for carries its own search terms,
@@ -2459,6 +2460,29 @@ function renderStickers() {
   wireStickerCards();
 }
 
+/* Which library a qualified slug came from, and how to say it.
+
+   This is not decoration: the two libraries carry different credits, and
+   the reel records whichever ones it actually used. Someone picking an
+   icon should be able to see what they are taking on. A slug with no
+   prefix is Lordicon's -- every choice stored before a second library
+   existed is bare. */
+const LIBRARY_NAMES = { lordicon: "Lordicon", noto: "Noto emoji" };
+
+function libraryOf(slug) {
+  const name = String(slug || "").split(":")[0];
+  return LIBRARY_NAMES[name] ? name : "lordicon";
+}
+
+function libraryLabel(slug) {
+  return LIBRARY_NAMES[libraryOf(slug)];
+}
+
+function bareSlug(slug) {
+  const parts = String(slug || "").split(":");
+  return parts.length > 1 ? parts.slice(1).join(":") : parts[0];
+}
+
 /* The candidate thumbnails for one row, as HTML.
 
    Factored out of renderStickers because a search replaces just this part
@@ -2473,11 +2497,14 @@ function stickerPicks(r) {
      of these is an animation, and a spinning lock and a wobbling lock
      are the same picture -- so hovering swaps in the source GIF. */
   return r.candidates.map((c) => `
-      <img class="${c.slug === r.chosen ? "chosen" : ""}"
+      <img class="lib-${libraryOf(c.slug)} ${
+             c.slug === r.chosen ? "chosen" : ""}"
            data-beat="${esc(r.beat_id)}" data-slug="${esc(c.slug)}"
            data-still="${c.preview}" data-motion="${c.motion}"
-           title="hover to see it move"
-           loading="lazy" alt="${esc(c.slug)}" src="${c.preview}">`).join("");
+           title="${esc(bareSlug(c.slug))} — ${esc(libraryLabel(c.slug))}
+hover to see it move"
+           loading="lazy" alt="${esc(bareSlug(c.slug))}" src="${c.preview}">`)
+    .join("");
 }
 
 function wireStickerCards() {
@@ -2639,7 +2666,8 @@ async function chooseSticker(beatId, slug) {
       img.classList.toggle("chosen", img.dataset.slug === data.slug);
     });
     $("stickerused-" + beatId).innerHTML =
-      `in use now: <b>${esc(data.slug)}</b>`;
+      `in use now: <b>${esc(bareSlug(data.slug))}</b>` +
+      ` <span class="lib">${esc(libraryLabel(data.slug))}</span>`;
     said.className = "said ok";
     said.textContent = "In use now.";
   } catch (err) {

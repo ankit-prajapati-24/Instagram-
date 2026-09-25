@@ -55,7 +55,7 @@ def test_nothing_cached_resolves_to_none(tmp_path):
 def test_a_baked_slug_resolves_like_the_committed_art_does(tmp_path,
                                                            monkeypatch):
     src = _gif(tmp_path / "src.gif")
-    monkeypatch.setattr(sc, "_download", lambda slug, dest: src.replace(dest))
+    monkeypatch.setattr(sc, "_download", lambda library, slug, dest: src.replace(dest))
 
     sc.ensure_baked("27-globe", root=tmp_path, size=60, fps=30,
                     style="punchy")
@@ -63,7 +63,7 @@ def test_a_baked_slug_resolves_like_the_committed_art_does(tmp_path,
     found = sc.cached_sequence("27-globe", "punchy", fps=30, size=60,
                                root=tmp_path)
     assert found is not None
-    pattern, frames, canvas = found
+    pattern, frames, canvas, _licence = found
     from engine.assembly.stickers import HOLD_SECONDS, sticker_canvas
     assert frames == round(HOLD_SECONDS * 30)
     assert canvas == sticker_canvas(60)
@@ -89,8 +89,8 @@ def test_choosing_the_same_slug_twice_re_bakes_nothing(tmp_path,
     bakes = []
     real_bake_one = bakery.bake_one
 
-    def fake_download(slug, dest):
-        downloads.append(slug)
+    def fake_download(library, slug, dest):
+        downloads.append((library, slug))
         _gif(Path(dest))
 
     def spy_bake_one(gif, out_dir, **kwargs):
@@ -107,12 +107,12 @@ def test_choosing_the_same_slug_twice_re_bakes_nothing(tmp_path,
     sc.ensure_baked("27-globe", root=tmp_path, size=60, fps=30, style="dark")
 
     assert bakes == first, f"the second choose must bake nothing: {bakes}"
-    assert downloads == ["27-globe"], f"and fetch nothing: {downloads}"
+    assert downloads == [("lordicon", "27-globe")],         f"and fetch nothing: {downloads}"
 
 
 def test_a_preview_is_one_frame_not_a_bake(tmp_path, monkeypatch):
     src = _gif(tmp_path / "src.gif")
-    monkeypatch.setattr(sc, "_download", lambda slug, dest: _gif(Path(dest)))
+    monkeypatch.setattr(sc, "_download", lambda library, slug, dest: _gif(Path(dest)))
 
     png = sc.preview_png("27-globe", root=tmp_path, px=96)
     assert png.exists()
@@ -138,7 +138,7 @@ def test_an_icon_with_a_trapped_white_pocket_is_refused_by_name(tmp_path,
                    duration=40, loop=0)
 
     monkeypatch.setattr(sc, "_download",
-                        lambda slug, dest: holed.replace(Path(dest)))
+                        lambda library, slug, dest: holed.replace(Path(dest)))
 
     with pytest.raises(ValueError, match="2816-skull-halloween"):
         sc.ensure_baked("2816-skull-halloween", root=tmp_path, size=60,
@@ -156,9 +156,14 @@ def test_a_slug_that_is_not_a_slug_never_becomes_a_path(slug, tmp_path):
     prefix is a convenience, and a convenience is not worth a directory
     name that can leave the cache.
     """
-    with pytest.raises(ValueError, match="not a Lordicon slug"):
+    # Two refusals, both correct: anything before a `:` is read as a
+    # library name, so "C:/Windows/evil" is turned away as an unknown
+    # library rather than as a bad slug. What matters is that neither
+    # reaches a path.
+    refused = "not a Lordicon slug|unknown icon library"
+    with pytest.raises(ValueError, match=refused):
         sc.bake_key(slug, "dark", 184, 30)
-    with pytest.raises(ValueError, match="not a Lordicon slug"):
+    with pytest.raises(ValueError, match=refused):
         sc.preview_png(slug, root=tmp_path)
 
 
@@ -226,7 +231,7 @@ def test_a_failed_download_leaves_no_stage_behind(tmp_path, monkeypatch):
     """Match ``sticker_catalog.refresh``: a fetch that fails must not leave
     a ``.part`` file behind for the next call to trip over.
     """
-    def boom(slug, dest):
+    def boom(library, slug, dest):
         raise OSError("no route to host")
 
     monkeypatch.setattr(sc, "_download", boom)
@@ -288,7 +293,8 @@ def test_only_the_style_the_beat_needs_is_baked(tmp_path, monkeypatch):
     from engine.assembly import sticker_art
     made = []
 
-    def _fake_bake_one(source, folder, *, style, size, fps):
+    def _fake_bake_one(source, folder, *, style, size, fps,
+                       licence=None):
         made.append(style)
         _fake_bake_into(folder, size=size, fps=fps, style=style)
 
@@ -349,3 +355,85 @@ def test_two_beats_resolve_their_own_chosen_icons(tmp_path):
         assert want in patterns[index[beat_id]], \
             f"{beat_id} did not resolve to {slug}"
     assert all(s.baked for s in prepared), "the Lordicon credit depends on this"
+
+
+# --- two libraries in one cache -------------------------------------------
+#
+# A stored choice has to say which library it came from. Lordicon slugs look
+# like `1875-planet` and Noto codepoints like `1f480` or `2620_fe0f`, and
+# both end up as a filename and a cache directory. Qualifying the stored
+# value is what keeps them apart; splitting it before any path is built is
+# what keeps the separator off the filesystem.
+
+
+def test_a_bare_slug_still_means_lordicon():
+    """Every choice stored before a second library existed is unqualified,
+    and those rows are never rewritten."""
+    assert sc.split_slug("1875-planet") == ("lordicon", "1875-planet")
+
+
+def test_a_qualified_slug_names_its_library():
+    assert sc.split_slug("noto:1f480") == ("noto", "1f480")
+    assert sc.split_slug("lordicon:27-globe") == ("lordicon", "27-globe")
+
+
+def test_a_noto_codepoint_with_an_underscore_is_accepted():
+    """Skin tones and variation selectors arrive as `1f44b_1f3ff`, which
+    the Lordicon rule rejects. Judged per library, not by one regex."""
+    assert sc.split_slug("noto:1f44b_1f3ff") == ("noto", "1f44b_1f3ff")
+
+
+def test_each_library_rejects_the_other_shape():
+    with pytest.raises(ValueError):
+        sc.split_slug("noto:1875-planet")      # hyphens are not a codepoint
+    with pytest.raises(ValueError):
+        sc.split_slug("lordicon:1f44b_1f3ff")  # underscores are not a slug
+
+
+def test_an_unknown_library_is_refused():
+    with pytest.raises(ValueError):
+        sc.split_slug("elsewhere:1f480")
+
+
+def test_the_separator_never_reaches_a_path():
+    """`:` is not legal in a Windows filename and `..` must never be one.
+    Both are refused before anything is built."""
+    for hostile in ("noto:../../evil", "noto:/etc/passwd", "../../evil",
+                    "noto:1f480:extra", "noto:"):
+        with pytest.raises(ValueError):
+            sc.split_slug(hostile)
+
+
+def test_the_two_libraries_cannot_collide_in_the_bake_cache():
+    """The same characters under two libraries are two different bakes."""
+    a = sc.bake_key("lordicon:1f480", "punchy", 184, 30)
+    b = sc.bake_key("noto:1f480", "punchy", 184, 30)
+    assert a != b
+    assert ":" not in a and ":" not in b
+
+
+def test_a_noto_bake_records_notos_licence_not_lordicons(tmp_path,
+                                                         monkeypatch):
+    """The credit follows the art through the bake, not the default.
+
+    `ensure_baked` used to let `bake_one` stamp its own constant, which was
+    Lordicon's. With a second library that is a false claim on every emoji
+    a reel uses, and a missing one on the art that actually owes it.
+    """
+    import json
+
+    from engine.assembly import noto_catalog
+
+    src = _gif(tmp_path / "src.gif")
+    monkeypatch.setattr(
+        sc, "_download",
+        lambda library, slug, dest: src.replace(Path(dest)))
+
+    sc.ensure_baked("noto:1f480", root=tmp_path, size=60, fps=30,
+                    style="punchy")
+
+    folder = (tmp_path / sc.BAKES_DIRNAME
+              / sc.bake_key("noto:1f480", "punchy", 60, 30))
+    meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
+    assert meta["licence"] == noto_catalog.LICENCE
+    assert "Lordicon" not in meta["licence"]

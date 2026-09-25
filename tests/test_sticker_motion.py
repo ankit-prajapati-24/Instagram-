@@ -40,8 +40,12 @@ def _stub_catalogue(monkeypatch, tmp_path, slug="1821-moon-stars"):
     from PIL import Image
 
     cache = tmp_path / "stickers"
-    (cache / "sources").mkdir(parents=True, exist_ok=True)
-    gif = cache / "sources" / f"{slug}.gif"
+    # Under the library, where `_source` files it. Two libraries are in
+    # play and a bare `sources/` would leave this fixture invisible -- the
+    # route would go to the real CDN instead, which is how this test
+    # started serving bytes it had never written.
+    (cache / "sources" / "lordicon").mkdir(parents=True, exist_ok=True)
+    gif = cache / "sources" / "lordicon" / f"{slug}.gif"
     frames = [Image.new("RGB", (8, 8), (i * 40, 0, 0)) for i in range(1, 4)]
     frames[0].save(gif, save_all=True, append_images=frames[1:],
                    duration=80, loop=0)
@@ -126,7 +130,7 @@ def test_the_server_hands_the_motion_url_to_the_panel(client, tmp_path,
     monkeypatch.setattr(app_mod.sticker_catalog, "refresh",
                         lambda root: None)
     monkeypatch.setattr(app_mod.sticker_catalog, "search",
-                        lambda term, slugs: [slug])
+                        lambda term, slugs, limit=8: [slug])
     # One cue, stubbed: this test is about the URL the row carries, and
     # make_plan's text contains no trigger word to fire on.
     cue = SimpleNamespace(name="night", word="raat", start=1.5,

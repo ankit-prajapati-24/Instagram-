@@ -205,7 +205,8 @@ def test_publish_preview_stays_silent_when_the_render_recorded_nothing(
     baked = [stk.Sticker(
         name="death", emoji="💀", word="kankaal", beat_index=0,
         start=1.0, slot=0, style="dark", baked=True, size=184, canvas=232,
-        frames=42, pattern="x-%03d.png", png="x-041.png")]
+        frames=42, pattern="x-%03d.png", png="x-041.png",
+        licence=stk.LICENCES["lordicon"])]
     # Patched on the module itself, so it bites whether the route holds a
     # reference to stickers_mod or imports prepare directly.
     monkeypatch.setattr(stk, "prepare", lambda *a, **k: baked)
@@ -289,7 +290,8 @@ def test_both_payloads_carry_the_lordicon_credit_when_art_rendered():
     baked = [stk.Sticker(
         name="death", emoji="\U0001f480", word="kankaal", beat_index=0,
         start=1.0, slot=0, style="punchy", baked=True, size=60, canvas=76,
-        frames=48, pattern="x-%03d.png", png="x-047.png")]
+        frames=48, pattern="x-%03d.png", png="x-047.png",
+        licence=stk.LICENCES["lordicon"])]
     plan = make_plan()
 
     credit = stk.attribution_for(baked)
@@ -327,7 +329,8 @@ def test_a_long_caption_loses_its_own_tail_not_the_lordicon_credit():
     baked = [stk.Sticker(
         name="death", emoji="\U0001f480", word="kankaal", beat_index=0,
         start=1.0, slot=0, style="punchy", baked=True, size=184, canvas=232,
-        frames=42, pattern="x-%03d.png", png="x-041.png")]
+        frames=42, pattern="x-%03d.png", png="x-041.png",
+        licence=stk.LICENCES["lordicon"])]
 
     plan = make_plan()
     plan.metadata.ig_caption = "x" * 3000
@@ -937,18 +940,55 @@ def test_sticker_candidates_lists_one_row_per_fired_cue(tmp_path, monkeypatch):
 
 def test_sticker_candidates_say_so_when_the_catalogue_is_unreachable(
         tmp_path, monkeypatch):
+    from engine.assembly import noto_catalog as noto
     from engine.assembly import sticker_catalog as cat
     client, store, plan_id = _approved_plan_with_voice(tmp_path)
 
     def boom(*a, **k):
         raise cat.CatalogUnavailable("no route to host")
 
+    # Both, because there are two libraries now. Stubbing only one left the
+    # other reaching the real network from inside a unit test -- it fetched
+    # the live manifest and answered with real candidates, which is how
+    # this assertion started failing.
     monkeypatch.setattr(cat, "refresh", boom)
+    monkeypatch.setattr(noto, "refresh", boom)
 
     body = client.get(f"/api/plan/{plan_id}/stickers").json()
     assert body["rows"] == [] or all(
         r["candidates"] == [] for r in body["rows"])
     assert "no route to host" in body.get("note", "")
+
+
+def test_one_library_being_down_does_not_cost_the_other_its_candidates(
+        tmp_path, monkeypatch):
+    """Two libraries, so "the catalogue is unreachable" is no longer one
+    fact. Lordicon being down must still leave Noto's emoji on the board,
+    and the note must say which one is missing."""
+    import json
+
+    from engine.assembly import noto_catalog as noto
+    from engine.assembly import sticker_catalog as cat
+    from engine.assembly import sticker_choices as sc
+
+    client, store, plan_id = _approved_plan_with_voice(tmp_path)
+    cache = sc.cache_root(client.app.state.settings)
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / noto.CACHE_NAME).write_text(json.dumps({"icons": [
+        {"codepoint": "1f480", "popularity": 9, "tags": [":skull:"],
+         "categories": ["Smileys and emotions"]}]}), encoding="utf-8")
+
+    def boom(*a, **k):
+        raise cat.CatalogUnavailable("no route to host")
+
+    monkeypatch.setattr(cat, "refresh", boom)
+    monkeypatch.setattr(noto, "refresh", lambda *a, **k: None)
+
+    body = client.get(f"/api/plan/{plan_id}/stickers").json()
+    assert "no route to host" in body.get("note", "")
+    offered = [c["slug"] for r in body["rows"] for c in r["candidates"]]
+    assert offered, "one library down took the other down with it"
+    assert all(s.startswith("noto:") for s in offered), offered
 
 
 def test_choosing_a_slug_outside_the_catalogue_is_refused_without_fetching(
@@ -1083,7 +1123,7 @@ def test_a_chosen_icon_survives_the_route_and_reaches_a_render(tmp_path,
     # The only fake between the ends, and it substitutes a local file for a
     # network fetch -- it does not stand in for the bake.
     monkeypatch.setattr(sc, "_download",
-                        lambda s, dest: shutil.copyfile(source, dest))
+                        lambda library, s, dest: shutil.copyfile(source, dest))
 
     resp = client.post(f"/api/plan/{plan_id}/sticker/b0",
                        json={"slug": slug})

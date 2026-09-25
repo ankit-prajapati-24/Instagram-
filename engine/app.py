@@ -59,6 +59,7 @@ from pydantic import BaseModel, Field
 from engine.agents import latin_words
 from engine.assembly import sticker_catalog
 from engine.assembly import sticker_choices as sticker_choices_mod
+from engine.assembly import sticker_libraries as sticker_libs
 from engine.assembly import stickers as stickers_mod
 from engine.assembly.render import VIDEO_SUFFIXES
 from engine.authoring import (authoring_facts, build_prompt,
@@ -2091,15 +2092,10 @@ def create_app(db_path: str | Path | None = None,
             raise HTTPException(404, "no such plan")
 
         cache = sticker_choices_mod.cache_root(settings)
-        note = ""
-        slugs: tuple[str, ...] = ()
-        try:
-            sticker_catalog.refresh(cache)
-            slugs = sticker_catalog.load(cache)
-        except sticker_catalog.CatalogUnavailable as exc:
-            # A picker that cannot list icons is an inconvenience. The
-            # committed art still renders, so this is a note, not an error.
-            note = f"catalogue unavailable: {exc}"
+        # One note covering both libraries. A picker that cannot list icons
+        # is an inconvenience -- the committed art still renders -- and one
+        # library being down must not cost the other its candidates.
+        note = sticker_libs.refresh(cache)
 
         chosen = store.sticker_choices(plan_id)
         by_id = {beat.beat_id: beat for beat in plan.script.beats}
@@ -2109,7 +2105,7 @@ def create_app(db_path: str | Path | None = None,
                                           cap=int(settings.sticker_max)):
             seen: list[str] = []
             for term in cue.terms:
-                for slug in sticker_catalog.search(term, slugs):
+                for slug in sticker_libs.search(term, cache):
                     if slug not in seen:
                         seen.append(slug)
             beat = by_id.get(cue.beat_id)
@@ -2137,8 +2133,7 @@ def create_app(db_path: str | Path | None = None,
     def sticker_preview(slug: str) -> FileResponse:
         """One matted frame of an icon, for the picker to show."""
         cache = sticker_choices_mod.cache_root(settings)
-        slugs = sticker_catalog.load(cache)
-        if slug not in slugs:
+        if not sticker_libs.known(slug, cache):
             raise HTTPException(404, "not a catalogue slug")
         try:
             png = sticker_choices_mod.preview_png(slug, root=cache)
@@ -2160,11 +2155,7 @@ def create_app(db_path: str | Path | None = None,
         than a regex.
         """
         cache = sticker_choices_mod.cache_root(settings)
-        try:
-            slugs = sticker_catalog.load(cache)
-        except Exception as exc:
-            raise HTTPException(502, f"catalogue unavailable: {exc}") from exc
-        if slug not in slugs:
+        if not sticker_libs.known(slug, cache):
             raise HTTPException(404, "not a catalogue slug")
         try:
             gif = sticker_choices_mod.source_gif(slug, root=cache)
@@ -2189,12 +2180,10 @@ def create_app(db_path: str | Path | None = None,
         in the cached sitemap, and a term that matches none returns none.
         """
         cache = sticker_choices_mod.cache_root(settings)
-        try:
-            sticker_catalog.refresh(cache)
-            slugs = sticker_catalog.load(cache)
-        except sticker_catalog.CatalogUnavailable as exc:
-            raise HTTPException(503, f"catalogue unavailable: {exc}") from exc
-        found = sticker_catalog.search(term, slugs, limit=12)
+        note = sticker_libs.refresh(cache)
+        found = sticker_libs.search(term, cache, limit=12)
+        if not found and note:
+            raise HTTPException(503, note)
         return {"term": term,
                 "slugs": found,
                 "candidates": [
@@ -2225,7 +2214,8 @@ def create_app(db_path: str | Path | None = None,
             sticker_catalog.refresh(cache)
         except sticker_catalog.CatalogUnavailable as exc:
             raise HTTPException(503, f"catalogue unavailable: {exc}") from exc
-        if body.slug not in sticker_catalog.load(cache):
+        sticker_libs.refresh(cache)
+        if not sticker_libs.known(body.slug, cache):
             raise HTTPException(400, "not a catalogue slug")
 
         size = stickers_mod.sticker_size(settings.width,

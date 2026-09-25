@@ -526,8 +526,8 @@ SHIPPED_SIZE = stk.sticker_size(1080, 0.17)      # 184
 def test_a_shipped_trigger_resolves_to_its_baked_frames():
     found = stk.baked_sequence("death", "dark", fps=30, size=SHIPPED_SIZE)
     assert found is not None
-    pattern, frames, canvas = found
-    assert frames == 42
+    pattern, frames, canvas, _licence = found
+    assert frames == 54
     assert canvas == stk.sticker_canvas(SHIPPED_SIZE)
     assert Path(pattern % 0).exists()
 
@@ -551,7 +551,10 @@ def _fake_bake(root, *, frames, meta_frames, fps=30, size=48):
 # The count a 30fps bake must have to span the window sticker_chain lets
 # through. Spelled out rather than imported so these fixtures keep saying
 # what a *correct* bake looks like even if the constant moves.
-WINDOW_FRAMES_30 = 42
+# 1.80s at 30fps. A literal, not `round(HOLD_SECONDS * 30)`: a test that
+# recomputes the thing it checks asserts nothing. Moving the window means
+# updating this line on purpose.
+WINDOW_FRAMES_30 = 54
 
 
 def test_a_short_bake_is_refused_so_it_cannot_render_truncated(tmp_path):
@@ -1162,9 +1165,17 @@ def test_the_pop_overshoots_on_screen_not_just_in_the_expression(tmp_path):
     settings = _render_settings(tmp_path)
     plan = _sticker_plan(tmp_path, settings)
     cues = stk.prepare(plan, settings)
-    cue = cues[0]
+    # The emoji rung, deliberately. `pop_scale` is applied by
+    # `render_pop_frames`, which draws the emoji; `bake_one` does not apply
+    # it, so designed art carries no overshoot at all -- see
+    # `test_baked_art_carries_no_overshoot_of_its_own` below. Pointing this
+    # at a baked cue measured the source animation's own growth and called
+    # it a pop.
+    cue = next((c for c in cues if not c.baked), None)
+    assert cue is not None, "this test needs an emoji cue to measure"
     size = stk.sticker_size(settings.width)
-    x, y, w, h = stk.sticker_box(0, settings.width, settings.height, size)
+    x, y, w, h = stk.sticker_box(cue.slot, settings.width, settings.height,
+                                 size)
     row = y + h // 2
 
     settings.stickers = False
@@ -1345,9 +1356,95 @@ def test_the_credit_is_owed_only_when_designed_art_rendered():
         return stk.Sticker(
             name="death", emoji="\U0001f480", word="kankaal", beat_index=0,
             start=1.0, slot=0, style="punchy", baked=baked, size=60,
-            canvas=76, frames=48, pattern="x-%03d.png", png="x-047.png")
+            canvas=76, frames=48, pattern="x-%03d.png", png="x-047.png",
+            # What `prepare` puts here, read from the bake's meta.json.
+            # Baked art always carries a credit; the emoji rung carries
+            # None because a system font glyph owes nothing.
+            licence=stk.LICENCES["lordicon"] if baked else None)
 
     assert stk.attribution_for([fake(True)]) == stk.ATTRIBUTION
     assert stk.attribution_for([fake(False)]) is None
     assert stk.attribution_for([fake(False), fake(True)]) == stk.ATTRIBUTION
     assert stk.attribution_for([]) is None
+
+
+# --- two libraries, two credits -------------------------------------------
+
+def _credited(*licences):
+    """Stickers that rendered baked art under the given licences."""
+    return [stk.Sticker(
+        name="n", emoji="x", word="w", beat_index=i, start=float(i), slot=i,
+        style="punchy", baked=lic is not None, size=184, canvas=232,
+        frames=42, pattern="p", png="g", licence=lic)
+        for i, lic in enumerate(licences)]
+
+
+def test_a_reel_credits_only_the_libraries_it_actually_used():
+    """The credit has to follow the art, not the fact that art rendered.
+
+    `attribution_for` used to answer "any baked sticker?" with one fixed
+    Lordicon line. With a second library that is a false claim in both
+    directions: a reel made entirely of Noto emoji would credit Lordicon,
+    and a Lordicon reel would carry a CC BY notice it does not owe.
+    """
+    noto = stk.LICENCES["noto"]
+    lordicon = stk.LICENCES["lordicon"]
+
+    only_noto = stk.attribution_for(_credited(noto, noto))
+    assert noto in only_noto
+    assert lordicon not in only_noto, "credited a library it never used"
+
+    only_lordicon = stk.attribution_for(_credited(lordicon))
+    assert lordicon in only_lordicon
+    assert noto not in only_lordicon, "credited a library it never used"
+
+
+def test_a_reel_using_both_libraries_credits_both():
+    both = stk.attribution_for(
+        _credited(stk.LICENCES["lordicon"], stk.LICENCES["noto"]))
+    assert stk.LICENCES["lordicon"] in both
+    assert stk.LICENCES["noto"] in both
+
+
+def test_one_library_used_twice_is_credited_once():
+    """Two skulls from one library is one obligation, not two."""
+    lord = stk.LICENCES["lordicon"]
+    assert stk.attribution_for(_credited(lord, lord)).count(lord) == 1
+
+
+def test_a_reel_with_no_baked_art_owes_nothing():
+    """Unchanged: the emoji fallback is drawn from a system font and
+    carries no obligation at all."""
+    assert stk.attribution_for(_credited(None, None)) is None
+    assert stk.attribution_for([]) is None
+
+
+def test_baked_art_pops_like_the_emoji_does():
+    """Designed art overshoots on the way in, same as the emoji rung.
+
+    Without this a reel is two things at once: the pop *sound* fires on
+    every sticker, baked or not, so an emoji arrived with a jolt the ear
+    and the eye agreed on while designed art arrived with a jolt only the
+    ear heard.
+    """
+    from PIL import Image
+
+    folder = Path("engine/data/stickers/death/punchy")
+    if not (folder / "frame-000.png").exists():
+        pytest.skip("committed art not baked here")
+
+    def drawn_width(index):
+        im = Image.open(folder / f"frame-{index:03d}.png").convert("RGBA")
+        alpha = im.getchannel("A")
+        columns = [x for x in range(im.width)
+                   if max(alpha.crop((x, 0, x + 1, im.height)).getdata()) > 20]
+        return (columns[-1] - columns[0] + 1) if columns else 0
+
+    # Frame 0 is scale 0: nothing drawn at all.
+    assert drawn_width(0) == 0, "the pop starts from nothing"
+
+    settled = drawn_width(stk.pop_frame_count(30) + 4)
+    peak = max(drawn_width(i) for i in range(stk.pop_frame_count(30)))
+    assert settled > 0, "no settled sticker to compare against"
+    assert peak > settled * 1.08, (
+        f"baked art does not overshoot: peak {peak} vs settled {settled}")
