@@ -40,9 +40,42 @@ COLOUR_SPOKEN = "&H0000D7FF"   # gold  (highlighted)
 # is the more visible of the two -- twice the lit pixels of a plain
 # line, where the scale managed a quarter more.
 #
-# Set HIGHLIGHT_BLUR to 0 to leave the colour sweep on its own.
-HIGHLIGHT_GLOW = "&H00FFFFFF"   # white, against gold text and dark footage
-HIGHLIGHT_BLUR = 7
+# The glow is gold, and that is not a taste call either. White already
+# means something here -- it is the colour of a word that has not been
+# said yet -- so lighting the *active* word white made every word flash
+# the "not yet" colour on its way to gold, which is what "the captions
+# are blinking white" turned out to be. Counted white pixels through one
+# word's onset, each row offset from its own floor:
+#
+#     off     4801 4801    0    0    0    0   0   <- one clean step
+#     white   5291 4807    0 3048 6417  153  27   <- the blink
+#     gold    4653 4898  103   37    0   63  93   <- no blink
+#
+# Gold is also the stronger emphasis: the swing in gold pixels is 12362
+# against 5094 for the white glow and 4718 for no glow at all.
+#
+# Off by default, after three attempts at adding emphasis on top of the
+# sweep and three viewer-visible faults:
+#
+#   scy 130      grew the line box, walking the caption block 83px up
+#                  the frame -- measured, and reported as "the captions
+#                  move up and down"
+#   white glow     white already means "not said yet" in this palette,
+#                  so every word flashed it on the way to gold --
+#                  reported as "the captions blink white"
+#   gold glow      no blink, but the outline is 5px and already gold, so
+#                  any blur strong enough to notice fills the counters.
+#                  At the peak of one word, on real footage, blur 2 and
+#                  blur 4 both read as a gold blob where "rehti" was.
+#
+# The karaoke sweep is the emphasis, and it is clean: counted through
+# one word's onset it is a single step from white to gold, with no
+# spike and no travel. The knob stays because the machinery is sound
+# and a different palette -- a thinner outline, or an outline that is
+# not the text colour -- would make a glow work. On this one it does
+# not.
+HIGHLIGHT_GLOW = COLOUR_SPOKEN  # the colour a spoken word already is
+HIGHLIGHT_BLUR = 0
 # Up fast, down slower, both clamped inside the word. An earlier attempt
 # let the settle run to the end of the word, which left the effect still
 # fading two-thirds of the way through and the line permanently lit.
