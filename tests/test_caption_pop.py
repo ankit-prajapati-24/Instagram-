@@ -1,36 +1,41 @@
-"""Making the active caption word pop, not just change colour.
+r"""Lighting the active caption word, without moving the block.
 
-The karaoke highlight has always been there -- ``\\k`` per word, white
-to gold. A reviewer watching a finished reel still read the captions as
+The karaoke highlight has always been there -- ``\k`` per word, white to
+gold. A reviewer watching a finished reel still read the captions as
 "static paragraphs", and at Hinglish speaking speed that is fair: a
 colour swap on a 72px word lasting a third of a second is easy to miss.
 
-So the active word also grows. Two things were measured before choosing
-how.
+The first attempt grew the word, and shipped a reel whose caption block
+jumped up and down. Scaling both axes reflows the line sideways, which
+is obvious; what is not obvious is that ``\fscy`` alone grows the *line
+box*, so a block anchored at the bottom walks up the frame. Measured on
+real captions rendered over black, sampling through one beat:
 
-**Per-word ``\\t`` really does target one word.** Rendered three words
-each scaled during its own second, and counted bright pixels in the
-caption band:
+    variant  block top moves   lit pixels min..max
+    none                 0px   42372..42962
+    fscy                72px   42372..54406   <- the jumping
+    glow                 2px   42372..85289
+
+A glow changes only how a glyph is painted, so the metrics cannot move;
+the 2px is blur bleeding past the top row, not the text. It is also the
+more visible of the two -- twice the lit pixels of a plain line, where
+the scale managed a quarter more.
+
+The version of this file that shipped the jumping tested that the line
+did not move *sideways* and called that "no reflow". The vertical was
+the axis that broke, and nothing here looked at it.
+
+**Per-word ``\t`` really does target one word.** Rendered three words
+each emphasised during its own second and counted lit pixels:
 
            peak    settled     plain
     w1    15459      12094     12094
     w2    14121      11997     11997
     w3    12752      11906     11906
 
-Each word peaks in its own window and the settled frames come back
-byte-identical to the unscaled line, so nothing leaks onto the words
-after it.
-
-**Only the height grows.** Scaling both axes reflows a centred line and
-shoves every other word sideways, which reads as jitter. Measured at one
-word's peak, against the same line unscaled:
-
-    plain  x 221-859 (w 638)  h 59
-    both   x 144-934 (w 790)  h 76   <- whole line moved
-    tall   x 221-859 (w 638)  h 76   <- identical x, 29% taller
-
-``\\fscy`` changes no advance widths, so the line cannot reflow. That is
-why the pop is vertical only and not a matter of taste.
+Each peaks in its own window and the settled frames come back
+byte-identical to a plain line, so nothing leaks onto the words after
+it.
 """
 
 from __future__ import annotations
@@ -39,7 +44,8 @@ import re
 
 import pytest
 
-from engine.assembly.captions import (HIGHLIGHT_RISE_MS, HIGHLIGHT_SCALE_Y,
+from engine.assembly.captions import (COLOUR_OUTLINE, HIGHLIGHT_BLUR,
+                                      HIGHLIGHT_GLOW, HIGHLIGHT_RISE_MS,
                                       _karaoke_line, build_ass)
 from engine.contract import WordTiming
 from tests.factories import make_plan
@@ -56,10 +62,10 @@ def _beat(line="Kya tumhein pata hai", seconds=2.4):
     return plan, beat
 
 
-# --- the pop ----------------------------------------------------------------
+# --- the emphasis -----------------------------------------------------------
 
 
-def test_every_word_gets_its_own_pop():
+def test_every_word_gets_its_own_emphasis():
     _, beat = _beat()
 
     body = _karaoke_line(beat, "caption_text")
@@ -68,35 +74,43 @@ def test_every_word_gets_its_own_pop():
         "each word needs a rise and a settle")
 
 
-def test_the_pop_grows_the_height_only():
-    """Scaling the width reflows a centred line; measured, it moved the
-    whole line 152px wider."""
+def test_nothing_about_the_glyph_metrics_changes():
+    """The defect this replaced. Any size change moves the line box, and
+    a bottom-anchored caption block then walks up the frame -- measured
+    at 72px of travel."""
     _, beat = _beat()
 
     body = _karaoke_line(beat, "caption_text")
 
-    assert "\\fscy" in body
-    assert "\\fscx" not in body, "fscx reflows the line into jitter"
+    assert "\\blur" in body
+    assert "\\fscy" not in body, "fscy grows the line box: 72px of jump"
+    assert "\\fscx" not in body, "fscx reflows the line sideways"
+    assert "\\fs" not in body, "font size moves the line box too"
 
 
-def test_the_word_comes_back_down():
-    """A word left large stays large for the rest of the line, and by
-    the end every word is shouting."""
+def test_the_word_goes_dark_again():
+    """A word left lit stays lit for the rest of the line, and by the
+    end every word is shouting."""
     _, beat = _beat()
 
     body = _karaoke_line(beat, "caption_text")
 
-    assert body.count(f"\\fscy{HIGHLIGHT_SCALE_Y}") == len(beat.words)
-    assert body.count("\\fscy100") == len(beat.words)
+    assert body.count(f"\\blur{HIGHLIGHT_BLUR}") == len(beat.words)
+    assert body.count("\\blur0") == len(beat.words)
+    assert body.count(f"\\3c{COLOUR_OUTLINE}") == len(beat.words), (
+        "the outline must return to the style's own colour")
 
 
-def test_the_pop_is_timed_to_the_word_not_the_line():
-    """The whole point: the word being spoken is the one that moves."""
+def test_the_emphasis_is_timed_to_the_word_not_the_line():
+    """The whole point: the word being spoken is the one that lights."""
     _, beat = _beat()
 
     body = _karaoke_line(beat, "caption_text")
-    rises = [int(m) for m in re.findall(r"\\t\((\d+),\d+,\\fscy1[1-9]", body)]
+    rises = [int(m) for m in
+             re.findall(r"\\t\((\d+),\d+,\\3c" + re.escape(HIGHLIGHT_GLOW),
+                        body)]
 
+    assert len(rises) == len(beat.words)
     assert rises == sorted(rises)
     assert rises[0] == 0
     assert rises[-1] == pytest.approx(
@@ -104,7 +118,7 @@ def test_the_pop_is_timed_to_the_word_not_the_line():
 
 
 def test_the_karaoke_colour_sweep_survives():
-    """The pop is added to the highlight, not swapped for it."""
+    """The glow is added to the highlight, not swapped for it."""
     _, beat = _beat()
 
     body = _karaoke_line(beat, "caption_text")
@@ -117,7 +131,7 @@ def test_the_karaoke_colour_sweep_survives():
 
 def test_a_word_shorter_than_the_rise_still_settles():
     """"ye" at speaking speed can be under 100ms. A rise that outran the
-    word would leave it large while the next one popped too."""
+    word would leave it lit while the next one lit too."""
     _, beat = _beat()
     beat.words = [WordTiming(word="ye", start=0.0, end=0.05),
                   WordTiming(word="baat", start=0.05, end=1.0)]
@@ -131,7 +145,7 @@ def test_a_word_shorter_than_the_rise_still_settles():
 
 
 def test_a_beat_with_no_timings_is_left_plain():
-    """Before VOICE there is nothing to time a pop against."""
+    """Before VOICE there is nothing to time an emphasis against."""
     _, beat = _beat()
     beat.words = []
 
@@ -143,7 +157,7 @@ def test_a_beat_with_no_timings_is_left_plain():
 
 def test_devanagari_captions_are_left_plain():
     """voice_text has a different word count from the Roman timings, so
-    tagging it would put the pop on the wrong syllables."""
+    tagging it would light the wrong syllables."""
     _, beat = _beat()
 
     body = _karaoke_line(beat, "voice_text")
@@ -151,10 +165,10 @@ def test_devanagari_captions_are_left_plain():
     assert "\\t(" not in body
 
 
-def test_the_pop_can_be_turned_off(monkeypatch):
+def test_the_emphasis_can_be_turned_off(monkeypatch):
     import engine.assembly.captions as captions
 
-    monkeypatch.setattr(captions, "HIGHLIGHT_SCALE_Y", 100)
+    monkeypatch.setattr(captions, "HIGHLIGHT_BLUR", 0)
     _, beat = _beat()
 
     assert "\\t(" not in captions._karaoke_line(beat, "caption_text")
@@ -169,7 +183,7 @@ def test_the_whole_document_still_builds():
     text = build_ass(plan)
 
     assert "[Events]" in text
-    assert "\\fscy" in text
+    assert "\\blur" in text
     assert text.count("Dialogue:") >= 1
 
 

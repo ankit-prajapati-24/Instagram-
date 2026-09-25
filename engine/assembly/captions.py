@@ -19,26 +19,33 @@ from engine.contract import ReelPlan
 # ASS colours are &HAABBGGRR. Unspoken words sit in plain white; the active
 # word flips to gold, which survives compression and reads on any background.
 COLOUR_SPOKEN = "&H0000D7FF"   # gold  (highlighted)
-# The active word also grows, because at speaking speed a colour swap on
+# The active word is also lit, because at speaking speed a colour swap on
 # one word of a 72px line is easy to miss -- a reviewer watching a
 # finished reel read these captions as static.
 #
-# Height only. Scaling the width reflows a centred line and shoves every
-# other word sideways, which reads as jitter; ``\fscy`` changes no
-# advance widths so the line cannot move. Measured at one word's peak
-# against the same line unscaled:
+# A glow, not a size change, and that distinction is the whole point.
+# Scaling was tried first and shipped a reel whose caption block jumped
+# up and down. Scaling both axes reflows the line sideways, which is
+# obvious; what is not obvious is that `\fscy` alone grows the *line
+# box*, so a block anchored at the bottom walks upward. Measured on real
+# captions over black, sampling one beat:
 #
-#     plain  x 221-859 (w 638)  h 59
-#     both   x 144-934 (w 790)  h 76   <- the whole line moved
-#     tall   x 221-859 (w 638)  h 76   <- identical x, 29% taller
+#     variant  block top moves   lit pixels min..max
+#     none                 0px   42372..42962
+#     fscy                72px   42372..54406   <- the jumping
+#     glow                 2px   42372..85289
 #
-# Set to 100 to turn the pop off and leave the colour sweep alone.
-HIGHLIGHT_SCALE_Y = 130
-# Up fast, down slower, both inside the word. An earlier attempt let the
-# settle run to the end of the word, which left it at 108% two-thirds of
-# the way through and the line permanently swollen; measured with these
-# two numbers the settled frames come back byte-identical to an unscaled
-# line.
+# A glow changes only how the glyph is painted, so the metrics cannot
+# move; the 2px is blur bleeding past the top row, not the text. And it
+# is the more visible of the two -- twice the lit pixels of a plain
+# line, where the scale managed a quarter more.
+#
+# Set HIGHLIGHT_BLUR to 0 to leave the colour sweep on its own.
+HIGHLIGHT_GLOW = "&H00FFFFFF"   # white, against gold text and dark footage
+HIGHLIGHT_BLUR = 7
+# Up fast, down slower, both clamped inside the word. An earlier attempt
+# let the settle run to the end of the word, which left the effect still
+# fading two-thirds of the way through and the line permanently lit.
 HIGHLIGHT_RISE_MS = 100
 HIGHLIGHT_SETTLE_MS = 160
 COLOUR_UPCOMING = "&H00FFFFFF"  # white (not yet reached)
@@ -101,14 +108,15 @@ def _pop_tags(word) -> str:
     still be growing while the next word started popping, leaving two
     large at once.
     """
-    if HIGHLIGHT_SCALE_Y == 100:
+    if not HIGHLIGHT_BLUR:
         return ""
     start = max(int(round(word.start * 1000)), 0)
     end = max(int(round(word.end * 1000)), start)
     peak = min(start + HIGHLIGHT_RISE_MS, end)
     settled = min(peak + HIGHLIGHT_SETTLE_MS, end)
-    return (f"\\t({start},{peak},\\fscy{HIGHLIGHT_SCALE_Y})"
-            f"\\t({peak},{settled},\\fscy100)")
+    return (f"\\t({start},{peak},\\3c{HIGHLIGHT_GLOW}"
+            f"\\blur{HIGHLIGHT_BLUR})"
+            f"\\t({peak},{settled},\\3c{COLOUR_OUTLINE}\\blur0)")
 
 
 def _karaoke_line(beat, source: str) -> str:
