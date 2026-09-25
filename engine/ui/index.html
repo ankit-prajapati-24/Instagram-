@@ -509,6 +509,41 @@
   }
   .stkhit button { width: 100%; font-size: 11.5px; padding: 5px 6px;
                    white-space: normal; line-height: 1.3; }
+
+  /* --- the look picker -------------------------------------------------
+     Cards are figures, and a figure carries 40px of browser default side
+     margin. Both other boards lost 80px a card to it before anyone
+     measured; this grid does not get to reintroduce that. */
+  .lookgrid {
+    display: grid; gap: 10px; margin-top: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  }
+  .lookcard {
+    margin: 0; border: 1px solid var(--rule); padding: 8px;
+    display: flex; flex-direction: column; gap: 6px; background: var(--card);
+  }
+  .lookcard.on { border-color: var(--moss); }
+  .lookcard video {
+    width: 100%; display: block; background: #0b0f10; cursor: pointer;
+  }
+  .lookcard b { color: var(--paper); font-weight: 600; font-size: 13px; }
+  .lookcard .meta { font-size: 11px; color: var(--muted);
+                    word-break: break-word; }
+  .lookcard button { width: 100%; font-size: 11.5px; padding: 5px 6px;
+                     white-space: normal; line-height: 1.3; }
+  .lookcustom {
+    border: 1px solid var(--rule); padding: 10px 12px; margin-top: 10px;
+    display: grid; gap: 8px;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    align-items: end;
+  }
+  .lookcustom label { font-size: 11.5px; color: var(--muted);
+                      display: block; }
+  /* Fixed width: a long font name in a select otherwise stretches the
+     cell and then the grid, which is the same class of bug as the
+     figure margin above. */
+  .lookcustom select { width: 100%; max-width: 100%; font-size: 12px;
+                       display: block; padding: 4px 6px; }
   .stickercard .stickerpicks { display: flex; flex-wrap: wrap; gap: 6px; }
   .stickercard .stickerpicks img {
     width: 44px; height: 44px; object-fit: cover; cursor: pointer;
@@ -1069,6 +1104,22 @@
         <div id="bedhits"></div>
         <p class="hint" id="bed-said"></p>
       </div>
+
+      <h3 style="margin-top:30px">Look <em id="look-note"></em></h3>
+      <p class="hint">The caption font, its colour and how the punch line
+        arrives. Each tile plays two and a half seconds of this reel, so
+        what you see is what renders — click one to play it. Leave it
+        alone and the reel uses the channel default.</p>
+      <div class="lookgrid" id="lookgrid"></div>
+      <div class="lookcustom" id="lookcustom">
+        <label>Font <select id="look-font"></select></label>
+        <label>Punch <select id="look-anim"></select></label>
+        <label>Colour <select id="look-colour"></select></label>
+        <button class="go" id="btn-look-custom">Use this mix</button>
+      </div>
+      <video id="look-custom-preview" muted loop playsinline
+             style="width:180px;display:none;margin-top:10px"></video>
+      <p class="hint" id="look-said"></p>
 
       <div class="entry">
         <button class="go" id="btn-release">These are right — render</button>
@@ -1989,6 +2040,7 @@ function renderReview() {
                                       Number(button.dataset.slot));
   });
   renderBedNow(data.music);
+  loadLooks();
   show("s-review");
 }
 
@@ -2801,6 +2853,149 @@ async function searchStickerLibrary() {
 $("btn-stk").onclick = searchStickerLibrary;
 $("stk-q").onkeydown = (event) => {
   if (event.key === "Enter") { event.preventDefault(); searchStickerLibrary(); }
+};
+
+/* The look picker.
+
+   Each tile plays its own preview, because half of what is being chosen
+   is an animation and a still cannot show one -- three caption
+   treatments shipped on reasoning alone and a viewer caught every one.
+
+   The preview URL comes off the row the server sent. Spelling the route
+   out here would be the panel inventing an address it has already been
+   given, which is the mistake an earlier sticker test enshrined. */
+let LOOKS = null;
+
+/* The palettes the custom mix offers. ASS colours are &HBBGGRR, and the
+   pair is (spoken, not yet spoken) -- the sweep runs from the second to
+   the first. */
+const LOOK_COLOURS = [
+  ["gold, then white", "&H0000D7FF", "&H00FFFFFF"],
+  ["white, then grey", "&H00FFFFFF", "&H00909090"],
+  ["yellow, then white", "&H0000F0FF", "&H00FFFFFF"],
+  ["cyan, then white", "&H00F0E000", "&H00FFFFFF"],
+];
+
+async function loadLooks() {
+  if (!PLAN) return;
+  try {
+    const response = await fetch(`/api/plan/${PLAN.plan_id}/looks`);
+    if (!response.ok) return;
+    LOOKS = await response.json();
+    renderLooks();
+  } catch (err) {
+    $("look-said").textContent = "Could not load looks: " + String(err);
+  }
+}
+
+function lookTiles() {
+  return LOOKS.looks.map((row) => `
+    <figure class="lookcard ${row.look_id === LOOKS.chosen ? "on" : ""}"
+            id="lookcard-${esc(row.look_id)}">
+      <video muted loop playsinline preload="none"
+             data-src="${row.preview}" title="click to play"></video>
+      <b>${esc(row.label)}</b>
+      <div class="meta">${esc(row.font)} &middot; ${esc(row.punch_animation)}</div>
+      <button class="uselook" data-look="${esc(row.look_id)}">
+        ${row.look_id === LOOKS.chosen ? "in use" : "Use this"}
+      </button>
+    </figure>`).join("");
+}
+
+function renderLooks() {
+  if (!LOOKS) return;
+  $("look-note").textContent = LOOKS.chosen
+    ? `this reel: ${LOOKS.chosen}`
+    : `channel default: ${LOOKS.current.look_id}`;
+  $("lookgrid").innerHTML = lookTiles();
+
+  /* The fonts and animations are the server's list, not this page's. A
+     hardcoded name here is how the panel offers a font the render
+     cannot actually use. */
+  $("look-font").innerHTML = LOOKS.fonts.map(
+    (f) => `<option value="${esc(f)}">${esc(f)}</option>`).join("");
+  $("look-anim").innerHTML = LOOKS.animations.map(
+    (a) => `<option value="${esc(a)}">${esc(a)}</option>`).join("");
+  $("look-colour").innerHTML = LOOK_COLOURS.map(
+    (c, i) => `<option value="${i}">${esc(c[0])}</option>`).join("");
+
+  /* Loaded on demand, not on render: eight tiles autoloading would be
+     eight ffmpeg runs the moment the gate opens. */
+  $("lookgrid").querySelectorAll("video").forEach((video) => {
+    const start = () => {
+      if (!video.src) video.src = video.dataset.src;
+      video.play().catch(() => {});
+    };
+    video.onclick = start;
+    video.onmouseenter = start;
+  });
+  $("lookgrid").querySelectorAll("button.uselook").forEach((button) => {
+    button.onclick = () => {
+      if (button.dataset.look === LOOKS.chosen) { clearLook(); return; }
+      useLook({ look_id: button.dataset.look });
+    };
+  });
+}
+
+async function useLook(body) {
+  const said = $("look-said");
+  said.textContent = "Setting the look…";
+  try {
+    const response = await fetch(`/api/plan/${PLAN.plan_id}/look`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      said.textContent = String(data.detail || response.status);
+      return false;
+    }
+    LOOKS.chosen = data.look_id;
+    LOOKS.current = data;
+    renderLooks();
+    said.textContent = `This reel renders in ${data.look_id}. `
+      + `Click its tile again to go back to the channel default.`;
+    return true;
+  } catch (err) {
+    said.textContent = "Request failed: " + String(err);
+    return false;
+  }
+}
+
+async function clearLook() {
+  try {
+    const response = await fetch(`/api/plan/${PLAN.plan_id}/look`,
+                                 { method: "DELETE" });
+    if (!response.ok) {
+      $("look-said").textContent = "Could not clear the look.";
+      return;
+    }
+    LOOKS.chosen = null;
+    renderLooks();
+    $("look-custom-preview").style.display = "none";
+    $("look-said").textContent = "Back on the channel default.";
+  } catch (err) {
+    $("look-said").textContent = "Request failed: " + String(err);
+  }
+}
+
+$("btn-look-custom").onclick = async () => {
+  if (!LOOKS) return;
+  const [, spoken, upcoming] = LOOK_COLOURS[Number($("look-colour").value)];
+  const font = $("look-font").value;
+  const ok = await useLook({
+    look_id: "custom", font: font, caption_size: 70, spoken: spoken,
+    upcoming: upcoming, margin_v: 300, punch_font: font, punch_size: 92,
+    punch_animation: $("look-anim").value,
+  });
+  if (!ok) return;
+  /* Cache-busted: the URL does not change when the mix behind it does. */
+  const preview = $("look-custom-preview");
+  preview.style.display = "block";
+  preview.src = `${LOOKS.looks[0].preview.replace(
+    /[^/]+$/, "custom")}?t=${Date.now()}`;
+  preview.play().catch(() => {});
 };
 
 async function chooseSticker(beatId, slug) {
