@@ -18,8 +18,9 @@ so rather than pretending.
 | Git | any | |
 | Disk | ~1.5 GB | the voice model is 61 MB, ffmpeg ~80 MB, the rest is Node. Add ~40 MB if you turn on `RAHASYA_ALIGN` |
 
-Windows already ships the two fonts the captions use — **Arial** for Roman and
-**Nirmala UI** for Devanagari. Nothing to install.
+You do not need to install any font. The caption faces ship in
+`assets/fonts/` and are copied next to the subtitle file at render time, so a
+reel looks the same on every machine — see `engine/assembly/fonts.py`.
 
 You do **not** need to install ffmpeg. It arrives as a Python package
 (`imageio-ffmpeg`), already built with libass and HarfBuzz, which is what makes

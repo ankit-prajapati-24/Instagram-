@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from uuid import uuid4
 
 from engine.assembly import fonts as fonts_mod
 from engine.assembly.captions import build_ass
@@ -71,7 +72,14 @@ def render_preview(plan: ReelPlan, look: Look, settings,
     single = plan.model_copy(deep=True)
     single.script.beats = [beat.model_copy(deep=True)]
 
-    ass_name = f"{look.look_id}.ass"
+    # Every name below carries a token of its own. Two requests for the
+    # same look really do run at once -- the route is a plain def, so
+    # Starlette gives each one a thread -- and a shared .ass or .part
+    # means two ffmpeg processes writing one file. "custom" makes it
+    # worse than a wasted render: two customs differ, so the second
+    # would serve the first one's type.
+    token = uuid4().hex[:8]
+    ass_name = f"{look.look_id}.{token}.ass"
     (target_dir / ass_name).write_text(
         build_ass(single, look=look,
                   width=PREVIEW_WIDTH * 2, height=PREVIEW_HEIGHT * 2),
@@ -96,8 +104,8 @@ def render_preview(plan: ReelPlan, look: Look, settings,
              f"force_original_aspect_ratio=increase,"
              f"crop={PREVIEW_WIDTH}:{PREVIEW_HEIGHT},{caption},fps=30")
 
-    target = target_dir / f"{look.look_id}.mp4"
-    part = target_dir / f"{look.look_id}.mp4.part"
+    target = target_dir / f"{look.look_id}.{token}.mp4"
+    part = target_dir / f"{look.look_id}.{token}.mp4.part"
     result = subprocess.run(
         [settings.ffmpeg, "-hide_banner", "-v", "error", "-y", *inputs,
          "-t", str(PREVIEW_SECONDS), "-vf", chain, "-an",
@@ -108,12 +116,13 @@ def render_preview(plan: ReelPlan, look: Look, settings,
          # refuses with "Invalid argument" before it encodes a frame.
          "-f", "mp4", part.name],
         cwd=str(target_dir), capture_output=True, text=True)
+    (target_dir / ass_name).unlink(missing_ok=True)
     if result.returncode != 0 or not part.is_file():
         part.unlink(missing_ok=True)
         raise PreviewUnavailable(
             f"the preview did not render: "
             f"{(result.stderr or '').strip()[-200:]}")
-    # Renamed rather than written in place: two previews for one plan
-    # run at once, and a reader must never get a half-written file.
+    # Renamed rather than written in place: a reader must never be
+    # handed a file ffmpeg is still writing into.
     os.replace(part, target)
     return str(target)

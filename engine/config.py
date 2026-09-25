@@ -415,14 +415,15 @@ class Settings:
     # --- Captions ----------------------------------------------------------
     captions_source: str = field(
         default_factory=lambda: os.getenv("RAHASYA_CAPTIONS", "caption_text"))
-    caption_font: str = field(
-        default_factory=lambda: os.getenv("RAHASYA_FONT", "Arial"))
+    # The face a Devanagari-sourced caption is drawn in. Bundled, not
+    # a system font: the look's own faces are staged next to the .ass
+    # and libass is pointed at that directory, and a name that is not
+    # bundled turns the staging off for the whole reel -- the caption
+    # would then be resolved by the host, silently, exactly the failure
+    # engine/assembly/fonts.py exists to stop.
     caption_font_devanagari: str = field(
         default_factory=lambda: os.getenv("RAHASYA_FONT_DEVA",
-                                          "Nirmala UI"))
-    # 96 overflowed 1080px on real Hinglish lines; 72 wraps to
-    # two comfortable lines instead.
-    caption_size: int = 72
+                                          "Noto Sans Devanagari"))
     # The channel's caption look: a preset id from
     # engine/assembly/looks.py. A reel can override it at the clip gate.
     # "plain" is what shipped before looks existed, so the default

@@ -153,3 +153,27 @@ def test_two_previews_at_once_do_not_serve_a_half_written_file(settings):
 
     assert first != second
     assert not list(Path(first).parent.glob("*.part"))
+
+
+def test_two_previews_of_the_same_look_do_not_share_a_file(settings):
+    r"""The harder half of the same race, and the one that bites.
+
+    The route is a plain ``def``, so Starlette runs concurrent hits on
+    separate threads -- double-clicking "Preview this" really does start
+    two ffmpeg processes. When both are the same look they used to
+    target one ``.ass`` and one ``.part``, each truncating the other's,
+    and for "custom" the two looks are not even the same document: the
+    second request would be served the first one's type.
+    """
+    plan = _plan(settings)
+    look = resolve("poster")
+
+    first = render_preview(plan, look, settings, settings.work_dir)
+    second = render_preview(plan, look, settings, settings.work_dir)
+
+    assert first != second
+    assert Path(first).is_file() and Path(second).is_file()
+    assert not list(Path(first).parent.glob("*.part"))
+    # The subtitle document is scratch too, and shared it would be
+    # rewritten under a running ffmpeg.
+    assert not list(Path(first).parent.glob("*.ass"))

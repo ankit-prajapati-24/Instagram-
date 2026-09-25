@@ -41,6 +41,30 @@ FONT_FILES = {
 
 STAGED_DIRNAME = "fonts"
 
+# The only bundled face that draws Devanagari.
+DEVANAGARI_FONT = "Noto Sans Devanagari"
+
+
+def devanagari_face(name: str) -> str:
+    """The face to draw a Devanagari caption in, given the configured one.
+
+    A name this module does not ship cannot be staged, and an unstaged
+    name turns ``fontsdir`` off for the whole reel -- libass then
+    resolves the caption against the host's own fonts, exit code 0,
+    nothing on stderr. That is the failure this module exists to stop,
+    so a configured face that is not bundled is refused out loud rather
+    than passed through. ``RAHASYA_FONT_DEVA`` still chooses, but only
+    among faces that travel with the repository.
+    """
+    if name in FONT_FILES:
+        return name
+    print(f"[looks] {name!r} is not bundled, so it cannot be staged and "
+          f"libass would substitute silently. Drawing Devanagari in "
+          f"{DEVANAGARI_FONT} instead. Set RAHASYA_FONT_DEVA to one of "
+          f"{', '.join(sorted(FONT_FILES))} to choose.",
+          file=sys.stderr, flush=True)
+    return DEVANAGARI_FONT
+
 
 def stage_fonts(look: Look, target_dir: str | Path) -> str | None:
     """Put this look's fonts beside the captions; name them relatively.

@@ -781,11 +781,13 @@ def render_stage(plan: ReelPlan, store, settings, *,
         # The burned caption is Devanagari on this branch, and every
         # bundled face except Teko draws Latin only -- libass would
         # substitute silently, which is the exact failure this feature
-        # exists to stop. Keep the configured Devanagari face, as the
-        # pipeline did before looks existed. The look's colours, margin
-        # and punch animation still apply; only the face is overridden.
-        look = replace(look, font=settings.caption_font_devanagari,
-                       punch_font=settings.caption_font_devanagari)
+        # exists to stop. The face is overridden to a bundled Devanagari
+        # one; the look's colours, margin and punch animation still
+        # apply. Bundled and not the system face the pipeline used
+        # before looks existed, because a name that is not staged takes
+        # fontsdir away from the whole reel.
+        deva = fonts_mod.devanagari_face(settings.caption_font_devanagari)
+        look = replace(look, font=deva, punch_font=deva)
     ass_path = write_ass(
         plan, Path(settings.work_dir) / plan.plan_id / "captions.ass",
         source=captions_source, look=look,
