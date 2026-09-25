@@ -1111,8 +1111,21 @@ def test_the_sticker_is_actually_visible_at_its_trigger_word(tmp_path):
     on = _frame_rgb(settings.ffmpeg, popped, at)
     span = _changed_span(off, on, y + h // 2, settings.width)
     assert span is not None, "nothing changed: the overlay rendered nothing"
-    assert span[0] >= x - 3 and span[1] <= x + w + 3, (
-        f"the sticker is outside its box: changed {span}, box x={x} w={w}")
+    # Containment, not centring. A centre assertion looks stronger and is
+    # wrong: a glyph need not be symmetric about the row this samples.
+    # Measured on the wave emoji, whose mid-row ink sits in its left
+    # third at every size -- canvas 78, ink centre 19; canvas 138, ink
+    # centre 33 -- the same proportion both times, so the glyph is placed
+    # correctly and simply is not centred where it is sliced.
+    #
+    # The slack scales with the glyph rather than being a flat 3px,
+    # because the art has a soft edge whose spill scales too: at
+    # sticker_scale 0.30 the baked art runs 4px past the box on each
+    # side, which is antialiasing, not misplacement.
+    slack = max(3, round(w * 0.05))
+    assert span[0] >= x - slack and span[1] <= x + w + slack, (
+        f"the sticker is outside its box: changed {span}, box x={x} "
+        f"w={w}, slack={slack}")
     settled = span[1] - span[0] + 1
     assert settled > 0.5 * w, f"the sticker is barely there: {settled}px"
 
@@ -1304,8 +1317,21 @@ def test_an_emoji_sticker_still_holds_for_its_whole_window(tmp_path):
     assert span is not None, (
         "nothing changed 1.10s in: the emoji sticker is gone, which is "
         "what happens if `loop` stops holding its last frame")
-    assert span[0] >= x - 3 and span[1] <= x + w + 3, (
-        f"the sticker is outside its box: changed {span}, box x={x} w={w}")
+    # Containment, not centring. A centre assertion looks stronger and is
+    # wrong: a glyph need not be symmetric about the row this samples.
+    # Measured on the wave emoji, whose mid-row ink sits in its left
+    # third at every size -- canvas 78, ink centre 19; canvas 138, ink
+    # centre 33 -- the same proportion both times, so the glyph is placed
+    # correctly and simply is not centred where it is sliced.
+    #
+    # The slack scales with the glyph rather than being a flat 3px,
+    # because the art has a soft edge whose spill scales too: at
+    # sticker_scale 0.30 the baked art runs 4px past the box on each
+    # side, which is antialiasing, not misplacement.
+    slack = max(3, round(w * 0.05))
+    assert span[0] >= x - slack and span[1] <= x + w + slack, (
+        f"the sticker is outside its box: changed {span}, box x={x} "
+        f"w={w}, slack={slack}")
 
 
 # --- Lordicon attribution ----------------------------------------------

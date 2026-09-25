@@ -226,6 +226,59 @@ class CleanupReport:
     cleanup_abandoned: bool = False
 
 
+# How much silence a trimmed edge keeps. Cut to nothing, one sentence
+# starts on the syllable the previous one ended on; the seam wants to be
+# tight, not absent.
+#
+# silenceremove keeps exactly this much: asked for 0.04s it leaves a
+# 0.04s region, measured. mp3 encoder padding then adds a further ~0.06s
+# that silencedetect does not flag, so the audible seam is about 0.10s.
+#
+# That is the floor the pause-cap comment calls a natural inter-word
+# gap, and it is the relationship worth keeping: the gap between two
+# sentences ends up shorter than a pause inside one (measured at
+# 0.22-0.37s), so a reel reads as continuous speech rather than as a
+# list of lines.
+EDGE_SILENCE_KEPT = 0.04
+
+
+def edge_trim_filter(settings) -> str:
+    """Trim the silence a synthesised beat opens and closes on.
+
+    Beats are concatenated, so a tail and the next head meet at every
+    seam. Measured across a real ten-beat reel, every beat ended on
+    0.20-0.31s of nothing and six opened on 0.05-0.09s, which put about a
+    third of a second of silence between every pair of sentences.
+
+    Only the edges. The pauses *inside* a beat are speech rhythm, and
+    ``voice_pause_cap``'s own comment exists to protect them -- it calls
+    0.1-0.3s a natural inter-word gap that must survive. The measured
+    mid-beat gaps were 0.05-0.37s, squarely that range, so a cap low
+    enough to shorten them would be cutting rhythm and calling it dead
+    air.
+
+    Deliberately *not* ``cleanup_filters``. That chain highpasses,
+    denoises and de-clicks because a phone recording has room noise and
+    mouth bumps; synthesised speech has neither. Measured on one Piper
+    beat, running the whole chain over it cost 0.5 LU (-15.8 to -16.3
+    LUFS) and trimmed no more than the trim alone: what the denoiser took
+    out of clean TTS was signal.
+
+    The trailing edge is done by reversing, trimming the new leading
+    edge, and reversing back. ``silenceremove``'s stop_periods would
+    reach every pause in the file, including the ones this must not
+    touch.
+    """
+    if not settings.voice_trim_edges:
+        return ""
+    threshold = f"{settings.voice_silence_threshold}dB"
+    one_edge = (f"silenceremove=start_periods=1"
+                f":start_silence={EDGE_SILENCE_KEPT}"
+                f":start_threshold={threshold}"
+                f":detection=peak")
+    return f"{one_edge},areverse,{one_edge},areverse"
+
+
 def cleanup_filters(settings) -> str:
     """The cleanup filter fragment for one upload, or ``""`` when cleanup is
     off.
@@ -601,6 +654,45 @@ def synth_beat_piper(beat_text: str, target: Path, settings) -> int:
     return 0
 
 
+def _trim_beat_edges(target: Path, settings) -> bool:
+    """Cut the silence a just-spoken beat opens and closes on, in place.
+
+    A polish pass, not a stage: the audio is already correct when this
+    runs, so a trim that fails leaves the beat exactly as synthesis
+    wrote it rather than failing the voice stage. An untrimmed beat is a
+    slightly loose reel; no beat is no reel.
+
+    Written beside the target and renamed, because ffmpeg cannot read
+    and write the same path, and a half-written beat is one the render
+    would concatenate without complaint.
+    """
+    filters = edge_trim_filter(settings)
+    if not filters:
+        return False
+    trimmed = target.with_suffix(target.suffix + ".trim.mp3")
+    try:
+        result = subprocess.run(
+            [settings.ffmpeg, "-hide_banner", "-v", "error", "-y",
+             "-i", str(target), "-af", filters,
+             "-ar", str(NARRATION_SAMPLE_RATE),
+             "-ac", str(NARRATION_CHANNELS),
+             "-c:a", "libmp3lame", "-q:a", "2", "-f", "mp3", str(trimmed)],
+            capture_output=True, text=True)
+        if result.returncode != 0 or not trimmed.is_file()                 or trimmed.stat().st_size == 0:
+            print(f"[voice] edge trim skipped for {target.name}: "
+                  f"{(result.stderr or '').strip()[-160:]}",
+                  file=sys.stderr, flush=True)
+            return False
+        os.replace(trimmed, target)
+        return True
+    except OSError as exc:
+        print(f"[voice] edge trim skipped for {target.name}: {exc}",
+              file=sys.stderr, flush=True)
+        return False
+    finally:
+        trimmed.unlink(missing_ok=True)
+
+
 def speak_beat(text: str, target: str | Path, settings, *,
                engine: str | None = None) -> tuple[str, int, str]:
     """Say one beat. Returns ``(engine_used, spans, note)``.
@@ -620,11 +712,19 @@ def speak_beat(text: str, target: str | Path, settings, *,
     target = Path(target)
 
     if engine != "piper":
-        return "edge", synth_beat_edge(text, target, settings), "edge"
+        spans = synth_beat_edge(text, target, settings)
+        _trim_beat_edges(target, settings)
+        return "edge", spans, "edge"
 
     from engine.media.piper_voice import PiperUnavailable
     try:
-        return "piper", synth_beat_piper(text, target, settings), "piper"
+        spans = synth_beat_piper(text, target, settings)
+        # After synthesis and before anything measures the file: the beat's
+        # duration is read back from disk and drives the clip count, the
+        # slot spans and the caption timings, so trimming later would
+        # leave all three describing a file that no longer exists.
+        _trim_beat_edges(target, settings)
+        return "piper", spans, "piper"
     except (PiperUnavailable, OSError) as exc:
         # Say so loudly. This was silent, and a run that quietly used
         # edge-tts looked identical to one that used Piper until someone

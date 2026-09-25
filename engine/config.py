@@ -171,6 +171,14 @@ class Settings:
     # (0.1-0.3s) falls below it and is left untouched -- see
     # cleanup_filters's silenceremove verification for the measurements this
     # was checked against.
+    # Trim the silence a *synthesised* beat opens and closes on, before
+    # its duration is measured. Separate from voice_clean, which is the
+    # recorded-audio chain: TTS has no room noise to denoise, and running
+    # that chain over it measured 0.5 LU quieter for no extra trim.
+    voice_trim_edges: bool = field(
+        default_factory=lambda: os.getenv(
+            "RAHASYA_VOICE_TRIM_EDGES", "1").strip().lower()
+        not in {"0", "false", "no", "off"})
     voice_pause_cap: float = field(
         default_factory=lambda: float(
             os.getenv("RAHASYA_VOICE_PAUSE_CAP", "0.35")))
@@ -369,6 +377,12 @@ class Settings:
             "RAHASYA_STICKER_FONT",
             r"C:\Windows\Fonts\seguiemj.ttf"))
     # Resting size as a fraction of frame width. 0.17 of 1080 is ~184px.
+    #
+    # Raising it is not a one-line change: the committed art under
+    # engine/data/stickers is baked at one exact canvas, and
+    # baked_sequence only uses art whose size matches the request, so a
+    # bigger sticker silently drops every baked concept to its emoji
+    # fallback. See tests/test_sticker_safe_band.py.
     sticker_scale: float = field(
         default_factory=lambda: float(
             os.getenv("RAHASYA_STICKER_SCALE", "0.17")))

@@ -19,6 +19,28 @@ from engine.contract import ReelPlan
 # ASS colours are &HAABBGGRR. Unspoken words sit in plain white; the active
 # word flips to gold, which survives compression and reads on any background.
 COLOUR_SPOKEN = "&H0000D7FF"   # gold  (highlighted)
+# The active word also grows, because at speaking speed a colour swap on
+# one word of a 72px line is easy to miss -- a reviewer watching a
+# finished reel read these captions as static.
+#
+# Height only. Scaling the width reflows a centred line and shoves every
+# other word sideways, which reads as jitter; ``\fscy`` changes no
+# advance widths so the line cannot move. Measured at one word's peak
+# against the same line unscaled:
+#
+#     plain  x 221-859 (w 638)  h 59
+#     both   x 144-934 (w 790)  h 76   <- the whole line moved
+#     tall   x 221-859 (w 638)  h 76   <- identical x, 29% taller
+#
+# Set to 100 to turn the pop off and leave the colour sweep alone.
+HIGHLIGHT_SCALE_Y = 130
+# Up fast, down slower, both inside the word. An earlier attempt let the
+# settle run to the end of the word, which left it at 108% two-thirds of
+# the way through and the line permanently swollen; measured with these
+# two numbers the settled frames come back byte-identical to an unscaled
+# line.
+HIGHLIGHT_RISE_MS = 100
+HIGHLIGHT_SETTLE_MS = 160
 COLOUR_UPCOMING = "&H00FFFFFF"  # white (not yet reached)
 COLOUR_OUTLINE = "&H00000000"   # black
 COLOUR_SHADOW = "&HA0000000"    # translucent black
@@ -67,6 +89,28 @@ def escape_ass(text: str) -> str:
                 .replace("\n", "\\N"))
 
 
+def _pop_tags(word) -> str:
+    """The rise-and-settle transform for one word, or "" if disabled.
+
+    Times are milliseconds from the start of the dialogue line, which is
+    the start of the beat -- the same clock ``word.start`` is measured
+    on.
+
+    Both edges are clamped inside the word. "ye" at Hinglish speaking
+    speed can be under 100ms, and a rise that outran its own word would
+    still be growing while the next word started popping, leaving two
+    large at once.
+    """
+    if HIGHLIGHT_SCALE_Y == 100:
+        return ""
+    start = max(int(round(word.start * 1000)), 0)
+    end = max(int(round(word.end * 1000)), start)
+    peak = min(start + HIGHLIGHT_RISE_MS, end)
+    settled = min(peak + HIGHLIGHT_SETTLE_MS, end)
+    return (f"\\t({start},{peak},\\fscy{HIGHLIGHT_SCALE_Y})"
+            f"\\t({peak},{settled},\\fscy100)")
+
+
 def _karaoke_line(beat, source: str) -> str:
     """One dialogue body, with per-word \\k timings when we have them."""
     if not beat.words:
@@ -81,7 +125,8 @@ def _karaoke_line(beat, source: str) -> str:
     parts: list[str] = []
     for word in beat.words:
         centis = max(int(round((word.end - word.start) * 100)), 1)
-        parts.append(f"{{\\k{centis}}}{escape_ass(word.word)}")
+        parts.append(f"{{\\k{centis}{_pop_tags(word)}}}"
+                     f"{escape_ass(word.word)}")
     return " ".join(parts)
 
 

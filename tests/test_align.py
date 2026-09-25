@@ -311,6 +311,10 @@ class AlignSettings:
         self.piper_noise_w = 0.9
         self.piper_sentence_silence = 0.25
         self.voice_process = True
+        # Read by edge_trim_filter, which speak_beat runs over every
+        # synthesised beat.
+        self.voice_trim_edges = base.voice_trim_edges
+        self.voice_silence_threshold = base.voice_silence_threshold
         self.align_words = on
         self.align_model = "base"
         self.align_compute = "int8"
