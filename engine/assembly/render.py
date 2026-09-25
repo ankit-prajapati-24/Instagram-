@@ -233,6 +233,7 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
                        width: int = 1080, height: int = 1920,
                        transition_duration: float = 0.5,
                        ass_path: str | None = None,
+                       fonts_dir: str | None = None,
                        audio_offset: int = 0,
                        music_index: int | None = None,
                        music_gain_db: float = -18.0,
@@ -457,7 +458,16 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
         # so "C:/x/a.ass" is parsed as filter option ``original_size`` and
         # fails with "Unable to parse option value ... as image size".
         # Removing the path from the graph is the only robust fix here.
-        parts.append(f"[{video_label}]subtitles=filename={ass_path}[vout]")
+        #
+        # ``fonts_dir`` is relative for exactly the same reason, and is
+        # resolved against that same cwd: it names the directory
+        # ``fonts.stage_fonts`` copied the look's faces into, beside the
+        # .ass. Without it libass matches the Style line's family name
+        # against the system font set and substitutes in silence.
+        caption = f"subtitles=filename={ass_path}"
+        if fonts_dir:
+            caption += f":fontsdir={fonts_dir}"
+        parts.append(f"[{video_label}]{caption}[vout]")
         video_label = "vout"
 
     # --- audio -----------------------------------------------------------
@@ -522,6 +532,7 @@ def build_filter_graph(plan: ReelPlan, *, fps: int = 30,
 
 def build_command(plan: ReelPlan, settings, out_path: Path, *,
                   ass_path: str | None = None,
+                  fonts_dir: str | None = None,
                   music_path: str | None = None,
                   report: dict | None = None,
                   choices: dict[str, str] | None = None
@@ -531,6 +542,12 @@ def build_command(plan: ReelPlan, settings, out_path: Path, *,
     Returns ``(command, total_seconds, cwd)``. ``cwd`` is the caption
     directory when captions are burned, because a Windows absolute path cannot
     be escaped inside a filtergraph.
+
+    ``fonts_dir`` is a **relative** directory name -- what
+    ``engine.assembly.fonts.stage_fonts`` returns -- and is resolved against
+    that same cwd, for the same escaping reason. Omit it and libass resolves
+    the Style line's family name against the system font set, substituting
+    silently: the reel renders in the wrong face and nothing says so.
 
     ``report``, if given, is filled in with facts about what this particular
     command composited — currently just ``attribution``, the credit line the
@@ -596,6 +613,7 @@ def build_command(plan: ReelPlan, settings, out_path: Path, *,
     graph, total, video_label = build_filter_graph(
         plan, fps=settings.fps, width=settings.width, height=settings.height,
         transition_duration=settings.transition_duration, ass_path=ass_name,
+        fonts_dir=fonts_dir,
         audio_offset=len(inputs), music_index=music_index,
         music_gain_db=music_gain,
         duck=bool(getattr(settings, "music_duck", True)),
@@ -617,7 +635,8 @@ def build_command(plan: ReelPlan, settings, out_path: Path, *,
 
 
 def render(plan: ReelPlan, settings, out_path: str | Path, *,
-           ass_path: str | None = None, music_path: str | None = None,
+           ass_path: str | None = None, fonts_dir: str | None = None,
+           music_path: str | None = None,
            progress=None, report: dict | None = None,
            choices: dict[str, str] | None = None) -> str:
     """Produce the MP4. Returns the output path.
@@ -644,8 +663,8 @@ def render(plan: ReelPlan, settings, out_path: str | Path, *,
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     command, total, run_cwd = build_command(
-        plan, settings, out_path, ass_path=ass_path, music_path=music_path,
-        report=report, choices=choices)
+        plan, settings, out_path, ass_path=ass_path, fonts_dir=fonts_dir,
+        music_path=music_path, report=report, choices=choices)
 
     process = subprocess.Popen(command, stdout=subprocess.DEVNULL,
                                stderr=subprocess.PIPE, text=True,
