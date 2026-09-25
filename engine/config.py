@@ -423,6 +423,12 @@ class Settings:
     # 96 overflowed 1080px on real Hinglish lines; 72 wraps to
     # two comfortable lines instead.
     caption_size: int = 72
+    # The channel's caption look: a preset id from
+    # engine/assembly/looks.py. A reel can override it at the clip gate.
+    # "plain" is what shipped before looks existed, so the default
+    # restyles nothing.
+    look: str = field(
+        default_factory=lambda: os.getenv("RAHASYA_LOOK", "plain"))
 
     # --- Paths -------------------------------------------------------------
     work_dir: Path = field(

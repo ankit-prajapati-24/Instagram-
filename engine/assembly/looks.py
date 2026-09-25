@@ -88,6 +88,27 @@ def resolve(look_id: str | None) -> Look:
     return PRESETS.get(look_id or "", PRESETS[DEFAULT_LOOK_ID])
 
 
+def from_row(row: dict | None, settings) -> Look:
+    """The look a reel renders in: its own, the channel's, or plain.
+
+    A stored row is used verbatim rather than looked up again by id.
+    The preset may have been redefined since the reel was reviewed, and
+    a reel that was approved under one look must not quietly render in
+    another.
+    """
+    if row:
+        return Look(
+            look_id=str(row.get("look_id") or "custom"),
+            label=str(row.get("look_id") or "custom"),
+            font=str(row["font"]), caption_size=int(row["caption_size"]),
+            spoken=str(row["spoken"]), upcoming=str(row["upcoming"]),
+            punch_font=str(row["punch_font"]),
+            punch_size=int(row["punch_size"]),
+            punch_animation=str(row["punch_animation"]),
+            margin_v=int(row["margin_v"]))
+    return resolve(getattr(settings, "look", None))
+
+
 def _escape(text: str) -> str:
     return (text.replace("\\", "\\\\")
                 .replace("{", "\\{")
