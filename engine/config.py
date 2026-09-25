@@ -122,6 +122,23 @@ class Settings:
     piper_length_scale: float = field(
         default_factory=lambda: float(
             os.getenv("RAHASYA_PIPER_LENGTH", "1.12")))
+    # How much faster the finished narration plays. Applied to the audio
+    # after synthesis, so every number downstream -- measured_seconds, the
+    # caption word timings, the clip count, the sticker cue times -- is
+    # measured off the sped-up file and needs no adjusting.
+    #
+    # Separate from piper_length_scale, which asks Piper to *speak* faster
+    # and only works for Piper. This one works on edge-tts too, needs no
+    # re-synthesis to change, and preserves pitch (atempo is a time
+    # stretch, not a resample).
+    #
+    # 1.2 by default because Piper at length-scale 1.12 reads well under
+    # conversational Hindi. Note the ceiling: a 114-word script at 2.29
+    # words/second is 49.8s, and QC refuses anything under 38.25s, so 1.3
+    # is the most an existing script survives. 1.0 skips the pass entirely.
+    voice_speed: float = field(
+        default_factory=lambda: float(
+            os.getenv("RAHASYA_VOICE_SPEED", "1.2")))
     piper_noise_scale: float = field(
         default_factory=lambda: float(
             os.getenv("RAHASYA_PIPER_NOISE", "0.667")))

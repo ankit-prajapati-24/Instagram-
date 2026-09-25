@@ -202,6 +202,19 @@
   .stickerask input[type=text] {
     font-size: 12px; padding: 5px 7px; flex: 1; min-width: 0;
   }
+  .speedrow {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    margin: 12px 0 4px;
+  }
+  .speedrow label { font-size: 13px; color: var(--muted); }
+  .speedrow input[type=number] {
+    width: 92px; background: var(--card); color: var(--paper);
+    border: 1px solid var(--rule); border-radius: 2px;
+    font-family: var(--sans); font-size: 14px; padding: 8px 10px;
+  }
+  .speedrow .said { font-size: 12.5px; }
+  .speedrow .said.bad { color: var(--stamp); }
+  .speedrow .said.ok { color: var(--moss); }
   .mini { display: flex; gap: 6px; margin-top: 5px; }
   .mini select, .mini input {
     font-size: 12px; padding: 5px 7px; width: auto; flex: 1; min-width: 0;
@@ -918,6 +931,16 @@
         it right. Editing only the caption re-times the words without
         saying anything again.</p>
       <p class="lenbar" id="voice-length"></p>
+      <div class="speedrow">
+        <label for="voice-speed">Narration speed</label>
+        <input type="number" id="voice-speed" min="0.5" max="2" step="0.05">
+        <button class="go" id="btn-voice-speed">Apply to every beat</button>
+        <span class="said" id="voice-speed-said"></span>
+      </div>
+      <p class="hint">Every beat is rebuilt from what the voice actually
+        said, not from the last speed you tried — so 1.2 then 1.3 is 1.3,
+        and 1.0 puts it back exactly. The caption words and clip spans are
+        re-measured with it, and the line above updates.</p>
       <div class="beatlist" id="beatlist"></div>
       <div class="entry">
         <button class="go" id="btn-voice-release">This is the voice —
@@ -1523,6 +1546,58 @@ async function toggleCleanup(beat, checkbox) {
   }
 }
 
+/* One speed for the whole reel.
+
+   The server rebuilds each beat from its spoken original, so pressing
+   this twice does not compound and 1.0 is always a way back. It re-times
+   the captions too, which is why the board is reloaded rather than
+   patched: every beat's numbers have moved. */
+async function applyVoiceSpeed() {
+  if (!PLAN) return;
+  const box = $("voice-speed");
+  const said = $("voice-speed-said");
+  const speed = Number(box.value);
+  if (!Number.isFinite(speed) || speed < 0.5 || speed > 2) {
+    said.className = "said bad";
+    said.textContent = "Between 0.5 and 2.";
+    return;
+  }
+  const button = $("btn-voice-speed");
+  button.disabled = true;
+  said.className = "said";
+  said.textContent = "Re-speeding every beat…";
+  try {
+    const response = await fetch(`/api/plan/${PLAN.plan_id}/voice-speed`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ speed })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      said.className = "said bad";
+      said.textContent = String(data.detail || response.status);
+      return;
+    }
+    said.className = data.in_range ? "said ok" : "said bad";
+    said.textContent = `${data.beats_changed} beat`
+      + `${data.beats_changed === 1 ? "" : "s"} at ${data.speed}x`
+      + (data.in_range ? "." : ` — ${data.narration_seconds}s is outside `
+         + `${data.gate_min}-${data.gate_max}s and will not render.`);
+    await loadVoice();
+    box.value = speed;
+  } catch (err) {
+    said.className = "said bad";
+    said.textContent = String(err);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+$("btn-voice-speed").onclick = applyVoiceSpeed;
+$("voice-speed").onkeydown = (event) => {
+  if (event.key === "Enter") applyVoiceSpeed();
+};
+
 function renderVoice() {
   const data = VOICE;
   if (!data) return;
@@ -1533,6 +1608,11 @@ function renderVoice() {
     + (swapped ? ` · ${swapped} in your own voice` : "")
     + (missing ? ` · ${missing} missing on disk` : "");
   voiceLengthLine(data);
+  // Opened on the factor in force, not on a hardcoded default: the board
+  // should say what this reel is, not what a fresh one would be.
+  if (data.voice_speed !== undefined) {
+    $("voice-speed").value = data.voice_speed;
+  }
 
   $("beatlist").innerHTML = data.beats.map(beatRowHtml).join("");
   data.beats.forEach((b) => wireBeatRow(b.beat_id));

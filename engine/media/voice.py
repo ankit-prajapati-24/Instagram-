@@ -693,6 +693,125 @@ def _trim_beat_edges(target: Path, settings) -> bool:
         trimmed.unlink(missing_ok=True)
 
 
+# One ``atempo`` covers 0.5x to 2.0x. Beyond that ffmpeg wants them
+# chained, and a narration asked to run at half or double speed is a
+# different decision from "this reads a little slow" -- so the pass
+# declines instead of guessing.
+SPEED_MIN = 0.5
+SPEED_MAX = 2.0
+
+
+def spoken_master_path(target: str | Path) -> Path:
+    """Where a beat's audio is kept as it was spoken, before any speed.
+
+    By convention rather than by a contract field: it sits beside the beat
+    and is derived from its name, so nothing has to be stored, migrated or
+    kept in step for a file that only this module and the respeed route
+    ever open.
+    """
+    target = Path(target)
+    return target.with_suffix(target.suffix + ".spoken")
+
+
+def respeed_beat(target: str | Path, settings) -> bool:
+    """Redo a beat's speed from the spoken original. True when it did.
+
+    Always from the original, never from the current file. Speeding an
+    already-sped beat compounds -- 1.2 twice is 1.44 -- so the factor the
+    person asked for would not be the factor they heard, and every step
+    back towards the spoken pace would be impossible.
+
+    Returns False when there is no original to work from, which is the
+    honest answer for a beat spoken before this existed: its audio is the
+    only copy and re-speeding it would compound.
+    """
+    target = Path(target)
+    master = spoken_master_path(target)
+    if not master.is_file():
+        return False
+    try:
+        shutil.copyfile(master, target)
+    except OSError as exc:
+        print(f"[voice] respeed skipped for {target.name}: {exc}",
+              file=sys.stderr, flush=True)
+        return False
+    # At 1.0 the copy above already restored the spoken pace, and
+    # `speed_beat` correctly declines to re-encode for nothing.
+    speed_beat(target, settings)
+    return True
+
+
+def speed_beat(target: Path, settings) -> bool:
+    """Play a just-spoken beat faster, in place. True when it did.
+
+    Placed between synthesis and ``probe_duration`` on purpose. Everything
+    downstream is measured off this file -- ``measured_seconds``, the
+    caption word timings, the clip count, the times the stickers fire --
+    so speeding it here means all of them describe the audio that will
+    actually play. Speeding it any later would leave every one of those
+    numbers pointing at a beat that no longer runs that long.
+
+    ``atempo`` stretches time and leaves pitch alone. Changing the sample
+    rate instead would shorten the beat by the same factor and raise the
+    voice with it, which is the chipmunk this is careful not to be.
+
+    A polish pass, like ``_trim_beat_edges`` beside it: the audio is
+    already correct when this runs, so a failure leaves the beat exactly
+    as synthesis wrote it. A beat that did not speed up is a slightly slow
+    reel; a beat that failed to write is no reel.
+    """
+    try:
+        speed = float(getattr(settings, "voice_speed", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        return False
+    if speed == 1.0:
+        # Nothing to do, and re-encoding an mp3 for nothing spends a
+        # generation of quality on no change at all.
+        return False
+    if not SPEED_MIN <= speed <= SPEED_MAX:
+        print(f"[voice] speed {speed} is outside {SPEED_MIN}-{SPEED_MAX}; "
+              f"leaving {target.name} at its spoken pace",
+              file=sys.stderr, flush=True)
+        return False
+
+    # Written beside the target and renamed, because ffmpeg cannot read and
+    # write the same path, and a half-written beat is one the render would
+    # concatenate without complaint.
+    # Kept before anything changes, so a later speed change starts from
+    # what was said rather than from what was last played.
+    master = spoken_master_path(target)
+    try:
+        if not master.is_file():
+            shutil.copyfile(target, master)
+    except OSError as exc:
+        print(f"[voice] could not keep the spoken original for "
+              f"{target.name}: {exc}", file=sys.stderr, flush=True)
+
+    faster = target.with_suffix(target.suffix + ".speed.mp3")
+    try:
+        result = subprocess.run(
+            [settings.ffmpeg, "-hide_banner", "-v", "error", "-y",
+             "-i", str(target), "-af", f"atempo={speed:g}",
+             "-ar", str(NARRATION_SAMPLE_RATE),
+             "-ac", str(NARRATION_CHANNELS),
+             "-c:a", "libmp3lame", "-q:a", "2", "-f", "mp3", str(faster)],
+            capture_output=True, text=True)
+        if (result.returncode != 0 or not faster.is_file()
+                or faster.stat().st_size == 0):
+            print(f"[voice] speed-up skipped for {target.name}: "
+                  f"{(result.stderr or '').strip()[-160:]}",
+                  file=sys.stderr, flush=True)
+            return False
+        os.replace(faster, target)
+        return True
+    except OSError as exc:
+        print(f"[voice] speed-up skipped for {target.name}: {exc}",
+              file=sys.stderr, flush=True)
+        return False
+    finally:
+        faster.unlink(missing_ok=True)
+
+
 def speak_beat(text: str, target: str | Path, settings, *,
                engine: str | None = None) -> tuple[str, int, str]:
     """Say one beat. Returns ``(engine_used, spans, note)``.
@@ -714,6 +833,7 @@ def speak_beat(text: str, target: str | Path, settings, *,
     if engine != "piper":
         spans = synth_beat_edge(text, target, settings)
         _trim_beat_edges(target, settings)
+        speed_beat(target, settings)
         return "edge", spans, "edge"
 
     from engine.media.piper_voice import PiperUnavailable
@@ -724,6 +844,9 @@ def speak_beat(text: str, target: str | Path, settings, *,
         # slot spans and the caption timings, so trimming later would
         # leave all three describing a file that no longer exists.
         _trim_beat_edges(target, settings)
+        # Trim first, then speed: trimming keys on level, and the silence
+        # it looks for is easier to find at the pace it was spoken.
+        speed_beat(target, settings)
         return "piper", spans, "piper"
     except (PiperUnavailable, OSError) as exc:
         # Say so loudly. This was silent, and a run that quietly used

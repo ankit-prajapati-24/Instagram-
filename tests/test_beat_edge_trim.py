@@ -225,6 +225,10 @@ def test_speaking_a_beat_trims_what_it_wrote(settings, tmp_path,
     monkeypatch.setattr(voice, "synth_beat_piper", fake_synth)
     out = tmp_path / "beat.mp3"
 
+    # Speed pinned: this measures the trim, and `speak_beat` also applies
+    # `voice_speed`, which would divide every duration here by 1.2 and make
+    # the assertion about two things at once.
+    settings.voice_speed = 1.0
     voice.speak_beat("kuch bhi", out, settings)
 
     assert probe_duration(out, settings.ffmpeg) < before - 0.4
@@ -246,6 +250,10 @@ def test_the_beat_is_still_playable_after_the_trim(settings, tmp_path,
     monkeypatch.setattr(voice, "synth_beat_piper", fake_synth)
     out = tmp_path / "beat.mp3"
 
+    # Speed pinned: this measures the trim, and `speak_beat` also applies
+    # `voice_speed`, which would divide every duration here by 1.2 and make
+    # the assertion about two things at once.
+    settings.voice_speed = 1.0
     voice.speak_beat("kuch bhi", out, settings)
 
     probe = subprocess.run(
@@ -273,6 +281,10 @@ def test_a_failed_trim_leaves_the_spoken_beat_alone(settings, tmp_path,
                         lambda s: "definitely_not_a_filter")
     out = tmp_path / "beat.mp3"
 
+    # Speed pinned: this measures the trim, and `speak_beat` also applies
+    # `voice_speed`, which would divide every duration here by 1.2 and make
+    # the assertion about two things at once.
+    settings.voice_speed = 1.0
     voice.speak_beat("kuch bhi", out, settings)
 
     assert probe_duration(out, settings.ffmpeg) == pytest.approx(before,
@@ -295,6 +307,10 @@ def test_the_trim_switch_reaches_the_spoken_beat(settings, tmp_path,
     monkeypatch.setattr(voice, "synth_beat_piper", fake_synth)
     out = tmp_path / "beat.mp3"
 
+    # Speed pinned: this measures the trim, and `speak_beat` also applies
+    # `voice_speed`, which would divide every duration here by 1.2 and make
+    # the assertion about two things at once.
+    settings.voice_speed = 1.0
     voice.speak_beat("kuch bhi", out, settings)
 
     assert probe_duration(out, settings.ffmpeg) == pytest.approx(before,

@@ -43,6 +43,7 @@ import math
 import os
 import queue
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -74,10 +75,11 @@ from engine.media import clip_search as clip_search_mod
 from engine.media import music_search as music_search_mod
 from engine.media.clips import clip_count, slot_words
 from engine.media.align import build_aligner
-from engine.media.voice import (MIN_UPLOAD_SECONDS, UPLOAD_ENGINE,
-                                UploadRejected, apply_beat_audio,
-                                beat_audio_path, ingest_narration,
-                                speak_beat)
+from engine.media.voice import (MIN_UPLOAD_SECONDS, SPEED_MAX, SPEED_MIN,
+                                UPLOAD_ENGINE, UploadRejected,
+                                apply_beat_audio, beat_audio_path,
+                                ingest_narration, respeed_beat, speak_beat,
+                                spoken_master_path)
 from engine.omniroute import OmniRouteClient
 from engine.pipeline import (BudgetError, GateError, ManualScriptError,
                              PipelineEvent, Stage, budget_report,
@@ -632,6 +634,17 @@ class CleanupToggleRequest(BaseModel):
     settings already on the server."""
 
     enabled: bool
+
+
+class VoiceSpeedRequest(BaseModel):
+    """What the speed route accepts: one factor for the whole reel.
+
+    Not per beat. The complaint this answers is that the narrator reads
+    slowly, which is a property of the voice rather than of any one line,
+    and a reel whose beats ran at different paces would sound broken.
+    """
+
+    speed: float = Field(ge=SPEED_MIN, le=SPEED_MAX)
 
 
 class VoiceReleaseRequest(ReleaseRequest):
@@ -1248,6 +1261,10 @@ def create_app(db_path: str | Path | None = None,
             "in_gate": gate_min <= narration <= gate_max,
             "in_window": (settings.duration_min <= narration
                           <= settings.duration_max),
+            # What the speed control should open on: the factor these
+            # beats were last built at, so the board shows the reel's
+            # state rather than a default that may not be in force.
+            "voice_speed": round(float(settings.voice_speed), 2),
             "min_seconds": MIN_UPLOAD_SECONDS,
             "max_bytes": int(settings.upload_max_mb * 1024 * 1024),
             "beats": rows,
@@ -1578,6 +1595,72 @@ def create_app(db_path: str | Path | None = None,
             "in_window": (settings.duration_min <= narration
                           <= settings.duration_max),
             "audio": f"/api/audio/{plan_id}/{beat_id}",
+        }
+
+    # Not /voice/speed: the per-beat route below owns /voice/{beat_id}
+    # and would match "speed" as a beat id. A path that cannot collide
+    # beats one that depends on registration order.
+    @app.post("/api/plan/{plan_id}/voice-speed")
+    def set_voice_speed(plan_id: str, request: VoiceSpeedRequest) -> dict:
+        """Replay the whole narration faster, from what was spoken.
+
+        Every beat is rebuilt from its spoken original rather than from the
+        file currently on disk, because speeding an already-sped beat
+        compounds: 1.2 twice is 1.44, and there would be no way back down
+        to the pace it was said at.
+
+        A beat voiced before this existed has no original kept beside it.
+        Its current audio is that original -- nothing had sped it -- so the
+        first change adopts it as the master. The count is reported, because
+        the one case where that would be wrong is a master someone deleted
+        from a work dir, and a number on screen is how that gets noticed.
+
+        Re-measured and re-timed through ``apply_beat_audio``, the same call
+        the upload and cleanup routes use, so the caption words and the
+        clip spans describe the audio that will actually play.
+        """
+        plan = store.get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(404, "no such plan")
+
+        aligner = build_aligner(settings)
+        settings.voice_speed = request.speed
+        changed = adopted = 0
+        for beat in plan.script.beats:
+            if not beat.audio_path:
+                continue
+            audio = Path(beat.audio_path)
+            if not audio.is_file() or not _under_roots(
+                    audio, [Path(settings.work_dir)]):
+                continue
+            master = spoken_master_path(audio)
+            if not master.is_file():
+                try:
+                    shutil.copyfile(audio, master)
+                    adopted += 1
+                except OSError:
+                    continue
+            if respeed_beat(audio, settings):
+                apply_beat_audio(beat, audio, settings,
+                                 engine=beat.voice_engine or "piper",
+                                 aligner=aligner)
+                changed += 1
+
+        store.save_plan(plan, status=store.plan_status(plan_id)
+                        or VOICE_REVIEW_STATUS)
+
+        narration = plan.duration()
+        gate_min, gate_max = pre_render_range(settings.duration_min,
+                                              settings.duration_max)
+        return {
+            "plan_id": plan_id,
+            "speed": request.speed,
+            "beats_changed": changed,
+            "originals_adopted": adopted,
+            "narration_seconds": round(narration, 2),
+            "gate_min": round(gate_min, 2),
+            "gate_max": round(gate_max, 2),
+            "in_range": gate_min <= narration <= gate_max,
         }
 
     @app.post("/api/plan/{plan_id}/voice/{beat_id}/cleanup")

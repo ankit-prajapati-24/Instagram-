@@ -786,6 +786,11 @@ def test_correcting_a_word_re_speaks_only_that_beat(client, monkeypatch):
 
 
 def test_the_corrected_beat_is_re_measured_and_re_timed(client, monkeypatch):
+    # Speed pinned: the seeded beats are written at a fixed length without
+    # going through `speak_beat`, while a re-spoken one does go through it
+    # and is sped like any other. Leaving the default on would compare a
+    # sped beat against unsped neighbours and measure two things at once.
+    _settings(client).voice_speed = 1.0
     _fake_engine(monkeypatch, _settings(client), seconds_per_word=1.0)
     _seed(client, beats=2, seconds=4.0)
 
@@ -1356,3 +1361,81 @@ def test_the_board_does_not_advertise_a_revert_control_after_a_respeak(
     # advertising it, and the route (tested above) stopped acting on it.
     assert Path(_store(client).get_plan("p1").script.beats[0]
                .raw_audio_path).is_file()
+
+
+# --- speed, from the board ------------------------------------------------
+
+def test_the_speed_route_shortens_the_whole_narration(client):
+    """One control for the reel, not one per beat: the complaint is that
+    the narrator reads slowly, which is a property of the voice."""
+    _seed(client, beats=3, seconds=4.0)
+
+    body = client.post("/api/plan/p1/voice-speed", json={"speed": 1.2}).json()
+    assert body["speed"] == 1.2
+    assert body["narration_seconds"] == pytest.approx(12.0 / 1.2, abs=0.3)
+
+    plan = _store(client).get_plan("p1")
+    for beat in plan.script.beats:
+        assert beat.measured_seconds == pytest.approx(4.0 / 1.2, abs=0.15)
+        assert beat.words, "a re-sped beat lost its caption timings"
+        assert beat.words[-1].end == pytest.approx(beat.measured_seconds,
+                                                   abs=0.05)
+
+
+def test_changing_the_speed_twice_does_not_compound(client):
+    """1.2 then 1.3 is 1.3, not 1.56. Every change starts from what was
+    spoken, which is the whole reason the original is kept."""
+    _seed(client, beats=2, seconds=4.0)
+
+    client.post("/api/plan/p1/voice-speed", json={"speed": 1.2})
+    client.post("/api/plan/p1/voice-speed", json={"speed": 1.3})
+
+    plan = _store(client).get_plan("p1")
+    assert plan.script.beats[0].measured_seconds == pytest.approx(
+        4.0 / 1.3, abs=0.15)
+
+
+def test_the_speed_can_be_put_back(client):
+    _seed(client, beats=2, seconds=4.0)
+    client.post("/api/plan/p1/voice-speed", json={"speed": 1.3})
+    client.post("/api/plan/p1/voice-speed", json={"speed": 1.0})
+
+    plan = _store(client).get_plan("p1")
+    assert plan.script.beats[0].measured_seconds == pytest.approx(4.0,
+                                                                  abs=0.15)
+
+
+def test_the_board_is_told_when_the_speed_pushes_it_out_of_range(client):
+    """QC refuses a reel under 38.25s. The board has to say so before the
+    render does, because by then the person has stopped watching."""
+    _seed(client, beats=3, seconds=4.0)
+    body = client.post("/api/plan/p1/voice-speed", json={"speed": 1.2}).json()
+    assert "gate_min" in body and "gate_max" in body
+    assert body["in_range"] is (body["gate_min"] <= body["narration_seconds"]
+                                <= body["gate_max"])
+
+
+def test_a_speed_outside_the_range_is_refused(client):
+    _seed(client, beats=2, seconds=4.0)
+    for bad in (0.4, 2.5, 0.0):
+        assert client.post("/api/plan/p1/voice-speed",
+                           json={"speed": bad}).status_code == 422
+
+
+def test_the_board_opens_the_speed_control_on_the_factor_in_force():
+    """Not on a hardcoded 1.2.
+
+    The control has to say what this reel is at, or someone who set 1.0
+    would come back to a box claiming 1.2 and press Apply expecting
+    nothing to change.
+    """
+    import engine.app as app_mod
+
+    page = (app_mod.UI_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'id="voice-speed"' in page, "no speed control on the board"
+    assert "data.voice_speed" in page, \
+        "the control ignores the factor the server reports"
+    assert 'value="1.2"' not in page, \
+        "the control opens on a hardcoded default"
+    assert "voice-speed`" in page or "/voice-speed" in page, \
+        "the control does not reach the speed route"
