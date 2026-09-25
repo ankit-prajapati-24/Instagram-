@@ -59,6 +59,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from engine.agents import latin_words
+from engine.assembly import fonts as look_fonts
+from engine.assembly import looks as looks_mod
 from engine.assembly import sticker_catalog
 from engine.assembly import sticker_choices as sticker_choices_mod
 from engine.assembly import sticker_libraries as sticker_libs
@@ -73,6 +75,7 @@ from engine.contract import (Beat, Claim, CleanupInfo, Clip, Metadata, Motion,
                              Role, StickerCue, Transition)
 from engine.gates.qc import pre_render_range
 from engine.media import clip_search as clip_search_mod
+from engine.media import look_preview as look_preview_mod
 from engine.media import music_search as music_search_mod
 from engine.media.clips import clip_count, slot_words
 from engine.media.align import build_aligner
@@ -597,6 +600,27 @@ class MusicPickRequest(BaseModel):
     """
 
     openverse_id: str
+
+
+class LookPickRequest(BaseModel):
+    """A caption look chosen for one reel.
+
+    A preset needs only its id; the server fills the values from the
+    preset so the panel cannot drift from it. `custom` must carry every
+    field, and they are checked -- libass substitutes an unknown font
+    silently, so a name nobody ships would render as something else
+    with nothing anywhere saying so.
+    """
+
+    look_id: str
+    font: str | None = None
+    caption_size: int | None = None
+    spoken: str | None = None
+    upcoming: str | None = None
+    margin_v: int | None = None
+    punch_font: str | None = None
+    punch_size: int | None = None
+    punch_animation: str | None = None
 
 
 class PickRequest(BaseModel):
@@ -2099,6 +2123,9 @@ def create_app(db_path: str | Path | None = None,
             # chosen, so it has to say what the bed currently is --
             # otherwise the only way to find out is to render.
             "music": _music_row(plan_id),
+            # The look this reel will render in. The board is where it is
+            # chosen, so it has to say what it currently is.
+            "look": _look_row(plan_id),
             "clips": rows,
         }
 
@@ -2603,6 +2630,129 @@ def create_app(db_path: str | Path | None = None,
             raise HTTPException(404, "no such plan")
         store.clear_music_choice(plan_id)
         return {"plan_id": plan_id, "music": None}
+
+    def _look_row(plan_id: str) -> dict:
+        """The look this reel will render in, and whether it chose it."""
+        stored = store.look_choice(plan_id)
+        look = looks_mod.from_row(stored, settings)
+        return {"look_id": look.look_id, "label": look.label,
+                "font": look.font, "caption_size": look.caption_size,
+                "spoken": look.spoken, "upcoming": look.upcoming,
+                "margin_v": look.margin_v, "punch_font": look.punch_font,
+                "punch_size": look.punch_size,
+                "punch_animation": look.punch_animation,
+                "chosen": stored is not None}
+
+    @app.get("/api/plan/{plan_id}/looks")
+    def look_menu(plan_id: str) -> dict:
+        """Every preset, with the URL that previews it on this reel."""
+        if store.get_plan(plan_id) is None:
+            raise HTTPException(404, "no such plan")
+        chosen = store.look_choice(plan_id)
+        return {
+            "plan_id": plan_id,
+            "chosen": (chosen or {}).get("look_id"),
+            "current": _look_row(plan_id),
+            "looks": [
+                {"look_id": look.look_id, "label": look.label,
+                 "font": look.font, "punch_animation": look.punch_animation,
+                 "preview": f"/api/look-preview/{plan_id}/{look.look_id}"}
+                for look in looks_mod.PRESETS.values()],
+            "fonts": sorted(look_fonts.FONT_FILES) + ["Arial"],
+            "animations": list(looks_mod.ANIMATIONS),
+        }
+
+    @app.get("/api/look-preview/{plan_id}/{look_id}")
+    def look_preview(plan_id: str, look_id: str) -> FileResponse:
+        """Two and a half seconds of this reel, in one look.
+
+        Rendered on demand: measured at 0.4s, a cache would buy nothing
+        and cost three kinds of staleness.
+        """
+        plan = store.get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(404, "no such plan")
+        if look_id == "custom":
+            look = looks_mod.from_row(store.look_choice(plan_id), settings)
+        elif look_id in looks_mod.PRESETS:
+            look = looks_mod.PRESETS[look_id]
+        else:
+            raise HTTPException(404, f"no such look: {look_id}")
+        try:
+            path = Path(look_preview_mod.render_preview(
+                plan, look, settings, settings.work_dir))
+        except look_preview_mod.PreviewUnavailable as exc:
+            raise HTTPException(404, str(exc)) from exc
+        if not _under_roots(path, [Path(settings.work_dir)]):
+            raise HTTPException(500, "the preview escaped work_dir")
+        return FileResponse(path, media_type="video/mp4")
+
+    @app.post("/api/plan/{plan_id}/look")
+    def pick_look(plan_id: str, request: LookPickRequest) -> dict:
+        """Give this reel its own look.
+
+        Gated on the review status: the captions are burned in by the
+        render, so this gate is the last moment they can change.
+        """
+        if store.get_plan(plan_id) is None:
+            raise HTTPException(404, "no such plan")
+        status = store.plan_status(plan_id)
+        if status != CLIP_REVIEW_STATUS:
+            raise HTTPException(
+                409, f"plan is '{status}', not awaiting clip review. The "
+                     f"captions are burned in by the render, so that gate "
+                     f"is the last moment the look can change.")
+
+        if request.look_id in looks_mod.PRESETS:
+            look = looks_mod.PRESETS[request.look_id]
+            values = dict(
+                look_id=look.look_id, font=look.font,
+                caption_size=look.caption_size, spoken=look.spoken,
+                upcoming=look.upcoming, margin_v=look.margin_v,
+                punch_font=look.punch_font, punch_size=look.punch_size,
+                punch_animation=look.punch_animation)
+        elif request.look_id == "custom":
+            missing = [f for f in ("font", "caption_size", "spoken",
+                                   "upcoming", "margin_v", "punch_font",
+                                   "punch_size", "punch_animation")
+                       if getattr(request, f) is None]
+            if missing:
+                raise HTTPException(
+                    422, f"a custom look needs every field; missing: "
+                         f"{', '.join(missing)}")
+            allowed = set(look_fonts.FONT_FILES) | {"Arial"}
+            for field_name in ("font", "punch_font"):
+                name = getattr(request, field_name)
+                if name not in allowed:
+                    raise HTTPException(
+                        422, f"{name!r} is not a bundled font. libass "
+                             f"would substitute another face silently. "
+                             f"Choose from: {', '.join(sorted(allowed))}")
+            if request.punch_animation not in looks_mod.ANIMATIONS:
+                raise HTTPException(
+                    422, f"{request.punch_animation!r} is not an "
+                         f"animation. Choose from: "
+                         f"{', '.join(looks_mod.ANIMATIONS)}")
+            values = dict(
+                look_id="custom", font=request.font,
+                caption_size=request.caption_size, spoken=request.spoken,
+                upcoming=request.upcoming, margin_v=request.margin_v,
+                punch_font=request.punch_font,
+                punch_size=request.punch_size,
+                punch_animation=request.punch_animation)
+        else:
+            raise HTTPException(404, f"no such look: {request.look_id}")
+
+        store.set_look_choice(plan_id, **values)
+        return {"plan_id": plan_id, **values}
+
+    @app.delete("/api/plan/{plan_id}/look")
+    def clear_look(plan_id: str) -> dict:
+        """Put this reel back on the channel default."""
+        if store.get_plan(plan_id) is None:
+            raise HTTPException(404, "no such plan")
+        store.clear_look_choice(plan_id)
+        return {"plan_id": plan_id, "look": _look_row(plan_id)}
 
     @app.post("/api/plan/{plan_id}/clip/{beat_id}/{slot}/pick")
     def pick_clip(plan_id: str, beat_id: str, slot: int,
