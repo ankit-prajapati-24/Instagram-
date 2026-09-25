@@ -73,6 +73,7 @@ def authoring_facts(settings, *, topic_max: int) -> dict:
         "duration_max": settings.duration_max,
         "gate_min": gate_min,
         "gate_max": gate_max,
+        "sticker_max": settings.sticker_max,
         "default_roles": default_roles(count, settings),
         "roles": list(get_args(Role)),
         "motions": list(get_args(Motion)),
@@ -103,7 +104,10 @@ def build_prompt(topic: str, facts: dict) -> str:
         "beats": [
             {"voice_text": "<Devanagari, spoken>",
              "caption_text": "<Roman Hinglish, burned on screen>",
-             "visual_prompt": "<English, what the footage should show>"},
+             "visual_prompt": "<English, what the footage should show>",
+             "on_screen_text": "<optional: 2-4 words, or omit>",
+             "sticker": {"word": "<a word from this caption_text>",
+                         "terms": ["<english noun>", "<english noun>"]}},
         ],
     }
     return f"""Write a script for a {facts['duration_min']:.0f}-{facts['duration_max']:.0f} second
@@ -117,17 +121,60 @@ Shape, with exactly {count} objects in "beats":
 
 {json.dumps(example, ensure_ascii=False, indent=2)}
 
-Each beat needs those three fields and nothing else:
+Three fields are required on every beat, and two are optional:
 
   voice_text     What is spoken. **Devanagari script only.** Not a style
                  rule: the voice reads Latin letters as English and
                  mispronounces them. Write numbers as words too
-                 ("अठारह", not "18").
+                 ("अठारह", not "18"). See the vocabulary note below —
+                 the script is Devanagari, the language is Hinglish.
   caption_text   The same line in Roman Hinglish. This is what gets
                  burned on screen, so digits are fine here.
   visual_prompt  English, one sentence, describing the shot — this is
                  fed to a stock-footage search, so name things that can
                  be filmed rather than moods.
+
+  on_screen_text Optional. Two to four words that land in the middle of
+                 the frame for the middle of the beat — the pattern
+                 interrupt, not a second subtitle. Roman, like the
+                 caption. Omit the field on beats that have no punch in
+                 them; one in every beat is noise, and a beat that has
+                 to reach for one has none.
+  sticker        Optional. An icon that pops on one word:
+
+                     "sticker": {{"word": "darwaza",
+                                 "terms": ["door", "gate"]}}
+
+                 ``word`` must be a word that appears in this beat's
+                 caption_text, spelled the same way — the icon is timed
+                 off that word and a word the caption does not contain
+                 has no clock to sit on.
+
+                 ``terms`` are English, one noun each, and they are
+                 searched against an icon library named for **objects**:
+                 "dream" finds nothing and "cloud" finds an icon, so
+                 name the thing that stands for the idea. Give two or
+                 three; the first that matches wins.
+
+                 At most {facts['sticker_max']} in the whole script —
+                 they are punctuation, and punctuation everywhere is
+                 just noise. Omit the field on every other beat.
+
+**Write Hinglish, not Hindi.** Devanagari is the script, not the
+vocabulary. An English word the audience actually says stays that
+English word, spelled out in Devanagari — transliterated, never
+translated into its literary Hindi equivalent:
+
+    ads       ऐड्स        not  विज्ञापन
+    search    सर्च        not  खोज
+    video     वीडियो      not  चलचित्र
+    result    रिज़ल्ट      not  परिणाम
+    confirm   कन्फर्म      not  पुष्टि करना
+    DNA       डीएनए
+
+If a Hindi word is the one people use — दरवाज़ा, रात, सच — use it. The
+test is what someone would say out loud, not what a textbook prefers.
+Formal or literary Hindi reads as a news bulletin and loses the room.
 
 Length is the constraint that matters most:
 
