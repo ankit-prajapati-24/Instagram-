@@ -772,11 +772,12 @@ def render_stage(plan: ReelPlan, store, settings, *,
     counts = providers if providers is not None else clip_providers(plan)
 
     emit(PipelineEvent(Stage.CAPTIONS, "started", captions_source))
-    font = (settings.caption_font_devanagari
-            if captions_source == "voice_text" else settings.caption_font)
+    from engine.assembly import looks as looks_mod
+
+    look = looks_mod.resolve(getattr(settings, "look", None))
     ass_path = write_ass(
         plan, Path(settings.work_dir) / plan.plan_id / "captions.ass",
-        source=captions_source, font=font, font_size=settings.caption_size,
+        source=captions_source, look=look,
         width=settings.width, height=settings.height)
     emit(PipelineEvent(Stage.CAPTIONS, "done", Path(ass_path).name))
 

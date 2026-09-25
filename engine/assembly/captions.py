@@ -102,7 +102,7 @@ ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, \
 MarginR, MarginV, Encoding
 Style: Default,{font},{size},{primary},{secondary},{outline},{shadow},\
 -1,0,0,0,100,100,0,0,1,5,3,2,110,110,{margin_v},1
-Style: Punch,{font},{punch_size},{secondary},{secondary},{outline},{shadow},\
+Style: Punch,{punch_font},{punch_size},{secondary},{secondary},{outline},{shadow},\
 -1,0,0,0,100,100,1,0,1,6,4,5,130,130,0,1
 
 [Events]
@@ -172,19 +172,25 @@ def _karaoke_line(beat, source: str) -> str:
 
 
 def build_ass(plan: ReelPlan, *, source: str = "caption_text",
-              font: str = "Arial", font_size: int = 96,
-              width: int = 1080, height: int = 1920,
-              margin_v: int = 300) -> str:
-    """Render the whole plan as one ASS document.
+              look=None, width: int = 1080, height: int = 1920) -> str:
+    """Render the whole plan as one ASS document, in one look.
 
-    ``margin_v`` lifts the caption clear of the Instagram and YouTube UI
-    chrome that overlays the bottom of a vertical video.
+    A ``Look`` rather than loose font/size/margin arguments: there is
+    one value to store against a plan, one to hand a preview, and one
+    place a new preset has to be added.
+
+    The look's ``margin_v`` lifts the caption clear of the Instagram and
+    YouTube UI chrome that overlays the bottom of a vertical video.
     """
+    from engine.assembly import looks as looks_mod
+
+    look = look or looks_mod.resolve(None)
     lines = [HEADER.format(
-        width=width, height=height, font=font, size=font_size,
-        punch_size=int(font_size * 1.15), primary=COLOUR_SPOKEN,
-        secondary=COLOUR_UPCOMING, outline=COLOUR_OUTLINE,
-        shadow=COLOUR_SHADOW, margin_v=margin_v)]
+        width=width, height=height, font=look.font,
+        size=look.caption_size, punch_font=look.punch_font,
+        punch_size=look.punch_size, primary=look.spoken,
+        secondary=look.upcoming, outline=COLOUR_OUTLINE,
+        shadow=COLOUR_SHADOW, margin_v=look.margin_v)]
 
     offset = 0.0
     for beat in plan.script.beats:
@@ -201,9 +207,12 @@ def build_ass(plan: ReelPlan, *, source: str = "caption_text",
         if beat.on_screen_text:
             punch_start = ass_time(offset + duration * 0.15)
             punch_end = ass_time(offset + duration * 0.85)
+            # ``punch_tags`` escapes the text itself, because the
+            # letters animation interleaves override blocks with the
+            # characters and cannot hand back a bare prefix.
             lines.append(
                 f"Dialogue: 1,{punch_start},{punch_end},Punch,,0,0,0,,"
-                f"{{\\fad(180,180)}}{escape_ass(beat.on_screen_text)}")
+                f"{looks_mod.punch_tags(look.punch_animation, beat.on_screen_text)}")
 
         offset += duration
 

@@ -13,7 +13,7 @@ coverage that exists to make a regression *name itself*; it is not the proof.
 
 from __future__ import annotations
 
-import inspect
+import dataclasses
 import json
 import subprocess
 from pathlib import Path
@@ -22,7 +22,8 @@ import pytest
 from PIL import Image
 
 from engine.assembly import stickers as stk
-from engine.assembly.captions import build_ass, write_ass
+from engine.assembly.captions import write_ass
+from engine.assembly.looks import resolve
 from engine.assembly.render import build_filter_graph, plan_inputs, render
 from engine.contract import StickerCue
 from engine.media.voice import caption_timings
@@ -292,7 +293,7 @@ def test_a_beat_that_asks_is_never_also_scanned_for_triggers():
 
 def test_the_sticker_sits_clear_of_the_burned_in_captions():
     """Read the caption band out of captions.py rather than restating it."""
-    margin_v = inspect.signature(build_ass).parameters["margin_v"].default
+    margin_v = resolve("plain").margin_v
     width, height = 1080, 1920
     size = stk.sticker_size(width)
     # The Default style is Alignment 2 (bottom centre) at MarginV; allow
@@ -1217,8 +1218,10 @@ def test_a_real_render_survives_stickers_captions_and_mixed_clip_counts(
     assert stk.prepare(plan, settings), "fixture produced no stickers"
 
     ass = tmp_path / "captions" / "captions.ass"
-    write_ass(plan, ass, font="Arial", font_size=28,
-              width=settings.width, height=settings.height, margin_v=90)
+    write_ass(plan, ass,
+              look=dataclasses.replace(resolve("plain"), caption_size=28,
+                                       margin_v=90),
+              width=settings.width, height=settings.height)
 
     out = tmp_path / "full.mp4"
     render(plan, settings, out, ass_path=str(ass))
