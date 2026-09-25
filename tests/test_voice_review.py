@@ -1439,3 +1439,55 @@ def test_the_board_opens_the_speed_control_on_the_factor_in_force():
         "the control opens on a hardcoded default"
     assert "voice-speed`" in page or "/voice-speed" in page, \
         "the control does not reach the speed route"
+
+
+# --- choosing the voice ---------------------------------------------------
+
+def test_the_board_lists_the_voices_this_install_can_speak_with(client):
+    body = client.get("/api/voices").json()
+    ids = [v["id"] for v in body["voices"]]
+    assert any(i.startswith("piper:") for i in ids), ids
+    assert body["current"].startswith("piper:"), "Piper is the default"
+
+
+def test_recasting_speaks_every_beat_in_the_chosen_voice(client, monkeypatch):
+    _fake_engine(monkeypatch, _settings(client), seconds_per_word=0.5)
+    _seed(client, beats=2, seconds=4.0)
+
+    body = client.post("/api/plan/p1/voice-cast",
+                       json={"id": "piper:priyamvada"}).json()
+    assert body["voice"] == "piper:priyamvada"
+    assert body["beats_spoken"] == 2
+
+    plan = _store(client).get_plan("p1")
+    for beat in plan.script.beats:
+        assert beat.voice_name == "piper:priyamvada"
+        assert beat.words, "a re-spoken beat lost its caption timings"
+        assert beat.words[-1].end == pytest.approx(beat.measured_seconds,
+                                                   abs=0.05)
+
+
+def test_choosing_a_voice_does_not_change_the_install_default(client,
+                                                              monkeypatch):
+    """One reel's cast is not a new default. Someone trying a voice on one
+    plan should not find every later plan speaking in it."""
+    _fake_engine(monkeypatch, _settings(client), seconds_per_word=0.5)
+    _seed(client, beats=2, seconds=4.0)
+    before = _settings(client).piper_voice
+
+    client.post("/api/plan/p1/voice-cast", json={"id": "piper:priyamvada"})
+
+    assert _settings(client).piper_voice == before
+
+
+def test_a_voice_that_is_not_installed_is_refused(client):
+    _seed(client, beats=2, seconds=4.0)
+    assert client.post("/api/plan/p1/voice-cast",
+                       json={"id": "piper:nobody"}).status_code == 400
+
+
+def test_a_malformed_voice_id_never_reaches_the_filesystem(client):
+    _seed(client, beats=2, seconds=4.0)
+    for bad in ("piper:../../etc/passwd", "elsewhere:x", "piper:", ""):
+        assert client.post("/api/plan/p1/voice-cast",
+                           json={"id": bad}).status_code in (400, 422)

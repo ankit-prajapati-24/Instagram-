@@ -198,6 +198,11 @@ class Beat(Coercing):
     # the fallback used to be silent, so a run that quietly used edge-tts was
     # indistinguishable from one that used Piper until someone listened.
     voice_engine: str | None = None
+    # Which voice said it, as the board's voice id ("piper:priyamvada").
+    # Separate from ``voice_engine`` rather than folded into it: that field
+    # is compared against UPLOAD_ENGINE in several places and giving it a
+    # second vocabulary is how those comparisons start being wrong.
+    voice_name: str | None = None
     measured_seconds: float | None = None
     # Caption-aligned timings (Roman), not the Devanagari narration's.
     words: list[WordTiming] = Field(default_factory=list)

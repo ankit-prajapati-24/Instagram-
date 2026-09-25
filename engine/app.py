@@ -38,6 +38,7 @@ There is no publish route. Payload builders are exposed for copy-out only.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -76,6 +77,7 @@ from engine.media import music_search as music_search_mod
 from engine.media.clips import clip_count, slot_words
 from engine.media.align import build_aligner
 from engine.media.voice import (MIN_UPLOAD_SECONDS, SPEED_MAX, SPEED_MIN,
+                                available_voices, split_voice_id,
                                 UPLOAD_ENGINE, UploadRejected,
                                 apply_beat_audio, beat_audio_path,
                                 ingest_narration, respeed_beat, speak_beat,
@@ -634,6 +636,12 @@ class CleanupToggleRequest(BaseModel):
     settings already on the server."""
 
     enabled: bool
+
+
+class VoiceCastRequest(BaseModel):
+    """What the voice-cast route accepts: one voice for the whole reel."""
+
+    id: str
 
 
 class VoiceSpeedRequest(BaseModel):
@@ -1210,6 +1218,9 @@ def create_app(db_path: str | Path | None = None,
                 # second shorter can drop it a whole slot.
                 "clips": clip_count(beat.seconds()),
                 "engine": beat.voice_engine,
+                # Which voice said it, so the board's selector shows this
+                # reel's cast rather than the install default.
+                "voice_name": beat.voice_name,
                 "replaced": replaced,
                 "word_timing_source": beat.word_timing_source,
                 # What this beat is supposed to say, and what gets burned
@@ -1600,6 +1611,87 @@ def create_app(db_path: str | Path | None = None,
     # Not /voice/speed: the per-beat route below owns /voice/{beat_id}
     # and would match "speed" as a beat id. A path that cannot collide
     # beats one that depends on registration order.
+    @app.get("/api/voices")
+    def list_voices() -> dict:
+        """Every voice this install can speak with, and the current default.
+
+        Discovered rather than listed: a Piper model dropped into the
+        models directory appears here without a code change. edge-tts is
+        included but marked ``local: false``, because it goes to Microsoft
+        for every beat and that is the difference that matters when the
+        network drops mid-render.
+        """
+        voices = available_voices(settings)
+        engine = (settings.voice_engine or "piper").strip().lower()
+        current = (f"piper:{settings.piper_voice}" if engine == "piper"
+                   else f"edge:{settings.voice}")
+        return {"voices": voices, "current": current}
+
+    @app.post("/api/plan/{plan_id}/voice-cast")
+    def cast_voice(plan_id: str, request: VoiceCastRequest) -> dict:
+        """Speak every beat again in the chosen voice.
+
+        Checked against what is actually installed before anything is
+        spoken, so a voice id cannot name a Piper model that is not there
+        and cannot reach the filesystem as anything but a name.
+
+        The choice is not written back to settings. Trying a voice on one
+        reel must not quietly become the default for every reel after it,
+        which is what mutating the shared settings object would do.
+        """
+        plan = store.get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(404, "no such plan")
+        try:
+            engine, name = split_voice_id(request.id)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if request.id not in {v["id"] for v in available_voices(settings)}:
+            raise HTTPException(
+                400, f"{request.id!r} is not installed; GET /api/voices "
+                     f"lists what this machine can speak with")
+
+        # A copy, so the install default survives this reel's choice.
+        cast = copy.copy(settings)
+        cast.voice_engine = engine
+        if engine == "piper":
+            cast.piper_voice = name
+        else:
+            cast.voice = name
+
+        aligner = build_aligner(settings)
+        spoken = 0
+        for beat in plan.script.beats:
+            if beat.voice_engine == UPLOAD_ENGINE:
+                # A human take is not the narrator's to overwrite.
+                continue
+            target = beat_audio_path(plan_id, beat.beat_id,
+                                     Path(settings.work_dir))
+            try:
+                used, _spans, _note = speak_beat(beat.voice_text, target,
+                                                 cast, engine=engine)
+            except Exception as exc:                  # noqa: BLE001
+                raise HTTPException(
+                    502, f"{request.id} could not speak {beat.beat_id}: "
+                         f"{exc}") from exc
+            apply_beat_audio(beat, target, cast, engine=used,
+                             aligner=aligner)
+            beat.voice_name = request.id
+            spoken += 1
+
+        store.save_plan(plan, status=store.plan_status(plan_id)
+                        or VOICE_REVIEW_STATUS)
+        narration = plan.duration()
+        gate_min, gate_max = pre_render_range(settings.duration_min,
+                                              settings.duration_max)
+        return {
+            "plan_id": plan_id, "voice": request.id,
+            "beats_spoken": spoken,
+            "narration_seconds": round(narration, 2),
+            "gate_min": round(gate_min, 2), "gate_max": round(gate_max, 2),
+            "in_range": gate_min <= narration <= gate_max,
+        }
+
     @app.post("/api/plan/{plan_id}/voice-speed")
     def set_voice_speed(plan_id: str, request: VoiceSpeedRequest) -> dict:
         """Replay the whole narration faster, from what was spoken.

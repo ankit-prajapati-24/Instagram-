@@ -207,6 +207,12 @@
     margin: 12px 0 4px;
   }
   .speedrow label { font-size: 13px; color: var(--muted); }
+  .speedrow select {
+    background: var(--card); color: var(--paper);
+    border: 1px solid var(--rule); border-radius: 2px;
+    font-family: var(--sans); font-size: 14px; padding: 8px 10px;
+    width: auto; max-width: 320px;
+  }
   .speedrow input[type=number] {
     width: 92px; background: var(--card); color: var(--paper);
     border: 1px solid var(--rule); border-radius: 2px;
@@ -932,6 +938,19 @@
         saying anything again.</p>
       <p class="lenbar" id="voice-length"></p>
       <div class="speedrow">
+        <label for="voice-cast">Voice</label>
+        <select id="voice-cast"></select>
+        <button class="go" id="btn-voice-cast">Say it all again in this
+          voice</button>
+        <span class="said" id="voice-cast-said"></span>
+      </div>
+      <p class="hint">Piper speaks on this machine — no network, and it
+        cannot fail halfway through a reel. Its models are not in the repo,
+        so on a fresh checkout the first beat downloads the one you pick
+        (about 60 MB, once); after that it is offline for good. The
+        edge-tts voices are different: they go to Microsoft for every beat,
+        every time. Beats you recorded yourself are left alone.</p>
+      <div class="speedrow">
         <label for="voice-speed">Narration speed</label>
         <input type="number" id="voice-speed" min="0.5" max="2" step="0.05">
         <button class="go" id="btn-voice-speed">Apply to every beat</button>
@@ -1546,6 +1565,74 @@ async function toggleCleanup(beat, checkbox) {
   }
 }
 
+/* Which voice reads the reel.
+
+   The list is fetched rather than written here: a Piper model dropped into
+   the models directory should appear without touching this file. Local
+   voices are marked, because an edge-tts voice needs the network for every
+   beat and that is worth knowing before a render, not during one. */
+let VOICES = null;
+
+async function loadVoices() {
+  const box = $("voice-cast");
+  try {
+    VOICES = await (await fetch("/api/voices")).json();
+  } catch (err) {
+    box.innerHTML = `<option value="">could not list voices</option>`;
+    return;
+  }
+  const beatVoice = (VOICE && (VOICE.beats || []).find((b) => b.voice_name)
+                     || {}).voice_name;
+  const chosen = beatVoice || VOICES.current;
+  box.innerHTML = (VOICES.voices || []).map((v) => {
+    // A Piper voice that is not here yet is not unavailable: it downloads
+    // itself the first time it speaks, once, and is local after that.
+    const where = v.engine === "piper"
+      ? (v.local ? "on this machine" : "downloads once, then offline")
+      : "needs the network every time";
+    const who = v.gender ? `${v.gender}, ` : "";
+    return `<option value="${esc(v.id)}" ${v.id === chosen ? "selected" : ""}>`
+      + `${esc(v.label)} — ${who}${where}</option>`;
+  }).join("") || `<option value="">no voices installed</option>`;
+}
+
+async function castVoice() {
+  if (!PLAN) return;
+  const id = $("voice-cast").value;
+  const said = $("voice-cast-said");
+  if (!id) { said.className = "said bad"; said.textContent = "Pick a voice."; return; }
+  const button = $("btn-voice-cast");
+  button.disabled = true;
+  said.className = "said";
+  said.textContent = "Speaking every beat again — this is not instant…";
+  try {
+    const response = await fetch(`/api/plan/${PLAN.plan_id}/voice-cast`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      said.className = "said bad";
+      said.textContent = String(data.detail || response.status);
+      return;
+    }
+    said.className = data.in_range ? "said ok" : "said bad";
+    said.textContent = `${data.beats_spoken} beat`
+      + `${data.beats_spoken === 1 ? "" : "s"} in ${data.voice}`
+      + (data.in_range ? "." : ` — ${data.narration_seconds}s is outside `
+         + `${data.gate_min}-${data.gate_max}s and will not render.`);
+    await loadVoice();
+  } catch (err) {
+    said.className = "said bad";
+    said.textContent = String(err);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+$("btn-voice-cast").onclick = castVoice;
+
 /* One speed for the whole reel.
 
    The server rebuilds each beat from its spoken original, so pressing
@@ -1613,6 +1700,7 @@ function renderVoice() {
   if (data.voice_speed !== undefined) {
     $("voice-speed").value = data.voice_speed;
   }
+  loadVoices();
 
   $("beatlist").innerHTML = data.beats.map(beatRowHtml).join("");
   data.beats.forEach((b) => wireBeatRow(b.beat_id));

@@ -701,6 +701,108 @@ SPEED_MIN = 0.5
 SPEED_MAX = 2.0
 
 
+# The Hindi voices Piper publishes, and whether each is a woman's voice.
+#
+# Listed rather than discovered because `models/` is gitignored: a fresh
+# clone has no .onnx at all, and offering only what is on disk showed an
+# empty control on a machine where Piper works perfectly --
+# `piper_voice.ensure_model` downloads the model on first use. Anything
+# actually on disk is added to this on top, so a voice someone drops in by
+# hand still appears whatever it is called.
+#
+# The gender is a label, so nobody has to synthesise three voices to find
+# out which is which. Nothing depends on it.
+PIPER_GENDERS = {"pratham": "Male", "rohan": "Male", "priyamvada": "Female"}
+PIPER_FETCHABLE = ("pratham", "priyamvada", "rohan")
+
+# The locales worth offering for a Hindi channel. edge-tts carries several
+# hundred voices and a list that long is not a choice, it is a search.
+EDGE_LOCALES = ("hi-IN", "en-IN")
+
+_VOICE_ID = re.compile(r"^(piper|edge):([A-Za-z0-9][A-Za-z0-9_.-]*)$")
+
+
+def split_voice_id(voice_id: str) -> tuple[str, str]:
+    """``("edge", "hi-IN-SwaraNeural")`` from ``"edge:hi-IN-SwaraNeural"``.
+
+    A Piper voice becomes a filename, so this is the gate that keeps a
+    chosen id from reaching the filesystem as anything but a name.
+    """
+    match = _VOICE_ID.fullmatch(voice_id or "")
+    if not match:
+        raise ValueError(f"not a voice id: {voice_id!r}")
+    return match.group(1), match.group(2)
+
+
+def _edge_hindi_voices() -> list[dict]:
+    """edge-tts's own catalogue, narrowed to the locales worth offering.
+
+    Split out so the test for "one library being unreachable" can replace
+    it without a network stub.
+    """
+    import asyncio
+
+    import edge_tts
+
+    found = asyncio.run(edge_tts.list_voices())
+    return [v for v in found
+            if str(v.get("Locale", "")).startswith(EDGE_LOCALES)]
+
+
+def available_voices(settings, *, include_edge: bool = True) -> list[dict]:
+    """Every voice this install can actually speak with.
+
+    Discovered, not listed: a model dropped into the models directory shows
+    up without a code change, and a hardcoded list is one that goes stale
+    the first time someone adds a voice.
+
+    edge-tts is reported but marked ``local: False``, because it goes to
+    Microsoft for every beat -- that is the difference that matters when
+    the network is down mid-render. If its catalogue cannot be reached the
+    local voices are still returned: losing the network should cost the
+    edge voices, not the whole control.
+    """
+    voices: list[dict] = []
+    models = Path(getattr(settings, "piper_models_dir", "") or ".")
+    try:
+        on_disk = {p.stem for p in models.glob("*.onnx")}
+    except OSError:
+        on_disk = set()
+    # Published first, in their published order, then anything else found
+    # on disk. `local` says whether it is here yet; a False one costs a
+    # download the first time it speaks, and nothing after that.
+    for name in list(PIPER_FETCHABLE) + sorted(on_disk - set(PIPER_FETCHABLE)):
+        voices.append({
+            "id": f"piper:{name}",
+            "engine": "piper",
+            "voice": name,
+            "label": name,
+            "gender": PIPER_GENDERS.get(name, ""),
+            "local": name in on_disk,
+        })
+
+    if include_edge:
+        try:
+            for entry in _edge_hindi_voices():
+                short = str(entry.get("ShortName", ""))
+                if not short:
+                    continue
+                voices.append({
+                    "id": f"edge:{short}",
+                    "engine": "edge",
+                    "voice": short,
+                    # "hi-IN-SwaraNeural" reads as a product code; the name
+                    # in the middle is what a person recognises.
+                    "label": short.split("-")[-1].replace("Neural", ""),
+                    "gender": str(entry.get("Gender", "")),
+                    "local": False,
+                })
+        except Exception as exc:                      # noqa: BLE001
+            print(f"[voice] edge-tts voices unavailable: {exc}",
+                  file=sys.stderr, flush=True)
+    return voices
+
+
 def spoken_master_path(target: str | Path) -> Path:
     """Where a beat's audio is kept as it was spoken, before any speed.
 
