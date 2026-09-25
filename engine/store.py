@@ -79,6 +79,19 @@ CREATE TABLE IF NOT EXISTS music_choices (
   source_url TEXT,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS look_choices (
+  plan_id TEXT PRIMARY KEY,
+  look_id TEXT NOT NULL,
+  font TEXT NOT NULL,
+  caption_size INTEGER NOT NULL,
+  spoken TEXT NOT NULL,
+  upcoming TEXT NOT NULL,
+  margin_v INTEGER NOT NULL,
+  punch_font TEXT NOT NULL,
+  punch_size INTEGER NOT NULL,
+  punch_animation TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS renders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   plan_id TEXT NOT NULL,
@@ -491,6 +504,51 @@ class Store:
         """Put this reel back on the shared folder. Never an error."""
         with self._conn() as conn:
             conn.execute("DELETE FROM music_choices WHERE plan_id=?",
+                         (plan_id,))
+
+    # -- the caption look -------------------------------------------------
+    def set_look_choice(self, plan_id: str, *, look_id: str, font: str,
+                        caption_size: int, spoken: str, upcoming: str,
+                        margin_v: int, punch_font: str, punch_size: int,
+                        punch_animation: str) -> None:
+        """Record the look this reel was given.
+
+        The values and not only the id: a preset can be redefined, and a
+        reel that was reviewed and approved under the old definition
+        must keep what it was reviewed with.
+        """
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO look_choices(plan_id, look_id, font, "
+                "caption_size, spoken, upcoming, margin_v, punch_font, "
+                "punch_size, punch_animation, created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(plan_id) DO UPDATE SET "
+                "look_id=excluded.look_id, font=excluded.font, "
+                "caption_size=excluded.caption_size, "
+                "spoken=excluded.spoken, upcoming=excluded.upcoming, "
+                "margin_v=excluded.margin_v, "
+                "punch_font=excluded.punch_font, "
+                "punch_size=excluded.punch_size, "
+                "punch_animation=excluded.punch_animation, "
+                "created_at=excluded.created_at",
+                (plan_id, look_id, font, caption_size, spoken, upcoming,
+                 margin_v, punch_font, punch_size, punch_animation,
+                 _now()))
+
+    def look_choice(self, plan_id: str) -> dict | None:
+        """This reel's look, or None to fall back to the default."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT look_id, font, caption_size, spoken, upcoming, "
+                "margin_v, punch_font, punch_size, punch_animation "
+                "FROM look_choices WHERE plan_id=?", (plan_id,)).fetchone()
+        return dict(row) if row else None
+
+    def clear_look_choice(self, plan_id: str) -> None:
+        """Put this reel back on the channel default. Never an error."""
+        with self._conn() as conn:
+            conn.execute("DELETE FROM look_choices WHERE plan_id=?",
                          (plan_id,))
 
     # -- dedup support ----------------------------------------------------
