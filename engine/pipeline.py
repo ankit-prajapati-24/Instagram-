@@ -20,7 +20,7 @@ No function here publishes anything, and nothing calls into
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
@@ -772,14 +772,30 @@ def render_stage(plan: ReelPlan, store, settings, *,
     counts = providers if providers is not None else clip_providers(plan)
 
     emit(PipelineEvent(Stage.CAPTIONS, "started", captions_source))
+    from engine.assembly import fonts as fonts_mod
     from engine.assembly import looks as looks_mod
 
-    look = looks_mod.resolve(getattr(settings, "look", None))
+    # The reel's own look, else the channel default, else plain.
+    look = looks_mod.from_row(store.look_choice(plan.plan_id), settings)
+    if captions_source == "voice_text":
+        # The burned caption is Devanagari on this branch, and every
+        # bundled face except Teko draws Latin only -- libass would
+        # substitute silently, which is the exact failure this feature
+        # exists to stop. Keep the configured Devanagari face, as the
+        # pipeline did before looks existed. The look's colours, margin
+        # and punch animation still apply; only the face is overridden.
+        look = replace(look, font=settings.caption_font_devanagari,
+                       punch_font=settings.caption_font_devanagari)
     ass_path = write_ass(
         plan, Path(settings.work_dir) / plan.plan_id / "captions.ass",
         source=captions_source, look=look,
         width=settings.width, height=settings.height)
-    emit(PipelineEvent(Stage.CAPTIONS, "done", Path(ass_path).name))
+    # Copied beside the .ass and named relatively: ffmpeg runs with cwd
+    # set to that directory because a Windows drive-letter colon inside
+    # a filtergraph parses as an option separator.
+    fonts_dir = fonts_mod.stage_fonts(look, Path(ass_path).parent)
+    emit(PipelineEvent(Stage.CAPTIONS, "done",
+                       f"{Path(ass_path).name} · {look.look_id}"))
 
     # The music bed. Nothing above this line knows about it and the caller
     # normally passes nothing, so this is where a clean clone gets one:
@@ -811,6 +827,7 @@ def render_stage(plan: ReelPlan, store, settings, *,
     try:
         render(plan, settings, out_path, ass_path=ass_path,
                music_path=music_path, report=used, choices=choices,
+               fonts_dir=fonts_dir,
                progress=lambda frac: emit(PipelineEvent(
                    Stage.RENDER, "info", f"{frac * 100:.0f}%")))
     except Exception as exc:
